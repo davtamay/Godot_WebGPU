@@ -1,0 +1,138 @@
+# Fork-local workflow for the WebGPU patch stack; not intended for upstream.
+# Stage 0 of the staged CI plan in docs/webgpu-testing.md.
+# No WebGPU build flag exists yet, so only stock upstream builds are exercised.
+# Re-check the Emscripten pin against upstream .github/workflows/web_builds.yml on every upstream sync.
+
+name: WebGPU stack - baseline
+
+on:
+  push:
+    branches:
+      - webgpu-stack
+      - webgpu-dev
+  pull_request:
+    branches:
+      - webgpu-stack
+  workflow_dispatch:
+
+# SIZE CONTRACT: the web-template build flags below define the size baseline.
+# Changing any of them invalidates all previously recorded WASM size deltas.
+env:
+  SCONS_CACHE: .scons_cache
+  SCONS_FLAGS: >-
+    dev_mode=yes
+    debug_symbols=no
+    use_closure_compiler=yes
+  EM_VERSION: 4.0.11
+
+jobs:
+  web-template:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Emscripten
+        uses: emscripten-core/setup-emsdk@v16
+        with:
+          version: ${{ env.EM_VERSION }}
+          no-cache: true
+
+      - name: Restore SCons cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ env.SCONS_CACHE }}
+          key: web-template-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            web-template-${{ runner.os }}-
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install scons
+          sudo apt-get update
+          sudo apt-get install -y brotli
+
+      - name: Build stock threaded web template
+        run: |
+          scons platform=web target=template_release ${{ env.SCONS_FLAGS }} threads=yes "cache_path=${{ env.SCONS_CACHE }}" redirect_build_objects=no
+
+      - name: Record WASM size
+        run: |
+          mkdir -p sizes
+          bash misc/webgpu_scripts/wasm-size.sh bin sizes/wasm-sizes.txt
+          {
+            echo "### WASM sizes"
+            echo
+            echo '```'
+            cat sizes/wasm-sizes.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save SCons cache
+        uses: actions/cache/save@v5
+        if: always()
+        with:
+          path: ${{ env.SCONS_CACHE }}
+          key: web-template-${{ runner.os }}-${{ github.sha }}
+
+      - name: Upload WASM sizes
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-sizes-${{ github.sha }}
+          path: sizes/
+
+  # Expensive (~1h cold). Disable this job if runner minutes matter; web-template is the required gate.
+  linux-editor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Restore SCons cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ env.SCONS_CACHE }}
+          key: linux-editor-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            linux-editor-${{ runner.os }}-
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install scons
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libx11-dev libxcursor-dev libxinerama-dev libgl1-mesa-dev libglu1-mesa-dev libasound2-dev libpulse-dev libudev-dev libxi-dev libxrandr-dev libwayland-dev mesa-vulkan-drivers
+
+      - name: Build Linux editor
+        run: |
+          scons platform=linuxbsd target=editor dev_mode=yes "cache_path=${{ env.SCONS_CACHE }}" redirect_build_objects=no
+
+      - name: Save SCons cache
+        uses: actions/cache/save@v5
+        if: always()
+        with:
+          path: ${{ env.SCONS_CACHE }}
+          key: linux-editor-${{ runner.os }}-${{ github.sha }}
+
+  check-stack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream base
+        run: |
+          git remote add upstream https://github.com/godotengine/godot.git
+          git fetch upstream master --depth=200
+
+      - name: Check patch boundaries
+        run: bash misc/webgpu_scripts/check-stack.sh
