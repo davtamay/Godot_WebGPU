@@ -62,6 +62,11 @@ def get_opts():
             False,
         ),
         BoolVariable("wasm_simd", "Use WebAssembly SIMD to improve CPU performance", True),
+        BoolVariable(
+            "use_rendering_device",
+            "Enable the RenderingDevice backend stack (experimental, no rendering driver yet)",
+            False,
+        ),
     ]
 
 
@@ -260,6 +265,12 @@ def configure(env: "SConsEnvironment"):
         # Disables the use of *glGetProcAddress() which is inefficient.
         # See https://emscripten.org/docs/tools_reference/settings_reference.html#gl-enable-get-proc-address
         env.Append(LINKFLAGS=["-sGL_ENABLE_GET_PROC_ADDRESS=0"])
+
+    if env["use_rendering_device"]:
+        if not env["threads"]:
+            print_error('"use_rendering_device=yes" requires "threads=yes" on the web platform.')
+            sys.exit(255)
+        env.AppendUnique(CPPDEFINES=["RD_ENABLED"])
 
     if env["javascript_eval"]:
         env.Append(CPPDEFINES=["JAVASCRIPT_EVAL_ENABLED"])
