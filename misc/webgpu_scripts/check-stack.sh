@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Enforce patch-boundary rules on every commit in upstream/master..HEAD.
+# Run from repo root (Git Bash / WSL / Linux) before every push.
+set -euo pipefail
+
+# Files any patch may add/edit freely.
+ALLOWED='^(drivers/webgpu/|platform/web/rendering_context_driver_webgpu|platform/web/js/libs/library_godot_webgpu\.js|misc/webgpu_scripts/|docs/webgpu-|\.github/workflows/web-baseline\.yml)'
+# Shared upstream files: edits allowed ONLY in commits tagged [shared].
+SHARED_OK='^(platform/web/detect\.py|platform/web/SCsub|drivers/SCsub|main/main\.cpp|servers/rendering_server\.cpp|platform/web/js/engine/)'
+
+fail=0
+for c in $(git rev-list --reverse upstream/master..HEAD); do
+  subj=$(git log -1 --format=%s "$c")
+  while IFS= read -r f; do
+    [[ "$f" =~ $ALLOWED ]] && continue
+    if [[ "$f" =~ $SHARED_OK ]]; then
+      if [[ "$subj" != *"[shared]"* ]]; then
+        echo "SHARED file '$f' in commit lacking [shared] tag: $subj"
+        fail=1
+      fi
+    else
+      echo "FORBIDDEN file '$f' touched by: $subj"
+      fail=1
+    fi
+  done < <(git diff-tree --no-commit-id --name-only -r "$c")
+done
+
+if [[ $fail -eq 0 ]]; then
+  echo "check-stack: OK ($(git rev-list --count upstream/master..HEAD) patch(es) clean)"
+fi
+exit $fail
