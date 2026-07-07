@@ -1,6 +1,7 @@
 # Fork-local workflow for the WebGPU patch stack; not intended for upstream.
-# Stage 0 of the staged CI plan in docs/webgpu-testing.md.
-# No WebGPU build flag exists yet, so only stock upstream builds are exercised.
+# Stage 0.5 of the staged CI plan in docs/webgpu-testing.md.
+# No driver exists yet: the stock leg is the size baseline, the rd leg
+# builds with use_rendering_device=yes (RD stack linked in, dormant).
 # Re-check the Emscripten pin against upstream .github/workflows/web_builds.yml on every upstream sync.
 
 name: WebGPU stack - baseline
@@ -27,8 +28,17 @@ env:
 
 jobs:
   web-template:
+    name: web-template (${{ matrix.leg }})
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - leg: stock
+            extra_flags: ""
+          - leg: rd
+            extra_flags: use_rendering_device=yes
 
     steps:
       - name: Checkout
@@ -44,9 +54,9 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ env.SCONS_CACHE }}
-          key: web-template-${{ runner.os }}-${{ github.sha }}
+          key: web-template-${{ matrix.leg }}-${{ runner.os }}-${{ github.sha }}
           restore-keys: |
-            web-template-${{ runner.os }}-
+            web-template-${{ matrix.leg }}-${{ runner.os }}-
 
       - name: Install build dependencies
         run: |
@@ -55,16 +65,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y brotli
 
-      - name: Build stock threaded web template
+      - name: Build threaded web template (${{ matrix.leg }})
         run: |
-          scons platform=web target=template_release ${{ env.SCONS_FLAGS }} threads=yes "cache_path=${{ env.SCONS_CACHE }}" redirect_build_objects=no
+          scons platform=web target=template_release ${{ env.SCONS_FLAGS }} threads=yes "cache_path=${{ env.SCONS_CACHE }}" redirect_build_objects=no ${{ matrix.extra_flags }}
 
       - name: Record WASM size
         run: |
           mkdir -p sizes
           bash misc/webgpu_scripts/wasm-size.sh bin sizes/wasm-sizes.txt
           {
-            echo "### WASM sizes"
+            echo "### WASM sizes (${{ matrix.leg }})"
             echo
             echo '```'
             cat sizes/wasm-sizes.txt
@@ -76,12 +86,12 @@ jobs:
         if: always()
         with:
           path: ${{ env.SCONS_CACHE }}
-          key: web-template-${{ runner.os }}-${{ github.sha }}
+          key: web-template-${{ matrix.leg }}-${{ runner.os }}-${{ github.sha }}
 
       - name: Upload WASM sizes
         uses: actions/upload-artifact@v7
         with:
-          name: wasm-sizes-${{ github.sha }}
+          name: wasm-sizes-${{ matrix.leg }}-${{ github.sha }}
           path: sizes/
 
   # Expensive (~1h cold). Disable this job if runner minutes matter; web-template is the required gate.
