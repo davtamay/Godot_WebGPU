@@ -7,8 +7,9 @@
 | 00 | misc: Add WebGPU patch-stack tooling, CI baseline, and docs | Workflow bootstrap; zero engine changes | 0 | n/a (fork-only) |
 | 01 | [shared] web: Add opt-in use_rendering_device SCons option | Defines RD_ENABLED on web (default off, requires threads=yes); RD stack becomes linkable, no driver | ~11 (platform/web/detect.py) | not yet |
 | 02 | [shared] drivers: Add stubbed WebGPU driver scaffold | RenderingContextDriverWebGPU + RenderingDeviceDriverWebGPU + shader-container-format stubs under drivers/webgpu/, compiled on web when use_rendering_device=yes; unreachable at runtime | 2 (drivers/SCsub) | not yet |
+| 03 | [shared] web: Add async WebGPU device pre-init to the loader | experimentalWebGPU config (default off): loader requests adapter/device before start, stashes Module.preinitializedWebGPUDevice, warns + falls back to WebGL otherwise; engine still always boots GL until 04 | ~28 engine.js, ~11 config.js, ~12 features.js | not yet |
 
-(Planned next: 03 web pre-init + fallback; 04
+(Planned next: 04
 presentation/clear; 05 resources; 06 shader translation; 07 command
 recording; 08 renderer fallbacks. NOTE: upstream already compiles
 RenderingDevice + renderer_rd unconditionally on all platforms including
@@ -21,7 +22,8 @@ patch 01 is a detect.py-only change.)
 - **Placement:** new WebGPU code only under `drivers/webgpu/`; new web glue
   as NEW files under `platform/web/`. New files are rebase-cheap; edits to
   existing files are a weekly tax.
-- **Shared files allowed** (each in its designated patch, diff <= ~20 lines,
+- **Shared files allowed** (<= ~20 lines per patch per file, only when the
+  patch's purpose requires it,
   commit tagged `[shared]` in the subject): `platform/web/detect.py`,
   `platform/web/SCsub`, `drivers/SCsub`, `main/main.cpp`,
   `servers/rendering_server.cpp`, `platform/web/js/engine/*`.
