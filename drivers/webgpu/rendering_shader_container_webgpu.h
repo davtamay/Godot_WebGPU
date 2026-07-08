@@ -54,6 +54,12 @@ public:
 	//   bindings, and each synthesized sampler lands right after its texture.
 	static const uint32_t PUSH_CONSTANT_GROUP = 0;
 	static const uint32_t PUSH_CONSTANT_BINDING = 510;
+	// Arrays of textures/samplers cannot be expressed in WGSL; each element
+	// becomes its own binding in a reserved high range (Godot's binding
+	// numbering is dense, so consecutive slots after the array's binding
+	// would collide with its neighbors).
+	static const uint32_t ARRAY_BINDING_BASE = 512;
+	static const uint32_t ARRAY_BINDING_STRIDE = 16;
 
 	// Bake-time only; when empty (runtime), only from_bytes() works.
 	String tint_path;
