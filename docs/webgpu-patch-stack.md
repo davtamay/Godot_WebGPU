@@ -11,8 +11,10 @@
 | 04 | [shared] web: Add webgpu option registering the WebGPU driver | webgpu=yes links the emdawnwebgpu port (Dawn-pinned remote port, needs network on cold builds), defines WEBGPU_ENABLED, implies use_rendering_device; "webgpu" advertised by DisplayServerWeb, boot probes the context and falls back to WebGL 2 (context still reports unavailable until 05) | ~12 detect.py, ~20 display_server_web.cpp | not yet |
 | 05 | [shared] webgpu: Implement swap chain presentation with a probe clear | Real context (device import, canvas surfaces) + driver command/swap-chain/present paths; godot_webgpu_probe() presents a cleared frame on a hidden canvas (canvases are locked to their first context type); engine still renders WebGL until textures/shaders land. drivers/webgpu now requires webgpu=yes (not just use_rendering_device) | ~4 SCsub, ~12 display_server_web.cpp | not yet |
 | 06 | webgpu: Implement the resource layer with staging uploads | Buffers (upload maps emulated via malloc shadow + wgpuQueueWriteBuffer; downloads deferred), textures + format table (uncompressed/depth/BC; ETC2/ASTC deferred), samplers (border colors degrade to clamp), copy commands, real device limits, benign timestamp/pipeline-cache stubs; probe now uploads a pattern through staging and copies it over the presented frame | 0 | not yet |
+| 07 | [shared] webgpu: Bake shaders to WGSL through Tint at export time | Real shader container (SPIR-V pre-transform: 1.3 downgrade + entry-point interface strip + push-constants -> read-only SSBO at group 0 binding 510 w/ NonWritable members; external tint via GODOT_TINT_PATH, zstd WGSL); driver shader_create_from_container (modules + bind group layouts w/ combined-sampler remap + pipeline layout); baker platform plugin registered unconditionally (first cross-platform baker; metal/d3d12 are host-gated); web export shader_baker/enabled option; coverage 90/205 mobile-renderer variants, gaps documented in webgpu-testing.md | ~8 editor_node.cpp, ~5 export_plugin.cpp, ~4 baker SCsub, ~4 drivers/SCsub | not yet |
 
-(Planned next: 07 shader translation; 08 command recording;
+(Planned next: 08 command recording;
+08.5 texture/sampler-array flattening (WGSL has no binding arrays);
 09 renderer fallbacks. Old roadmap 04 was split into 04+05 for smaller,
 independently green patches. NOTE: upstream already compiles
 RenderingDevice + renderer_rd unconditionally on all platforms including
@@ -31,7 +33,10 @@ patch 01 is a detect.py-only change.)
   `platform/web/SCsub`, `drivers/SCsub`, `main/main.cpp`,
   `servers/rendering_server.cpp`, `platform/web/js/engine/*`,
   `platform/web/display_server_web.cpp/.h` (added in patch 04: driver
-  registration has no other home).
+  registration has no other home), `editor/editor_node.cpp`,
+  `editor/shader/shader_baker/SCsub`, and
+  `platform/web/export/export_plugin.cpp/.h` (added in patch 07: shader
+  baker registration and the web export option).
 - **Never touched:** `servers/rendering/rendering_device.cpp`,
   `rendering_device_graph.*`, `shader_compiler*`, `modules/glslang`,
   existing drivers, renderer_rd scene/effects code outside the designated
