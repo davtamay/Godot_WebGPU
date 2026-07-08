@@ -67,6 +67,11 @@ def get_opts():
             "Enable the RenderingDevice backend stack (experimental, no rendering driver yet)",
             False,
         ),
+        BoolVariable(
+            "webgpu",
+            "Enable the experimental WebGPU rendering driver (implies use_rendering_device)",
+            False,
+        ),
     ]
 
 
@@ -252,6 +257,12 @@ def configure(env: "SConsEnvironment"):
         # Disables the use of *glGetProcAddress() which is inefficient.
         # See https://emscripten.org/docs/tools_reference/settings_reference.html#gl-enable-get-proc-address
         env.Append(LINKFLAGS=["-sGL_ENABLE_GET_PROC_ADDRESS=0"])
+
+    if env["webgpu"]:
+        env["use_rendering_device"] = True
+        env.AppendUnique(CPPDEFINES=["WEBGPU_ENABLED"])
+        env.Append(CCFLAGS=["--use-port=emdawnwebgpu"])
+        env.Append(LINKFLAGS=["--use-port=emdawnwebgpu"])
 
     if env["use_rendering_device"]:
         if not env["threads"]:
