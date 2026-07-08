@@ -56,20 +56,25 @@ with `shader_baker/enabled` on. The project must set
 an RD renderer (baking is inactive under --headless, which uses the dummy
 renderer).
 
-Translation coverage (baketest project, mobile renderer, 2026-07-08):
-90 of 205 shader variants bake. All remaining failures are WGSL capability
-gaps, not pipeline bugs, and are the renderer-fallback/roadmap items:
+Translation coverage (baketest project, mobile renderer, 2026-07-08,
+patch 09): ZERO Tint failures; 187 WGSL containers baked into the pck
+(container count varies run to run with the requested variant set; the
+pre-patch-09 baseline was ~96 with 115 per-stage failures). The patch 09
+compatibility passes resolved the failures mechanically -- see the
+manifest. Note the two deliberate semantic degradations, both logged in
+the pass comments: PointSize writes are stripped (point primitives render
+1px on web) and OpMemoryBarrier becomes a Workgroup control barrier
+(stronger sync, but Device-scope coherence narrows to the workgroup).
 
-| Failure class | Count | Resolution path |
-|---------------|-------|-----------------|
-| texture/sampler arrays (WGSL has no binding arrays) | 61 | dedicated array-flattening patch (blocks SceneForwardMobile + Canvas main variants) |
-| PointSize writes | 6 | strip-transform or shader variant |
-| rgb10a2 storage images | 5 | renderer-level capability fallback |
-| -inf float constants | 8 | constant rewrite transform |
-| isInf calls (WGSL lacks it) | 3 | shader variant or transform |
+Classes that translate only because the offending declaration was unused
+in the attempted variants (rgb10a2 storage images, subpass inputs in
+TonemapMobile, VRS builtins) remain untranslatable where actually used --
+that is renderer-fallback territory (roadmap patch 11), surfaced at bake
+time as a Tint error if a future variant set hits them.
 
-Partial coverage is safe today: missing variants only matter once the
-engine renders through the WebGPU driver (patch 08+).
+True binding-array USE (lightmap-enabled mobile fragments, particles SDF
+collision) translates only via dead-code paths today; the dedicated
+flattening patch (roadmap 10) makes those variants real.
 
 Pixel readback findings (recorded 2026-07-08, the hard way):
 - drawImage()/2D readback of a WebGPU canvas reads the CURRENT texture,
