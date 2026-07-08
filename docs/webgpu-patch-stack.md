@@ -7,11 +7,13 @@
 | 00 | misc: Add WebGPU patch-stack tooling, CI baseline, and docs | Workflow bootstrap; zero engine changes | 0 | n/a (fork-only) |
 | 01 | [shared] web: Add opt-in use_rendering_device SCons option | Defines RD_ENABLED on web (default off, requires threads=yes); RD stack becomes linkable, no driver | ~11 (platform/web/detect.py) | not yet |
 | 02 | [shared] drivers: Add stubbed WebGPU driver scaffold | RenderingContextDriverWebGPU + RenderingDeviceDriverWebGPU + shader-container-format stubs under drivers/webgpu/, compiled on web when use_rendering_device=yes; unreachable at runtime | 2 (drivers/SCsub) | not yet |
-| 03 | [shared] web: Add async WebGPU device pre-init to the loader | experimentalWebGPU config (default off): loader requests adapter/device before start, stashes Module.preinitializedWebGPUDevice, warns + falls back to WebGL otherwise; engine still always boots GL until 04 | ~28 engine.js, ~11 config.js, ~12 features.js | not yet |
+| 03 | [shared] web: Add async WebGPU device pre-init to the loader | experimentalWebGPU config (default off): loader requests adapter/device before start, stashes Module.preinitializedWebGPUDevice (consumed by our own glue in later patches via Module.WebGPU.importJsDevice), warns + falls back to WebGL otherwise; engine still always boots GL until 05 | ~28 engine.js, ~11 config.js, ~12 features.js | not yet |
+| 04 | [shared] web: Add webgpu option registering the WebGPU driver | webgpu=yes links the emdawnwebgpu port (Dawn-pinned remote port, needs network on cold builds), defines WEBGPU_ENABLED, implies use_rendering_device; "webgpu" advertised by DisplayServerWeb, boot probes the context and falls back to WebGL 2 (context still reports unavailable until 05) | ~12 detect.py, ~20 display_server_web.cpp | not yet |
 
-(Planned next: 04
-presentation/clear; 05 resources; 06 shader translation; 07 command
-recording; 08 renderer fallbacks. NOTE: upstream already compiles
+(Planned next: 05 canvas surface/presentation + clear screen; 06 buffers/
+textures/samplers/staging; 07 shader translation; 08 command recording;
+09 renderer fallbacks. Old roadmap 04 was split into 04+05 for smaller,
+independently green patches. NOTE: upstream already compiles
 RenderingDevice + renderer_rd unconditionally on all platforms including
 web; the per-platform RD_ENABLED define is the only gate, which is why
 patch 01 is a detect.py-only change.)
@@ -26,7 +28,9 @@ patch 01 is a detect.py-only change.)
   patch's purpose requires it,
   commit tagged `[shared]` in the subject): `platform/web/detect.py`,
   `platform/web/SCsub`, `drivers/SCsub`, `main/main.cpp`,
-  `servers/rendering_server.cpp`, `platform/web/js/engine/*`.
+  `servers/rendering_server.cpp`, `platform/web/js/engine/*`,
+  `platform/web/display_server_web.cpp/.h` (added in patch 04: driver
+  registration has no other home).
 - **Never touched:** `servers/rendering/rendering_device.cpp`,
   `rendering_device_graph.*`, `shader_compiler*`, `modules/glslang`,
   existing drivers, renderer_rd scene/effects code outside the designated
