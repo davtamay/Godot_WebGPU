@@ -53,6 +53,7 @@ static const uint32_t PROBE_SIZE = 64;
 static const uint8_t PROBE_TRIANGLE_R = 230;
 static const uint8_t PROBE_TRIANGLE_G = 51;
 static const uint8_t PROBE_TRIANGLE_B = 230;
+static const uint32_t PROBE_ARRAY_TEXTURES = 4;
 
 // Feeds hand-written WGSL through the same container the baked-shader path
 // uses, so the probe exercises shader_create_from_container and
@@ -65,6 +66,19 @@ public:
 		reflection_data.stage_count = 2;
 		reflection_data.push_constant_size = 16; // One vec4 color.
 		reflection_data.push_constant_stages_mask = 1 << RDC::SHADER_STAGE_FRAGMENT;
+		// An arrayed texture uniform the WGSL never references: it exercises
+		// the driver's binding fan-out (layout + bind group), which WebGPU
+		// validates even for bindings the shader does not use.
+		reflection_data.set_count = 1;
+		reflection_binding_set_uniforms_count.push_back(1);
+		ReflectionBindingData array_uniform;
+		array_uniform.type = RDC::UNIFORM_TYPE_TEXTURE;
+		array_uniform.binding = 0;
+		array_uniform.stages = 1 << RDC::SHADER_STAGE_FRAGMENT;
+		array_uniform.length = PROBE_ARRAY_TEXTURES;
+		array_uniform.texture_type = RDC::TEXTURE_TYPE_2D;
+		array_uniform.texture_format = RDC::DATA_FORMAT_R8G8B8A8_UNORM;
+		reflection_binding_set_uniforms_data.push_back(array_uniform);
 		reflection_shader_stages.push_back(RDC::SHADER_STAGE_VERTEX);
 		reflection_shader_stages.push_back(RDC::SHADER_STAGE_FRAGMENT);
 
@@ -258,10 +272,45 @@ extern "C" EMSCRIPTEN_KEEPALIVE int godot_webgpu_probe() {
 		}
 	}
 
+	// The triangle's set 0 carries the unreferenced texture array (fan-out
+	// coverage) and the push-constant ring entry.
+	RenderingDeviceDriver::TextureID array_textures[PROBE_ARRAY_TEXTURES];
+	RenderingDeviceDriver::UniformSetID triangle_uniform_set;
+	if (stage == 0) {
+		RenderingDeviceDriver::TextureFormat array_format;
+		array_format.format = RenderingDeviceDriver::DATA_FORMAT_R8G8B8A8_UNORM;
+		array_format.width = 4;
+		array_format.height = 4;
+		array_format.usage_bits = RenderingDeviceDriver::TEXTURE_USAGE_SAMPLING_BIT;
+		RenderingDeviceDriver::TextureView array_view;
+		array_view.format = array_format.format;
+		RenderingDeviceDriver::BoundUniform array_uniform;
+		array_uniform.type = RenderingDeviceDriver::UNIFORM_TYPE_TEXTURE;
+		array_uniform.binding = 0;
+		for (uint32_t t = 0; t < PROBE_ARRAY_TEXTURES; t++) {
+			array_textures[t] = driver->texture_create(array_format, array_view);
+			if (!array_textures[t]) {
+				stage = 14;
+				break;
+			}
+			array_uniform.ids.push_back(array_textures[t]);
+		}
+		if (stage == 0) {
+			triangle_uniform_set = driver->uniform_set_create(array_uniform, triangle_shader, 0, -1);
+			if (!triangle_uniform_set) {
+				stage = 15;
+			} else {
+				printf("WebGPU probe: uniform set OK\n");
+				fflush(stdout);
+			}
+		}
+	}
+
 	if (stage == 0) {
 		// No clear values: the swap chain pass loads the pattern frame.
 		driver->command_begin_render_pass(cmd_buffer, driver->swap_chain_get_render_pass(swap_chain), framebuffer, RenderingDeviceDriver::COMMAND_BUFFER_TYPE_PRIMARY, Rect2i(0, 0, PROBE_SIZE, PROBE_SIZE), VectorView<RenderingDeviceDriver::RenderPassClearValue>());
 		driver->command_bind_render_pipeline(cmd_buffer, triangle_pipeline);
+		driver->command_bind_render_uniform_sets(cmd_buffer, triangle_uniform_set, triangle_shader, 0, 1, 0);
 		const float triangle_color[4] = { PROBE_TRIANGLE_R / 255.0f, PROBE_TRIANGLE_G / 255.0f, PROBE_TRIANGLE_B / 255.0f, 1.0f };
 		driver->command_bind_push_constants(cmd_buffer, triangle_shader, 0, VectorView<uint32_t>((const uint32_t *)triangle_color, 4));
 		driver->command_render_draw(cmd_buffer, 3, 1, 0, 0);
@@ -301,6 +350,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE int godot_webgpu_probe() {
 		}
 	}
 
+	if (triangle_uniform_set) {
+		driver->uniform_set_free(triangle_uniform_set);
+	}
+	for (uint32_t t = 0; t < PROBE_ARRAY_TEXTURES; t++) {
+		if (array_textures[t]) {
+			driver->texture_free(array_textures[t]);
+		}
+	}
 	if (triangle_pipeline) {
 		driver->pipeline_free(triangle_pipeline);
 	}

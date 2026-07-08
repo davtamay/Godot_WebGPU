@@ -1044,6 +1044,32 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 			WGPUBindGroupLayoutEntry entry = WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT;
 			entry.binding = remapped_binding;
 			entry.visibility = _shader_stages_to_wgpu(uniform.stages);
+			if (uniform.length > 1 && (uniform.type == UNIFORM_TYPE_TEXTURE || uniform.type == UNIFORM_TYPE_IMAGE || uniform.type == UNIFORM_TYPE_SAMPLER)) {
+				// Arrayed handles fan out to one binding per element (see
+				// ARRAY_BINDING_BASE). The module may not reference them (the
+				// shader transform removes unused declarations); WebGPU allows
+				// layouts to declare bindings the shader does not use.
+				if ((uint32_t)uniform.length > RenderingShaderContainerWebGPU::ARRAY_BINDING_STRIDE) {
+					shader_free(ShaderID(shader));
+					ERR_FAIL_V_MSG(ShaderID(), vformat("Arrayed uniform at set %d binding %d has %d elements; the WebGPU driver supports at most %d.", (int)set_index, uniform.binding, uniform.length, RenderingShaderContainerWebGPU::ARRAY_BINDING_STRIDE));
+				}
+				for (uint32_t element = 0; element < (uint32_t)uniform.length; element++) {
+					WGPUBindGroupLayoutEntry element_entry = entry;
+					element_entry.binding = RenderingShaderContainerWebGPU::ARRAY_BINDING_BASE + uniform.binding * RenderingShaderContainerWebGPU::ARRAY_BINDING_STRIDE + element;
+					if (uniform.type == UNIFORM_TYPE_SAMPLER) {
+						element_entry.sampler.type = WGPUSamplerBindingType_Filtering;
+					} else if (uniform.type == UNIFORM_TYPE_TEXTURE) {
+						element_entry.texture.sampleType = _data_format_to_wgpu_sample_type(uniform.texture_format);
+						element_entry.texture.viewDimension = _texture_type_to_wgpu_view_dimension(uniform.texture_type);
+					} else {
+						element_entry.storageTexture.access = uniform.writable ? WGPUStorageTextureAccess_ReadWrite : WGPUStorageTextureAccess_ReadOnly;
+						element_entry.storageTexture.format = _data_format_to_wgpu(uniform.texture_format);
+						element_entry.storageTexture.viewDimension = _texture_type_to_wgpu_view_dimension(uniform.texture_type);
+					}
+					entries.push_back(element_entry);
+				}
+				continue;
+			}
 			switch (uniform.type) {
 				case UNIFORM_TYPE_SAMPLER:
 					entry.sampler.type = WGPUSamplerBindingType_Filtering;
@@ -1425,15 +1451,31 @@ RenderingDeviceDriver::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_cre
 		WGPUBindGroupEntry entry = WGPU_BIND_GROUP_ENTRY_INIT;
 		entry.binding = remapped_binding;
 		switch (uniform.type) {
-			case UNIFORM_TYPE_SAMPLER: {
-				ERR_FAIL_COND_V_MSG(uniform.ids.size() != 1, UniformSetID(), "Sampler arrays are not supported by WebGPU.");
-				entry.sampler = (WGPUSampler)uniform.ids[0].id;
-			} break;
+			case UNIFORM_TYPE_SAMPLER:
 			case UNIFORM_TYPE_TEXTURE:
 			case UNIFORM_TYPE_IMAGE:
 			case UNIFORM_TYPE_INPUT_ATTACHMENT: {
-				ERR_FAIL_COND_V_MSG(uniform.ids.size() != 1, UniformSetID(), "Texture arrays are not supported by WebGPU.");
-				entry.textureView = ((TextureInfo *)uniform.ids[0].id)->view;
+				if (uniform.ids.size() > 1) {
+					// Arrayed handles: one entry per element in the reserved
+					// range, mirroring the bind group layout fan-out.
+					ERR_FAIL_COND_V(uniform.ids.size() > RenderingShaderContainerWebGPU::ARRAY_BINDING_STRIDE, UniformSetID());
+					for (uint32_t element = 0; element < uniform.ids.size(); element++) {
+						WGPUBindGroupEntry element_entry = WGPU_BIND_GROUP_ENTRY_INIT;
+						element_entry.binding = RenderingShaderContainerWebGPU::ARRAY_BINDING_BASE + uniform.binding * RenderingShaderContainerWebGPU::ARRAY_BINDING_STRIDE + element;
+						if (uniform.type == UNIFORM_TYPE_SAMPLER) {
+							element_entry.sampler = (WGPUSampler)uniform.ids[element].id;
+						} else {
+							element_entry.textureView = ((TextureInfo *)uniform.ids[element].id)->view;
+						}
+						entries.push_back(element_entry);
+					}
+					continue;
+				}
+				if (uniform.type == UNIFORM_TYPE_SAMPLER) {
+					entry.sampler = (WGPUSampler)uniform.ids[0].id;
+				} else {
+					entry.textureView = ((TextureInfo *)uniform.ids[0].id)->view;
+				}
 			} break;
 			case UNIFORM_TYPE_UNIFORM_BUFFER:
 			case UNIFORM_TYPE_STORAGE_BUFFER: {
