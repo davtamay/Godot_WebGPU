@@ -107,6 +107,16 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		 */
 		experimentalVK: false,
 		/**
+		 * When enabled, the loader requests a WebGPU device before the engine
+		 * starts (experimental). The engine falls back to WebGL when WebGPU is
+		 * unavailable.
+		 *
+		 * @memberof EngineConfig
+		 * @type {boolean}
+		 * @default
+		 */
+		experimentalWebGPU: false,
+		/**
 		 * The progressive web app service worker to install.
 		 * @memberof EngineConfig
 		 * @default
@@ -265,6 +275,7 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		this.persistentPaths = parse('persistentPaths', this.persistentPaths);
 		this.persistentDrops = parse('persistentDrops', this.persistentDrops);
 		this.experimentalVK = parse('experimentalVK', this.experimentalVK);
+		this.experimentalWebGPU = parse('experimentalWebGPU', this.experimentalWebGPU);
 		this.focusCanvas = parse('focusCanvas', this.focusCanvas);
 		this.serviceWorker = parse('serviceWorker', this.serviceWorker);
 		this.gdextensionLibs = parse('gdextensionLibs', this.gdextensionLibs);

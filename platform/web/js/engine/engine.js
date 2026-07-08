@@ -61,6 +61,32 @@ const Engine = (function () {
 	};
 
 	/**
+	 * Request a WebGPU device ahead of engine start-up (async browser API) and
+	 * stash it on the runtime environment; resolves after logging the WebGL
+	 * fallback when WebGPU is unavailable.
+	 * @ignore
+	 */
+	function initWebGPUDevice(config, rtenv) {
+		if (!config.experimentalWebGPU || !navigator['gpu']) {
+			if (config.experimentalWebGPU) {
+				console.warn('WebGPU is not available in this browser; falling back to WebGL.'); // eslint-disable-line no-console
+			}
+			return Promise.resolve();
+		}
+		return navigator['gpu']['requestAdapter']().then(function (adapter) {
+			return adapter ? adapter['requestDevice']() : null;
+		}).catch(function () {
+			return null;
+		}).then(function (device) {
+			if (device) {
+				rtenv['preinitializedWebGPUDevice'] = device;
+			} else {
+				console.warn('WebGPU adapter or device request failed; falling back to WebGL.'); // eslint-disable-line no-console
+			}
+		});
+	}
+
+	/**
 	 * Safe Engine constructor, creates a new prototype for every new instance to avoid prototype pollution.
 	 * @ignore
 	 * @constructor
@@ -95,7 +121,9 @@ const Engine = (function () {
 							const cloned = new Response(response.clone().body, { 'headers': [['content-type', 'application/wasm']] });
 							Godot(me.config.getModuleConfig(loadPath, cloned)).then(function (module) {
 								const paths = me.config.persistentPaths;
-								module['initFS'](paths).then(function (err) {
+								initWebGPUDevice(me.config, module).then(function () {
+									return module['initFS'](paths);
+								}).then(function (err) {
 									me.rtenv = module;
 									if (me.config.unloadAfterInit) {
 										Engine.unload();
@@ -272,6 +300,7 @@ const Engine = (function () {
 
 	// Feature-detection utilities.
 	SafeEngine['isWebGLAvailable'] = Features.isWebGLAvailable;
+	SafeEngine['isWebGPUAvailable'] = Features.isWebGPUAvailable;
 	SafeEngine['isFetchAvailable'] = Features.isFetchAvailable;
 	SafeEngine['isSecureContext'] = Features.isSecureContext;
 	SafeEngine['isCrossOriginIsolated'] = Features.isCrossOriginIsolated;
