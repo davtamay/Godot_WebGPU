@@ -205,6 +205,9 @@
 #endif
 #endif // RD_ENABLED
 
+// Unconditional: the WebGPU shader container compiles into every editor build.
+#include "editor/shader/shader_baker/shader_baker_export_plugin_platform_webgpu.h"
+
 #ifndef PHYSICS_2D_DISABLED
 #include "servers/physics_2d/physics_server_2d.h"
 #endif // PHYSICS_2D_DISABLED
@@ -9615,6 +9618,10 @@ EditorNode::EditorNode() {
 	shader_baker_export_plugin_platform_metal.instantiate();
 	shader_baker_export_plugin->add_platform(shader_baker_export_plugin_platform_metal);
 #endif
+
+	Ref<ShaderBakerExportPluginPlatformWebGPU> shader_baker_export_plugin_platform_webgpu;
+	shader_baker_export_plugin_platform_webgpu.instantiate();
+	shader_baker_export_plugin->add_platform(shader_baker_export_plugin_platform_webgpu);
 
 	EditorExport::get_singleton()->add_export_plugin(shader_baker_export_plugin);
 #endif // RD_ENABLED
