@@ -88,6 +88,17 @@ jobs:
           path: ${{ env.SCONS_CACHE }}
           key: web-template-${{ matrix.leg }}-${{ runner.os }}-${{ github.sha }}
 
+      # Stage 1: boot the template loader headlessly, assert WebGPU pre-init
+      # feature detection and the WebGL fallback warning. Loader JS is
+      # identical across legs, so run it once on the stock leg.
+      - name: Loader smoke test
+        if: matrix.leg == 'stock'
+        run: |
+          cd platform/web
+          npm i --no-save playwright
+          npx playwright install --with-deps chromium
+          node ../../misc/webgpu_scripts/loader-smoke.mjs ../../bin
+
       - name: Upload WASM sizes
         uses: actions/upload-artifact@v7
         with:

@@ -14,6 +14,19 @@ const Features = {
 	},
 
 	/**
+	 * Check whether WebGPU is available.
+	 *
+	 * Note that this only checks for the presence of the API; requesting an
+	 * adapter or a device from it can still fail.
+	 *
+	 * @returns {boolean} If the WebGPU API is available.
+	 * @function Engine.isWebGPUAvailable
+	 */
+	isWebGPUAvailable: function () {
+		return 'gpu' in navigator;
+	},
+
+	/**
 	 * Check whether the Fetch API available and supports streaming responses.
 	 *
 	 * @returns {boolean} If the Fetch API is available and supports streaming responses.
