@@ -22,14 +22,31 @@ Prereqs: emsdk (version pinned to match upstream CI - see
 | 0 | Patch 00 | Stock web template builds; Linux editor builds; WASM sizes recorded |
 | 0.5 | Patches 01-02 | rd leg (use_rendering_device=yes) also builds, incl. the drivers/webgpu scaffold from patch 02; sizes recorded per leg; stock leg size must not move vs the Patch 00 baseline |
 | 1 | Patch 03 | Loader smoke in headless Chromium (loader-smoke.mjs): Engine.init() resolves, isWebGPUAvailable exposed, WebGL-fallback warning asserted when no WebGPU device is obtainable, no pageerror |
-| 1.5 (now) | Patch 04 | rd leg builds with webgpu=yes: emdawnwebgpu port downloads, compiles, and links; port size cost recorded |
-| 2 | Patch 05 | Browser boots exported project; WebGPU clear-color pixel test (software adapter) |
-| 3 | Patch 08 | Triangle pixel test |
+| 1.5 | Patch 04 | rd leg builds with webgpu=yes: emdawnwebgpu port downloads, compiles, and links; port size cost recorded |
+| 2 (now) | Patch 05 | WebGPU probe: _godot_webgpu_probe() runs the full driver path (device import, surface, swap chain, clear, submit) under a software adapter; hard gates = probe rc 0, success marker, no pageerror, no GPU validation error. Pixel readback is advisory in CI (see below) and strict locally on a real GPU; exported-project boot moves to stage 3 |
+| 3 | Patch 08 | Browser boots exported project; triangle pixel test |
 | 4 | Patch 09+ | Unlit-cube screenshot diff vs goldens (tolerance ~1-2%) |
 
-Software-adapter Chromium flags are version-dependent; pin Playwright and
-record working flags here when Stage 2 lands. CI runners have no GPU -
-these are smoke tests, never performance tests.
+Software-adapter Chromium flags (stage 2, recorded when it landed; they are
+version-dependent, re-verify on Playwright bumps):
+`--enable-unsafe-webgpu --use-webgpu-adapter=swiftshader --enable-features=Vulkan`.
+The probe smoke SKIPs (exit 0, with a notice in the log) when the runner's
+Chromium cannot deliver a WebGPU device - check the job log, a skip is not a
+pass. CI runners have no GPU - these are smoke tests, never performance
+tests.
+
+Pixel readback findings (recorded 2026-07-08, the hard way):
+- drawImage()/2D readback of a WebGPU canvas reads the CURRENT texture,
+  which is expired (transparent) once the frame is presented; the presented
+  frame is only observable via compositor screenshots.
+- Headless software adapters (CI) execute all GPU work correctly but do not
+  composite WebGPU canvases into screenshots, so the CI pixel check is
+  ADVISORY (logged, never fails the job). The hard CI gates are: probe
+  returns 0, success marker printed, no pageerror, no GPU validation error.
+- Strict pixel verification runs on a real GPU:
+  `PROBE_CHANNEL=chrome PROBE_REQUIRE_PIXELS=1 node misc/webgpu_scripts/loader-smoke.mjs bin probe`
+  (verified exact rgb(51,153,229) on 2026-07-08). Re-verify after driver
+  changes to the presentation path.
 
 ## Size policy
 
