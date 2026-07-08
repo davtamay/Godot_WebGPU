@@ -30,16 +30,57 @@
 
 #pragma once
 
+#include "rendering_context_driver_webgpu.h"
 #include "rendering_shader_container_webgpu.h"
 
+#include "core/templates/local_vector.h"
 #include "servers/rendering/rendering_device_driver.h"
 
-// Stub WebGPU driver: every entry point fails with ERR_UNAVAILABLE-style
-// errors until the real implementation lands. Follows the header-only stub
-// pattern of servers/rendering/dummy/rasterizer_dummy.h.
+#include <webgpu/webgpu.h>
+
+// WebGPU rendering device driver. The command recording, swap chain, and
+// presentation paths are implemented; everything else still fails with
+// ERR_UNAVAILABLE-style errors (inline stubs below) and is implemented patch
+// by patch (see docs/webgpu-patch-stack.md).
 class RenderingDeviceDriverWebGPU : public RenderingDeviceDriver {
 private:
 	static constexpr const char *UNIMPLEMENTED = "The WebGPU rendering device driver is not implemented yet.";
+
+	struct CommandBufferInfo {
+		WGPUCommandEncoder encoder = nullptr;
+		WGPUCommandBuffer command_buffer = nullptr;
+		WGPURenderPassEncoder render_pass_encoder = nullptr;
+	};
+
+	struct CommandPoolInfo {
+		CommandBufferType buffer_type = COMMAND_BUFFER_TYPE_PRIMARY;
+		LocalVector<CommandBufferInfo *> command_buffers;
+	};
+
+	struct RenderPassInfo {
+		DataFormat color_format = DATA_FORMAT_MAX;
+		bool from_swap_chain = false;
+	};
+
+	struct FramebufferInfo {
+		WGPUTextureView view = nullptr;
+		uint32_t width = 0;
+		uint32_t height = 0;
+	};
+
+	struct SwapChainInfo {
+		RenderingContextDriver::SurfaceID surface = 0;
+		WGPUTextureFormat wgpu_format = WGPUTextureFormat_BGRA8Unorm;
+		DataFormat data_format = DATA_FORMAT_B8G8R8A8_UNORM;
+		RenderPassInfo render_pass;
+		FramebufferInfo framebuffer;
+		WGPUTexture current_texture = nullptr;
+		bool configured = false;
+	};
+
+	RenderingContextDriverWebGPU *context = nullptr;
+	WGPUDevice device = nullptr;
+	WGPUQueue queue = nullptr;
 
 	MultiviewCapabilities multiview_capabilities;
 	FragmentShadingRateCapabilities fragment_shading_rate_capabilities;
@@ -48,7 +89,7 @@ private:
 	RenderingShaderContainerFormatWebGPU shader_container_format;
 
 public:
-	virtual Error initialize(uint32_t p_device_index, uint32_t p_frame_count) override { ERR_FAIL_V_MSG(ERR_UNAVAILABLE, UNIMPLEMENTED); }
+	virtual Error initialize(uint32_t p_device_index, uint32_t p_frame_count) override;
 	virtual BufferID buffer_create(uint64_t p_size, BitField<BufferUsageBits> p_usage, MemoryAllocationType p_allocation_type, uint64_t p_frames_drawn) override { ERR_FAIL_V_MSG((BufferID()), UNIMPLEMENTED); }
 	virtual bool buffer_set_texel_format(BufferID p_buffer, DataFormat p_format) override { ERR_FAIL_V_MSG(false, UNIMPLEMENTED); }
 	virtual void buffer_free(BufferID p_buffer) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
@@ -74,31 +115,31 @@ public:
 	virtual VertexFormatID vertex_format_create(Span<VertexAttribute> p_vertex_attribs, const VertexAttributeBindingsMap &p_vertex_bindings) override { ERR_FAIL_V_MSG((VertexFormatID()), UNIMPLEMENTED); }
 	virtual void vertex_format_free(VertexFormatID p_vertex_format) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual void command_pipeline_barrier(CommandBufferID p_cmd_buffer, BitField<PipelineStageBits> p_src_stages, BitField<PipelineStageBits> p_dst_stages, VectorView<MemoryAccessBarrier> p_memory_barriers, VectorView<BufferBarrier> p_buffer_barriers, VectorView<TextureBarrier> p_texture_barriers, VectorView<AccelerationStructureBarrier> p_acceleration_structure_barriers) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual FenceID fence_create() override { ERR_FAIL_V_MSG((FenceID()), UNIMPLEMENTED); }
-	virtual Error fence_wait(FenceID p_fence) override { ERR_FAIL_V_MSG(ERR_UNAVAILABLE, UNIMPLEMENTED); }
-	virtual void fence_free(FenceID p_fence) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual SemaphoreID semaphore_create() override { ERR_FAIL_V_MSG((SemaphoreID()), UNIMPLEMENTED); }
-	virtual void semaphore_free(SemaphoreID p_semaphore) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual CommandQueueFamilyID command_queue_family_get(BitField<CommandQueueFamilyBits> p_cmd_queue_family_bits, RenderingContextDriver::SurfaceID p_surface = 0) override { ERR_FAIL_V_MSG((CommandQueueFamilyID()), UNIMPLEMENTED); }
-	virtual CommandQueueID command_queue_create(CommandQueueFamilyID p_cmd_queue_family, bool p_identify_as_main_queue = false) override { ERR_FAIL_V_MSG((CommandQueueID()), UNIMPLEMENTED); }
-	virtual Error command_queue_execute_and_present(CommandQueueID p_cmd_queue, VectorView<SemaphoreID> p_wait_semaphores, VectorView<CommandBufferID> p_cmd_buffers, VectorView<SemaphoreID> p_cmd_semaphores, FenceID p_cmd_fence, VectorView<SwapChainID> p_swap_chains) override { ERR_FAIL_V_MSG(ERR_UNAVAILABLE, UNIMPLEMENTED); }
-	virtual void command_queue_free(CommandQueueID p_cmd_queue) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual CommandPoolID command_pool_create(CommandQueueFamilyID p_cmd_queue_family, CommandBufferType p_cmd_buffer_type) override { ERR_FAIL_V_MSG((CommandPoolID()), UNIMPLEMENTED); }
+	virtual FenceID fence_create() override;
+	virtual Error fence_wait(FenceID p_fence) override;
+	virtual void fence_free(FenceID p_fence) override;
+	virtual SemaphoreID semaphore_create() override;
+	virtual void semaphore_free(SemaphoreID p_semaphore) override;
+	virtual CommandQueueFamilyID command_queue_family_get(BitField<CommandQueueFamilyBits> p_cmd_queue_family_bits, RenderingContextDriver::SurfaceID p_surface = 0) override;
+	virtual CommandQueueID command_queue_create(CommandQueueFamilyID p_cmd_queue_family, bool p_identify_as_main_queue = false) override;
+	virtual Error command_queue_execute_and_present(CommandQueueID p_cmd_queue, VectorView<SemaphoreID> p_wait_semaphores, VectorView<CommandBufferID> p_cmd_buffers, VectorView<SemaphoreID> p_cmd_semaphores, FenceID p_cmd_fence, VectorView<SwapChainID> p_swap_chains) override;
+	virtual void command_queue_free(CommandQueueID p_cmd_queue) override;
+	virtual CommandPoolID command_pool_create(CommandQueueFamilyID p_cmd_queue_family, CommandBufferType p_cmd_buffer_type) override;
 	virtual bool command_pool_reset(CommandPoolID p_cmd_pool) override { ERR_FAIL_V_MSG(false, UNIMPLEMENTED); }
-	virtual void command_pool_free(CommandPoolID p_cmd_pool) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual CommandBufferID command_buffer_create(CommandPoolID p_cmd_pool) override { ERR_FAIL_V_MSG((CommandBufferID()), UNIMPLEMENTED); }
-	virtual bool command_buffer_begin(CommandBufferID p_cmd_buffer) override { ERR_FAIL_V_MSG(false, UNIMPLEMENTED); }
+	virtual void command_pool_free(CommandPoolID p_cmd_pool) override;
+	virtual CommandBufferID command_buffer_create(CommandPoolID p_cmd_pool) override;
+	virtual bool command_buffer_begin(CommandBufferID p_cmd_buffer) override;
 	virtual bool command_buffer_begin_secondary(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, uint32_t p_subpass, FramebufferID p_framebuffer) override { ERR_FAIL_V_MSG(false, UNIMPLEMENTED); }
-	virtual void command_buffer_end(CommandBufferID p_cmd_buffer) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
+	virtual void command_buffer_end(CommandBufferID p_cmd_buffer) override;
 	virtual void command_buffer_execute_secondary(CommandBufferID p_cmd_buffer, VectorView<CommandBufferID> p_secondary_cmd_buffers) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual SwapChainID swap_chain_create(RenderingContextDriver::SurfaceID p_surface) override { ERR_FAIL_V_MSG((SwapChainID()), UNIMPLEMENTED); }
-	virtual Error swap_chain_resize(CommandQueueID p_cmd_queue, SwapChainID p_swap_chain, uint32_t p_desired_framebuffer_count) override { ERR_FAIL_V_MSG(ERR_UNAVAILABLE, UNIMPLEMENTED); }
-	virtual FramebufferID swap_chain_acquire_framebuffer(CommandQueueID p_cmd_queue, SwapChainID p_swap_chain, bool &r_resize_required) override { ERR_FAIL_V_MSG((FramebufferID()), UNIMPLEMENTED); }
-	virtual RenderPassID swap_chain_get_render_pass(SwapChainID p_swap_chain) override { ERR_FAIL_V_MSG((RenderPassID()), UNIMPLEMENTED); }
-	virtual DataFormat swap_chain_get_format(SwapChainID p_swap_chain) override { ERR_FAIL_V_MSG((DataFormat()), UNIMPLEMENTED); }
+	virtual SwapChainID swap_chain_create(RenderingContextDriver::SurfaceID p_surface) override;
+	virtual Error swap_chain_resize(CommandQueueID p_cmd_queue, SwapChainID p_swap_chain, uint32_t p_desired_framebuffer_count) override;
+	virtual FramebufferID swap_chain_acquire_framebuffer(CommandQueueID p_cmd_queue, SwapChainID p_swap_chain, bool &r_resize_required) override;
+	virtual RenderPassID swap_chain_get_render_pass(SwapChainID p_swap_chain) override;
+	virtual DataFormat swap_chain_get_format(SwapChainID p_swap_chain) override;
 	virtual ColorSpace swap_chain_get_color_space(SwapChainID p_swap_chain) override { ERR_FAIL_V_MSG((ColorSpace()), UNIMPLEMENTED); }
 	virtual bool swap_chain_get_hdr_output_supported(SwapChainID p_swap_chain) override { ERR_FAIL_V_MSG(false, UNIMPLEMENTED); }
-	virtual void swap_chain_free(SwapChainID p_swap_chain) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
+	virtual void swap_chain_free(SwapChainID p_swap_chain) override;
 	virtual FramebufferID framebuffer_create(RenderPassID p_render_pass, VectorView<TextureID> p_attachments, uint32_t p_width, uint32_t p_height) override { ERR_FAIL_V_MSG((FramebufferID()), UNIMPLEMENTED); }
 	virtual void framebuffer_free(FramebufferID p_framebuffer) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual ShaderID shader_create_from_container(const Ref<RenderingShaderContainer> &p_shader_container, const Vector<ImmutableSampler> &p_immutable_samplers) override { ERR_FAIL_V_MSG((ShaderID()), UNIMPLEMENTED); }
@@ -124,8 +165,8 @@ public:
 	virtual Vector<uint8_t> pipeline_cache_serialize() override { ERR_FAIL_V_MSG((Vector<uint8_t>()), UNIMPLEMENTED); }
 	virtual RenderPassID render_pass_create(VectorView<Attachment> p_attachments, VectorView<Subpass> p_subpasses, VectorView<SubpassDependency> p_subpass_dependencies, uint32_t p_view_count, AttachmentReference p_fragment_density_map_attachment) override { ERR_FAIL_V_MSG((RenderPassID()), UNIMPLEMENTED); }
 	virtual void render_pass_free(RenderPassID p_render_pass) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void command_begin_render_pass(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, FramebufferID p_framebuffer, CommandBufferType p_cmd_buffer_type, const Rect2i &p_rect, VectorView<RenderPassClearValue> p_clear_values) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void command_end_render_pass(CommandBufferID p_cmd_buffer) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
+	virtual void command_begin_render_pass(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, FramebufferID p_framebuffer, CommandBufferType p_cmd_buffer_type, const Rect2i &p_rect, VectorView<RenderPassClearValue> p_clear_values) override;
+	virtual void command_end_render_pass(CommandBufferID p_cmd_buffer) override;
 	virtual void command_next_render_subpass(CommandBufferID p_cmd_buffer, CommandBufferType p_cmd_buffer_type) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual void command_render_set_viewport(CommandBufferID p_cmd_buffer, VectorView<Rect2i> p_viewports) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual void command_render_set_scissor(CommandBufferID p_cmd_buffer, VectorView<Rect2i> p_scissors) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
@@ -170,8 +211,8 @@ public:
 	virtual void command_begin_label(CommandBufferID p_cmd_buffer, const char *p_label_name, const Color &p_color) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual void command_end_label(CommandBufferID p_cmd_buffer) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual void command_insert_breadcrumb(CommandBufferID p_cmd_buffer, uint32_t p_data) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void begin_segment(uint32_t p_frame_index, uint32_t p_frames_drawn) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void end_segment() override { ERR_FAIL_MSG(UNIMPLEMENTED); }
+	virtual void begin_segment(uint32_t p_frame_index, uint32_t p_frames_drawn) override;
+	virtual void end_segment() override;
 	virtual void set_object_name(ObjectType p_type, ID p_driver_id, const String &p_name) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual uint64_t get_resource_native_handle(DriverResource p_type, ID p_driver_id) override { ERR_FAIL_V_MSG(0, UNIMPLEMENTED); }
 	virtual uint64_t get_total_memory_used() override { ERR_FAIL_V_MSG(0, UNIMPLEMENTED); }
@@ -186,4 +227,6 @@ public:
 	virtual String get_pipeline_cache_uuid() const override { ERR_FAIL_V_MSG((String()), UNIMPLEMENTED); }
 	virtual const Capabilities &get_capabilities() const override { return capabilities; }
 	virtual const RenderingShaderContainerFormat &get_shader_container_format() const override { return shader_container_format; }
+
+	explicit RenderingDeviceDriverWebGPU(RenderingContextDriverWebGPU *p_context);
 };
