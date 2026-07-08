@@ -49,6 +49,15 @@ private:
 	struct BufferInfo {
 		WGPUBuffer buffer = nullptr;
 		uint64_t size = 0;
+		// Dynamic (persistently mapped) buffers hold one slice per frame in
+		// flight; binds select the slice with a dynamic offset of
+		// frame_idx * slice_stride (stride is alignment-padded, the binding
+		// window keeps the requested size).
+		bool dynamic = false;
+		uint64_t slice_size = 0;
+		uint64_t slice_stride = 0;
+		uint32_t slice_count = 1;
+		uint32_t frame_idx = 0;
 		// CPU-visible buffers keep a malloc'd shadow: WebGPU has no
 		// synchronous map, so buffer_map() returns the shadow and
 		// buffer_unmap() flushes it with wgpuQueueWriteBuffer (which executes
@@ -97,6 +106,7 @@ private:
 		// records after binding uniform sets.
 		const ShaderInfo *current_shader = nullptr;
 		UniformSetInfo *pending_bind_groups[MAX_BIND_GROUPS] = {};
+		LocalVector<uint32_t> pending_dynamic_offsets[MAX_BIND_GROUPS];
 		uint32_t push_constant_offset = 0;
 		bool bind_groups_dirty = false;
 	};
@@ -133,6 +143,9 @@ private:
 
 	struct UniformSetInfo {
 		WGPUBindGroup bind_group = nullptr;
+		// Dynamic buffers in binding order; their offsets are decoded from
+		// the packed mask at bind time.
+		LocalVector<BufferInfo *> dynamic_buffers;
 		// True when the group carries the push-constant ring buffer entry and
 		// therefore needs the current dynamic offset when bound.
 		bool has_push_constant_offset = false;
@@ -158,6 +171,7 @@ private:
 	WGPUDevice device = nullptr;
 	WGPUQueue queue = nullptr;
 	WGPULimits device_limits = {};
+	uint32_t frame_count = 1;
 
 	// Push-constant ring: values are written into a shadow at 256-aligned
 	// offsets and flushed with one wgpuQueueWriteBuffer before submission;
@@ -184,8 +198,9 @@ public:
 	virtual uint64_t buffer_get_allocation_size(BufferID p_buffer) override;
 	virtual uint8_t *buffer_map(BufferID p_buffer) override;
 	virtual void buffer_unmap(BufferID p_buffer) override;
-	virtual uint8_t *buffer_persistent_map_advance(BufferID p_buffer, uint64_t p_frames_drawn) override { ERR_FAIL_V_MSG(nullptr, UNIMPLEMENTED); }
-	virtual uint64_t buffer_get_dynamic_offsets(Span<BufferID> p_buffers) override { ERR_FAIL_V_MSG(0, UNIMPLEMENTED); }
+	virtual uint8_t *buffer_persistent_map_advance(BufferID p_buffer, uint64_t p_frames_drawn) override;
+	virtual void buffer_flush(BufferID p_buffer) override;
+	virtual uint64_t buffer_get_dynamic_offsets(Span<BufferID> p_buffers) override;
 	virtual uint64_t buffer_get_device_address(BufferID p_buffer) override { ERR_FAIL_V_MSG(0, UNIMPLEMENTED); }
 	virtual TextureID texture_create(const TextureFormat &p_format, const TextureView &p_view) override;
 	virtual TextureID texture_create_from_extension(uint64_t p_native_texture, TextureType p_type, DataFormat p_format, uint32_t p_array_layers, bool p_depth_stencil, uint32_t p_mipmaps) override;
@@ -237,7 +252,7 @@ public:
 	virtual void shader_destroy_modules(ShaderID p_shader) override;
 	virtual UniformSetID uniform_set_create(VectorView<BoundUniform> p_uniforms, ShaderID p_shader, uint32_t p_set_index, int p_linear_pool_index) override;
 	virtual void uniform_set_free(UniformSetID p_uniform_set) override;
-	virtual uint32_t uniform_sets_get_dynamic_offsets(VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count) const override { ERR_FAIL_V_MSG(0, UNIMPLEMENTED); }
+	virtual uint32_t uniform_sets_get_dynamic_offsets(VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count) const override;
 	virtual void command_uniform_set_prepare_for_use(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) override {}
 	virtual void command_clear_buffer(CommandBufferID p_cmd_buffer, BufferID p_buffer, uint64_t p_offset, uint64_t p_size) override;
 	virtual void command_copy_buffer(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, BufferID p_dst_buffer, VectorView<BufferCopyRegion> p_regions) override;

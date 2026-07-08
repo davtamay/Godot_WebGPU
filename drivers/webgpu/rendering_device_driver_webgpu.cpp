@@ -53,6 +53,8 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 		ERR_FAIL_V_MSG(ERR_CANT_CREATE, "Failed to query WebGPU device limits.");
 	}
 
+	frame_count = MAX(1u, p_frame_count);
+
 	WGPUBufferDescriptor pc_desc = WGPU_BUFFER_DESCRIPTOR_INIT;
 	pc_desc.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
 	pc_desc.size = PUSH_CONSTANT_RING_SIZE;
@@ -165,6 +167,7 @@ bool RenderingDeviceDriverWebGPU::command_buffer_begin(CommandBufferID p_cmd_buf
 	cb_info->push_constant_offset = 0;
 	for (uint32_t i = 0; i < MAX_BIND_GROUPS; i++) {
 		cb_info->pending_bind_groups[i] = nullptr;
+		cb_info->pending_dynamic_offsets[i].clear();
 	}
 	return true;
 }
@@ -230,6 +233,7 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 	cb_info->bind_groups_dirty = false;
 	for (uint32_t i = 0; i < MAX_BIND_GROUPS; i++) {
 		cb_info->pending_bind_groups[i] = nullptr;
+		cb_info->pending_dynamic_offsets[i].clear();
 	}
 }
 
@@ -520,7 +524,6 @@ static uint32_t _data_format_texel_size(RenderingDeviceCommons::DataFormat p_for
 
 RenderingDeviceDriver::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint64_t p_size, BitField<BufferUsageBits> p_usage, MemoryAllocationType p_allocation_type, uint64_t p_frames_drawn) {
 	ERR_FAIL_COND_V_MSG(p_usage.has_flag(BUFFER_USAGE_TEXEL_BIT), BufferID(), "Texel buffers are not supported by WebGPU.");
-	ERR_FAIL_COND_V_MSG(p_usage.has_flag(BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT), BufferID(), "Persistently mapped buffers are not supported by the WebGPU driver.");
 	ERR_FAIL_COND_V_MSG(p_usage.has_flag(BUFFER_USAGE_DEVICE_ADDRESS_BIT), BufferID(), "Buffer device addresses are not supported by WebGPU.");
 
 	WGPUBufferUsage usage = WGPUBufferUsage_None;
@@ -550,15 +553,36 @@ RenderingDeviceDriver::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint6
 		usage |= WGPUBufferUsage_CopyDst;
 	}
 
+	const bool dynamic = p_usage.has_flag(BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT);
+	uint64_t alloc_size = p_size;
+	uint64_t slice_stride = 0;
+	if (dynamic) {
+		// One slice per frame in flight; dynamic offsets must be multiples of
+		// the offset alignment, so the stride is padded.
+		const uint64_t alignment = MAX(device_limits.minUniformBufferOffsetAlignment, device_limits.minStorageBufferOffsetAlignment);
+		slice_stride = (p_size + alignment - 1) & ~(alignment - 1);
+		alloc_size = slice_stride * frame_count;
+		usage |= WGPUBufferUsage_CopyDst; // The shadow flush uses wgpuQueueWriteBuffer.
+	}
+
 	WGPUBufferDescriptor buffer_desc = WGPU_BUFFER_DESCRIPTOR_INIT;
 	buffer_desc.usage = usage;
-	buffer_desc.size = p_size;
+	buffer_desc.size = alloc_size;
 	WGPUBuffer wgpu_buffer = wgpuDeviceCreateBuffer(device, &buffer_desc);
 	ERR_FAIL_NULL_V(wgpu_buffer, BufferID());
 
 	BufferInfo *buffer = memnew(BufferInfo);
 	buffer->buffer = wgpu_buffer;
-	buffer->size = p_size;
+	buffer->size = alloc_size;
+	if (dynamic) {
+		buffer->dynamic = true;
+		buffer->slice_size = p_size;
+		buffer->slice_stride = slice_stride;
+		buffer->slice_count = frame_count;
+		buffer->shadow = (uint8_t *)memalloc(alloc_size);
+		memset(buffer->shadow, 0, alloc_size);
+		return BufferID(buffer);
+	}
 	if (p_allocation_type == MEMORY_ALLOCATION_TYPE_CPU) {
 		buffer->shadow = (uint8_t *)memalloc(p_size);
 	}
@@ -578,7 +602,53 @@ uint64_t RenderingDeviceDriverWebGPU::buffer_get_allocation_size(BufferID p_buff
 	return ((BufferInfo *)p_buffer.id)->size;
 }
 
+uint8_t *RenderingDeviceDriverWebGPU::buffer_persistent_map_advance(BufferID p_buffer, uint64_t p_frames_drawn) {
+	BufferInfo *buffer = (BufferInfo *)p_buffer.id;
+	ERR_FAIL_COND_V_MSG(!buffer->dynamic, nullptr, "Buffer must have BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT. Use buffer_map() instead.");
+	buffer->frame_idx = (buffer->frame_idx + 1u) % buffer->slice_count;
+	return buffer->shadow + buffer->frame_idx * buffer->slice_stride;
+}
+
+void RenderingDeviceDriverWebGPU::buffer_flush(BufferID p_buffer) {
+	const BufferInfo *buffer = (const BufferInfo *)p_buffer.id;
+	ERR_FAIL_COND(!buffer->dynamic);
+	// Executes before any subsequently submitted command buffer, matching the
+	// staging shadow semantics in buffer_unmap().
+	const uint64_t offset = buffer->frame_idx * buffer->slice_stride;
+	wgpuQueueWriteBuffer(queue, buffer->buffer, offset, buffer->shadow + offset, buffer->slice_stride);
+}
+
+uint64_t RenderingDeviceDriverWebGPU::buffer_get_dynamic_offsets(Span<BufferID> p_buffers) {
+	uint64_t mask = 0u;
+	uint64_t shift = 0u;
+	for (const BufferID &buffer_id : p_buffers) {
+		const BufferInfo *buffer = (const BufferInfo *)buffer_id.id;
+		if (!buffer->dynamic) {
+			continue;
+		}
+		// Two bits per buffer: the frame count never exceeds 4.
+		mask |= uint64_t(buffer->frame_idx) << shift;
+		shift += 2UL;
+	}
+	return mask;
+}
+
+uint32_t RenderingDeviceDriverWebGPU::uniform_sets_get_dynamic_offsets(VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count) const {
+	uint32_t mask = 0u;
+	uint32_t shift = 0u;
+	for (uint32_t i = 0; i < p_set_count; i++) {
+		const UniformSetInfo *uniform_set = (const UniformSetInfo *)p_uniform_sets[i].id;
+		for (const BufferInfo *dynamic_buffer : uniform_set->dynamic_buffers) {
+			// Four bits per buffer, decoded in command_bind_*_uniform_sets.
+			mask |= dynamic_buffer->frame_idx << shift;
+			shift += 4u;
+		}
+	}
+	return mask;
+}
+
 uint8_t *RenderingDeviceDriverWebGPU::buffer_map(BufferID p_buffer) {
+	ERR_FAIL_COND_V_MSG(((BufferInfo *)p_buffer.id)->dynamic, nullptr, "Use buffer_persistent_map_advance() for dynamic buffers.");
 	BufferInfo *buffer = (BufferInfo *)p_buffer.id;
 	ERR_FAIL_NULL_V_MSG(buffer->shadow, nullptr, "Only CPU (upload) buffers can be mapped by the WebGPU driver; downloads are not supported yet.");
 	return buffer->shadow;
@@ -1087,6 +1157,14 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 				case UNIFORM_TYPE_UNIFORM_BUFFER:
 					entry.buffer.type = WGPUBufferBindingType_Uniform;
 					break;
+				case UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC:
+					entry.buffer.type = WGPUBufferBindingType_Uniform;
+					entry.buffer.hasDynamicOffset = true;
+					break;
+				case UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC:
+					entry.buffer.type = uniform.writable ? WGPUBufferBindingType_Storage : WGPUBufferBindingType_ReadOnlyStorage;
+					entry.buffer.hasDynamicOffset = true;
+					break;
 				case UNIFORM_TYPE_STORAGE_BUFFER:
 					entry.buffer.type = uniform.writable ? WGPUBufferBindingType_Storage : WGPUBufferBindingType_ReadOnlyStorage;
 					break;
@@ -1443,6 +1521,7 @@ RenderingDeviceDriver::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_cre
 	const ShaderInfo *shader = (const ShaderInfo *)p_shader.id;
 	ERR_FAIL_COND_V(p_set_index >= shader->bind_group_layouts.size(), UniformSetID());
 
+	UniformSetInfo *uniform_set = memnew(UniformSetInfo);
 	LocalVector<WGPUBindGroupEntry> entries;
 	uint32_t combined_before = 0;
 	for (uint32_t i = 0; i < p_uniforms.size(); i++) {
@@ -1458,7 +1537,10 @@ RenderingDeviceDriver::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_cre
 				if (uniform.ids.size() > 1) {
 					// Arrayed handles: one entry per element in the reserved
 					// range, mirroring the bind group layout fan-out.
-					ERR_FAIL_COND_V(uniform.ids.size() > RenderingShaderContainerWebGPU::ARRAY_BINDING_STRIDE, UniformSetID());
+					if (uniform.ids.size() > RenderingShaderContainerWebGPU::ARRAY_BINDING_STRIDE) {
+						memdelete(uniform_set);
+						ERR_FAIL_V(UniformSetID());
+					}
 					for (uint32_t element = 0; element < uniform.ids.size(); element++) {
 						WGPUBindGroupEntry element_entry = WGPU_BIND_GROUP_ENTRY_INIT;
 						element_entry.binding = RenderingShaderContainerWebGPU::ARRAY_BINDING_BASE + uniform.binding * RenderingShaderContainerWebGPU::ARRAY_BINDING_STRIDE + element;
@@ -1482,6 +1564,14 @@ RenderingDeviceDriver::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_cre
 				entry.buffer = ((BufferInfo *)uniform.ids[0].id)->buffer;
 				entry.size = WGPU_WHOLE_SIZE;
 			} break;
+			case UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC:
+			case UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC: {
+				BufferInfo *buffer = (BufferInfo *)uniform.ids[0].id;
+				ERR_FAIL_COND_V_MSG(!buffer->dynamic, UniformSetID(), "Dynamic uniforms require buffers created with BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT.");
+				entry.buffer = buffer->buffer;
+				entry.size = buffer->slice_size;
+				uniform_set->dynamic_buffers.push_back(buffer);
+			} break;
 			case UNIFORM_TYPE_SAMPLER_WITH_TEXTURE: {
 				ERR_FAIL_COND_V_MSG(uniform.ids.size() != 2, UniformSetID(), "Combined sampler arrays are not supported by WebGPU.");
 				// ids are [sampler, texture] pairs; the split remap places the
@@ -1496,12 +1586,12 @@ RenderingDeviceDriver::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_cre
 				continue;
 			} break;
 			default:
+				memdelete(uniform_set);
 				ERR_FAIL_V_MSG(UniformSetID(), vformat("Unsupported uniform type %d on the WebGPU driver.", uniform.type));
 		}
 		entries.push_back(entry);
 	}
 
-	UniformSetInfo *uniform_set = memnew(UniformSetInfo);
 	if (shader->push_constant_size > 0 && p_set_index == RenderingShaderContainerWebGPU::PUSH_CONSTANT_GROUP) {
 		WGPUBindGroupEntry pc_entry = WGPU_BIND_GROUP_ENTRY_INIT;
 		pc_entry.binding = RenderingShaderContainerWebGPU::PUSH_CONSTANT_BINDING;
@@ -1552,12 +1642,21 @@ void RenderingDeviceDriverWebGPU::_flush_bind_groups(CommandBufferInfo *p_cb_inf
 		if (bind_group == nullptr) {
 			continue;
 		}
-		const bool wants_offset = set != nullptr ? set->has_push_constant_offset : true;
-		const uint32_t dynamic_offset = p_cb_info->push_constant_offset;
+		// WebGPU wants dynamic offsets ordered by binding number: dynamic
+		// buffers sit at their (low) shader bindings, the push-constant ring
+		// entry at the reserved high binding, so it goes last.
+		LocalVector<uint32_t> offsets;
+		for (const uint32_t offset : p_cb_info->pending_dynamic_offsets[i]) {
+			offsets.push_back(offset);
+		}
+		const bool wants_push_constant = set != nullptr ? set->has_push_constant_offset : true;
+		if (wants_push_constant) {
+			offsets.push_back(p_cb_info->push_constant_offset);
+		}
 		if (p_cb_info->render_pass_encoder != nullptr) {
-			wgpuRenderPassEncoderSetBindGroup(p_cb_info->render_pass_encoder, i, bind_group, wants_offset ? 1 : 0, wants_offset ? &dynamic_offset : nullptr);
+			wgpuRenderPassEncoderSetBindGroup(p_cb_info->render_pass_encoder, i, bind_group, offsets.size(), offsets.is_empty() ? nullptr : offsets.ptr());
 		} else if (p_cb_info->compute_pass_encoder != nullptr) {
-			wgpuComputePassEncoderSetBindGroup(p_cb_info->compute_pass_encoder, i, bind_group, wants_offset ? 1 : 0, wants_offset ? &dynamic_offset : nullptr);
+			wgpuComputePassEncoderSetBindGroup(p_cb_info->compute_pass_encoder, i, bind_group, offsets.size(), offsets.is_empty() ? nullptr : offsets.ptr());
 		}
 	}
 	p_cb_info->bind_groups_dirty = false;
@@ -1584,11 +1683,18 @@ void RenderingDeviceDriverWebGPU::command_bind_render_pipeline(CommandBufferID p
 
 void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBufferID p_cmd_buffer, VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count, uint32_t p_dynamic_offsets) {
 	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
-	ERR_FAIL_COND_MSG(p_dynamic_offsets != 0, "Dynamic uniform buffers are not supported by the WebGPU driver yet.");
+	uint32_t shift = 0;
 	for (uint32_t i = 0; i < p_set_count; i++) {
 		const uint32_t set_index = p_first_set_index + i;
 		ERR_FAIL_COND(set_index >= MAX_BIND_GROUPS);
-		cb_info->pending_bind_groups[set_index] = (UniformSetInfo *)p_uniform_sets[i].id;
+		UniformSetInfo *uniform_set = (UniformSetInfo *)p_uniform_sets[i].id;
+		cb_info->pending_bind_groups[set_index] = uniform_set;
+		cb_info->pending_dynamic_offsets[set_index].clear();
+		for (const BufferInfo *dynamic_buffer : uniform_set->dynamic_buffers) {
+			const uint32_t frame_idx = (p_dynamic_offsets >> shift) & 0xFu;
+			shift += 4u;
+			cb_info->pending_dynamic_offsets[set_index].push_back(uint32_t(frame_idx * dynamic_buffer->slice_stride));
+		}
 	}
 	cb_info->bind_groups_dirty = true;
 }
