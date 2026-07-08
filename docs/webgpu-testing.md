@@ -27,7 +27,8 @@ Prereqs: emsdk (version pinned to match upstream CI - see
 | 2.5 | Patch 06 | Probe additionally uploads a 64x64 pattern through the staging path (shadow map -> queue write -> buffer-to-texture -> texture-to-texture into the acquired frame); Dawn validates every copy (gpu-error hard gate), strict local pixel check asserts the pattern color |
 | 2.7 | Patch 07 | Probe additionally creates a WGSL shader module containing an override (marker hard-gated, Dawn-validated); shader BAKING is verified locally only (tint is not on CI runners) - see the Shader baking section |
 | 3 | Patch 08 | Probe drives a full draw through the real path (WGSL container -> shader_create_from_container -> render_pipeline_create -> push constants -> draw): triangle composited over the pattern frame. Hard gates: "triangle OK" marker + rc 0 + no gpu errors; strict local pixels = pattern rgb(230,102,26) at the corner AND triangle rgb(230,51,230) at the center |
-| 3.5 (now) | Patch 10 | Probe's triangle set 0 additionally carries a 4-element texture array the WGSL never references: Dawn validates the fanned-out bind group against the fanned-out layout ("uniform set OK" marker hard-gated) |
+| 3.5 | Patch 10 | Probe's triangle set 0 additionally carries a 4-element texture array the WGSL never references: Dawn validates the fanned-out bind group against the fanned-out layout ("uniform set OK" marker hard-gated) |
+| 3.7 (now) | Patch 11 | The triangle's color multiplies in a tint from the advanced slice of a dynamic uniform buffer ("dynamic buffer OK" marker hard-gated); a wrong dynamic offset selects the zeroed slice and fails the strict local pixel check |
 | 4 | Patch 11+ | Browser boots exported project; unlit-cube screenshot diff vs goldens (tolerance ~1-2%) |
 
 Software-adapter Chromium flags (stage 2, recorded when it landed; they are
