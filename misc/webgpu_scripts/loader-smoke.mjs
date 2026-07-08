@@ -291,6 +291,9 @@ async function runProbe(browser, base) {
 	if (!consoleMessages.some((m) => m.includes('WebGPU probe: uniform set OK'))) {
 		fail('[probe] uniform set marker not found in console output');
 	}
+	if (!consoleMessages.some((m) => m.includes('WebGPU probe: dynamic buffer OK'))) {
+		fail('[probe] dynamic buffer marker not found in console output');
+	}
 
 	// Read back the presented pixels via a compositor screenshot. A 2D
 	// drawImage of a WebGPU canvas reads the CURRENT texture, which is
