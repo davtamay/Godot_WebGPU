@@ -21,10 +21,11 @@ Prereqs: emsdk (version pinned to match upstream CI - see
 |-------|------------|-------|
 | 0 | Patch 00 | Stock web template builds; Linux editor builds; WASM sizes recorded |
 | 0.5 | Patches 01-02 | rd leg (use_rendering_device=yes) also builds, incl. the drivers/webgpu scaffold from patch 02; sizes recorded per leg; stock leg size must not move vs the Patch 00 baseline |
-| 1 (now) | Patch 03 | Loader smoke in headless Chromium (loader-smoke.mjs): Engine.init() resolves, isWebGPUAvailable exposed, WebGL-fallback warning asserted when no WebGPU device is obtainable, no pageerror |
-| 2 | Patch 04 | Browser boots exported project; WebGPU clear-color pixel test (software adapter) |
-| 3 | Patch 07 | Triangle pixel test |
-| 4 | Patch 08+ | Unlit-cube screenshot diff vs goldens (tolerance ~1-2%) |
+| 1 | Patch 03 | Loader smoke in headless Chromium (loader-smoke.mjs): Engine.init() resolves, isWebGPUAvailable exposed, WebGL-fallback warning asserted when no WebGPU device is obtainable, no pageerror |
+| 1.5 (now) | Patch 04 | rd leg builds with webgpu=yes: emdawnwebgpu port downloads, compiles, and links; port size cost recorded |
+| 2 | Patch 05 | Browser boots exported project; WebGPU clear-color pixel test (software adapter) |
+| 3 | Patch 08 | Triangle pixel test |
+| 4 | Patch 09+ | Unlit-cube screenshot diff vs goldens (tolerance ~1-2%) |
 
 Software-adapter Chromium flags are version-dependent; pin Playwright and
 record working flags here when Stage 2 lands. CI runners have no GPU -
