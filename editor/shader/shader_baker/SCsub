@@ -11,3 +11,12 @@ if env["d3d12"]:
 
 if env["metal"]:
     env.add_source_files(env.editor_sources, "shader_baker_export_plugin_platform_metal.cpp")
+
+# Always available so any editor can bake web exports. The WebGPU shader
+# container compiles here, next to its consumer (in web driver builds it is
+# part of drivers/webgpu instead): it has no webgpu.h dependency, and putting
+# it in libdrivers would strand its symbols behind static link order on
+# platforms without the WebGPU driver.
+env.add_source_files(env.editor_sources, "shader_baker_export_plugin_platform_webgpu.cpp")
+if not (env["platform"] == "web" and env.get("webgpu")):
+    env.add_source_files(env.editor_sources, "#drivers/webgpu/rendering_shader_container_webgpu.cpp")
