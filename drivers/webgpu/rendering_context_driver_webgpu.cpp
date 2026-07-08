@@ -32,9 +32,22 @@
 
 #include "rendering_device_driver_webgpu.h"
 
+#ifdef WEBGPU_ENABLED
+#include <webgpu/webgpu.h>
+#endif
+
 static constexpr const char *UNIMPLEMENTED = "The WebGPU rendering context driver is not implemented yet.";
 
 Error RenderingContextDriverWebGPU::initialize() {
+#ifdef WEBGPU_ENABLED
+	// Probe the API so the emdawnwebgpu port is linked and exercised; surface
+	// and presentation support land in later patches, so still report the
+	// context as unavailable.
+	WGPUInstance instance = wgpuCreateInstance(nullptr);
+	if (instance != nullptr) {
+		wgpuInstanceRelease(instance);
+	}
+#endif
 	ERR_FAIL_V_MSG(ERR_UNAVAILABLE, UNIMPLEMENTED);
 }
 
