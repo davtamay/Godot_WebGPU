@@ -32,13 +32,36 @@
 
 #include "servers/rendering/rendering_context_driver.h"
 
-// Stub WebGPU context driver: reports no devices and fails to initialize
-// until the real implementation lands. Not reachable from any display
-// server yet.
+#include <webgpu/webgpu.h>
+
+// WebGPU context driver. Creation is synchronous because the loader acquires
+// the GPUDevice asynchronously before the engine starts (see
+// platform/web/js/engine/engine.js) and stashes it on the Emscripten module;
+// initialize() imports that device. Surfaces are HTML canvases addressed by
+// CSS selector; a canvas is permanently locked to its first context type, so
+// a WebGPU surface can never be created on a canvas that was used for WebGL.
 class RenderingContextDriverWebGPU : public RenderingContextDriver {
-	Device device; // Placeholder; adapter enumeration arrives with the real implementation.
+	struct Surface {
+		WGPUSurface wgpu_surface = nullptr;
+		uint32_t width = 0;
+		uint32_t height = 0;
+		DisplayServerEnums::VSyncMode vsync_mode = DisplayServerEnums::VSYNC_ENABLED;
+		bool needs_resize = true;
+	};
+
+	WGPUInstance instance = nullptr;
+	WGPUDevice device = nullptr;
+	Device device_info;
 
 public:
+	struct WindowPlatformData {
+		const char *canvas_selector = nullptr;
+	};
+
+	WGPUInstance get_instance() const { return instance; }
+	WGPUDevice get_device() const { return device; }
+	WGPUSurface get_wgpu_surface(SurfaceID p_surface) const { return ((Surface *)p_surface)->wgpu_surface; }
+
 	virtual Error initialize() override;
 	virtual const Device &device_get(uint32_t p_device_index) const override;
 	virtual uint32_t device_get_count() const override;
@@ -64,4 +87,6 @@ public:
 	virtual bool surface_get_needs_resize(SurfaceID p_surface) const override;
 	virtual void surface_destroy(SurfaceID p_surface) override;
 	virtual bool is_debug_utils_enabled() const override;
+
+	virtual ~RenderingContextDriverWebGPU() override;
 };
