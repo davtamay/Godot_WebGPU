@@ -179,6 +179,30 @@ extern "C" EMSCRIPTEN_KEEPALIVE int godot_webgpu_probe() {
 		}
 	}
 
+	// Validate WGSL shader module creation (including an override, the WGSL
+	// form of specialization constants). Uses the WebGPU API directly: the
+	// driver-level path needs a baked shader container, which only exists in
+	// exported projects (see docs/webgpu-testing.md).
+	if (stage == 0) {
+		static const char *probe_wgsl =
+				"@id(0) override probe_flag : bool = false;\n"
+				"@fragment fn main() -> @location(0) vec4f {\n"
+				"    return select(vec4f(0.0), vec4f(1.0), probe_flag);\n"
+				"}\n";
+		WGPUShaderSourceWGSL wgsl_source = WGPU_SHADER_SOURCE_WGSL_INIT;
+		wgsl_source.code = { probe_wgsl, WGPU_STRLEN };
+		WGPUShaderModuleDescriptor module_desc = WGPU_SHADER_MODULE_DESCRIPTOR_INIT;
+		module_desc.nextInChain = &wgsl_source.chain;
+		WGPUShaderModule module = wgpuDeviceCreateShaderModule(context->get_device(), &module_desc);
+		if (module == nullptr) {
+			stage = 11;
+		} else {
+			wgpuShaderModuleRelease(module);
+			printf("WebGPU probe: shader module OK\n");
+			fflush(stdout);
+		}
+	}
+
 	if (staging) {
 		driver->buffer_free(staging);
 	}
