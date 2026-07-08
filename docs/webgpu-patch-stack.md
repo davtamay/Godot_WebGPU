@@ -6,8 +6,9 @@
 |---|---------|---------|--------------|-------------|
 | 00 | misc: Add WebGPU patch-stack tooling, CI baseline, and docs | Workflow bootstrap; zero engine changes | 0 | n/a (fork-only) |
 | 01 | [shared] web: Add opt-in use_rendering_device SCons option | Defines RD_ENABLED on web (default off, requires threads=yes); RD stack becomes linkable, no driver | ~11 (platform/web/detect.py) | not yet |
+| 02 | [shared] drivers: Add stubbed WebGPU driver scaffold | RenderingContextDriverWebGPU + RenderingDeviceDriverWebGPU + shader-container-format stubs under drivers/webgpu/, compiled on web when use_rendering_device=yes; unreachable at runtime | 2 (drivers/SCsub) | not yet |
 
-(Planned next: 02 driver scaffold; 03 web pre-init + fallback; 04
+(Planned next: 03 web pre-init + fallback; 04
 presentation/clear; 05 resources; 06 shader translation; 07 command
 recording; 08 renderer fallbacks. NOTE: upstream already compiles
 RenderingDevice + renderer_rd unconditionally on all platforms including

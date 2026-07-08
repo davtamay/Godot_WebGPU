@@ -18,7 +18,7 @@ Prereqs: emsdk (version pinned to match upstream CI - see
 | Stage | Lands with | Gates |
 |-------|------------|-------|
 | 0 | Patch 00 | Stock web template builds; Linux editor builds; WASM sizes recorded |
-| 0.5 (now) | Patch 01 | rd leg (use_rendering_device=yes) also builds; sizes recorded per leg; stock leg size must not move vs the Patch 00 baseline |
+| 0.5 (now) | Patches 01-02 | rd leg (use_rendering_device=yes) also builds, incl. the drivers/webgpu scaffold from patch 02; sizes recorded per leg; stock leg size must not move vs the Patch 00 baseline |
 | 1 | Patch 03 | Browser boots exported project; WebGL fallback log asserted; no pageerror |
 | 2 | Patch 04 | WebGPU clear-color pixel test (software adapter) |
 | 3 | Patch 07 | Triangle pixel test |
