@@ -66,6 +66,7 @@ const PROBE_CHROMIUM_FLAGS = ['--enable-unsafe-webgpu', '--use-webgpu-adapter=sw
 // pattern uploaded through the staging path and copied over the cleared
 // frame.
 const PROBE_RGB = [230, 102, 26];
+const TRIANGLE_RGB = [230, 51, 230];
 const PROBE_TOLERANCE = 12;
 
 const probePage = `<!DOCTYPE html>
@@ -188,11 +189,18 @@ async function runScenario(browser, base, scenario) {
 	await page.close();
 }
 
-// Minimal PNG decode of the first pixel: for the first pixel of the first
-// row every PNG filter degrades to the raw value (no left/up neighbors), so
-// inflating the IDAT stream and skipping the row's filter byte is enough.
-function decodePngFirstPixel(buf) {
+// Minimal PNG decode: inflate the IDAT stream and unfilter scanlines up to
+// the requested row, then sample the pixel at fractional coordinates
+// (0,0 = top-left, 0.5,0.5 = center). Assumes 8-bit non-interlaced RGB/RGBA,
+// which is what compositor screenshots produce.
+function samplePngPixel(buf, fx, fy) {
+	const width = buf.readUInt32BE(16);
+	const height = buf.readUInt32BE(20);
 	const colorType = buf[25];
+	const bpp = colorType === 6 ? 4 : (colorType === 2 ? 3 : 0);
+	if (bpp === 0 || buf[24] !== 8 || buf[28] !== 0) {
+		return null;
+	}
 	const idat = [];
 	let pos = 8;
 	while (pos < buf.length) {
@@ -207,13 +215,38 @@ function decodePngFirstPixel(buf) {
 		pos += 12 + len;
 	}
 	const raw = zlib.inflateSync(Buffer.concat(idat));
-	if (colorType === 6) {
-		return [raw[1], raw[2], raw[3], raw[4]];
+	const stride = width * bpp;
+	const ty = Math.min(Math.floor(height * fy), height - 1);
+	const tx = Math.min(Math.floor(width * fx), width - 1);
+	let prev = Buffer.alloc(stride);
+	const cur = Buffer.alloc(stride);
+	for (let y = 0; y <= ty; y++) {
+		const filter = raw[y * (stride + 1)];
+		const line = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+		for (let i = 0; i < stride; i++) {
+			const a = i >= bpp ? cur[i - bpp] : 0;
+			const b = prev[i];
+			const c = i >= bpp ? prev[i - bpp] : 0;
+			let v = line[i];
+			if (filter === 1) {
+				v += a;
+			} else if (filter === 2) {
+				v += b;
+			} else if (filter === 3) {
+				v += (a + b) >> 1;
+			} else if (filter === 4) {
+				const p = a + b - c;
+				const pa = Math.abs(p - a);
+				const pb = Math.abs(p - b);
+				const pc = Math.abs(p - c);
+				v += pa <= pb && pa <= pc ? a : (pb <= pc ? b : c);
+			}
+			cur[i] = v & 0xff;
+		}
+		prev = Buffer.from(cur);
 	}
-	if (colorType === 2) {
-		return [raw[1], raw[2], raw[3], 255];
-	}
-	return null;
+	const o = tx * bpp;
+	return [cur[o], cur[o + 1], cur[o + 2], bpp === 4 ? cur[o + 3] : 255];
 }
 
 async function runProbe(browser, base) {
@@ -252,6 +285,9 @@ async function runProbe(browser, base) {
 	if (!consoleMessages.some((m) => m.includes('WebGPU probe: shader module OK'))) {
 		fail('[probe] shader module marker not found in console output');
 	}
+	if (!consoleMessages.some((m) => m.includes('WebGPU probe: triangle OK'))) {
+		fail('[probe] triangle marker not found in console output');
+	}
 
 	// Read back the presented pixels via a compositor screenshot. A 2D
 	// drawImage of a WebGPU canvas reads the CURRENT texture, which is
@@ -261,27 +297,34 @@ async function runProbe(browser, base) {
 		requestAnimationFrame(() => requestAnimationFrame(resolve));
 	})`);
 	const shot = await page.locator('#godot-webgpu-probe').screenshot();
-	const pixel = decodePngFirstPixel(shot);
+	// (0,0) still shows the uploaded pattern; the drawn triangle owns the
+	// canvas center.
+	const cornerPixel = samplePngPixel(shot, 0, 0);
+	const centerPixel = samplePngPixel(shot, 0.5, 0.5);
 	// Pixel assertion policy: headless software adapters (CI) execute all GPU
 	// work correctly but never composite the presented frame where
 	// screenshots can see it, so a mismatch is only a hard failure when
 	// PROBE_REQUIRE_PIXELS=1 (set it when running against a real GPU, e.g.
 	// with PROBE_CHANNEL=chrome). See docs/webgpu-testing.md.
 	const requirePixels = process.env.PROBE_REQUIRE_PIXELS === '1';
-	if (pixel == null) {
-		fail('[probe] could not decode the probe canvas screenshot');
-	} else {
-		const delta = Math.max(Math.abs(pixel[0] - PROBE_RGB[0]), Math.abs(pixel[1] - PROBE_RGB[1]), Math.abs(pixel[2] - PROBE_RGB[2]));
+	const checkPixel = (label, pixel, expected) => {
+		if (pixel == null) {
+			fail(`[probe] could not decode the probe canvas screenshot (${label})`);
+			return;
+		}
+		const delta = Math.max(Math.abs(pixel[0] - expected[0]), Math.abs(pixel[1] - expected[1]), Math.abs(pixel[2] - expected[2]));
 		if (delta > PROBE_TOLERANCE) {
 			if (requirePixels) {
-				fail(`[probe] clear color mismatch: got rgb(${pixel[0]},${pixel[1]},${pixel[2]}), expected ~rgb(${PROBE_RGB.join(',')})`);
+				fail(`[probe] ${label} color mismatch: got rgb(${pixel[0]},${pixel[1]},${pixel[2]}), expected ~rgb(${expected.join(',')})`);
 			} else {
-				console.warn(`loader-smoke: [probe] PIXEL CHECK INCONCLUSIVE: got rgb(${pixel[0]},${pixel[1]},${pixel[2]}), expected ~rgb(${PROBE_RGB.join(',')}) - this environment does not composite WebGPU canvases into screenshots; presentation must be verified on a real GPU (PROBE_CHANNEL=chrome PROBE_REQUIRE_PIXELS=1)`);
+				console.warn(`loader-smoke: [probe] PIXEL CHECK INCONCLUSIVE (${label}): got rgb(${pixel[0]},${pixel[1]},${pixel[2]}), expected ~rgb(${expected.join(',')}) - this environment does not composite WebGPU canvases into screenshots; presentation must be verified on a real GPU (PROBE_CHANNEL=chrome PROBE_REQUIRE_PIXELS=1)`);
 			}
 		}
-	}
+	};
+	checkPixel('pattern', cornerPixel, PROBE_RGB);
+	checkPixel('triangle', centerPixel, TRIANGLE_RGB);
 
-	console.log(`loader-smoke: [probe] rc=0, marker found, pixel=${JSON.stringify(pixel)}, pageErrors=${pageErrors.length}`);
+	console.log(`loader-smoke: [probe] rc=0, markers found, corner=${JSON.stringify(cornerPixel)}, center=${JSON.stringify(centerPixel)}, pageErrors=${pageErrors.length}`);
 	await page.close();
 }
 
