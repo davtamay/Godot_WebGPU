@@ -117,6 +117,17 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		 */
 		experimentalVK: false,
 		/**
+		 * When enabled, the loader requests a WebGPU device before the engine
+		 * starts (experimental). The engine falls back to WebGL when WebGPU is
+		 * unavailable.
+		 *
+		 * @export
+		 * @memberof EngineConfig
+		 * @type {boolean}
+		 * @default
+		 */
+		experimentalWebGPU: false,
+		/**
 		 * The progressive web app service worker to install.
 		 *
 		 * @export
