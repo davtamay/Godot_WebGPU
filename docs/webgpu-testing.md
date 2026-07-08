@@ -24,7 +24,8 @@ Prereqs: emsdk (version pinned to match upstream CI - see
 | 1 | Patch 03 | Loader smoke in headless Chromium (loader-smoke.mjs): Engine.init() resolves, isWebGPUAvailable exposed, WebGL-fallback warning asserted when no WebGPU device is obtainable, no pageerror |
 | 1.5 | Patch 04 | rd leg builds with webgpu=yes: emdawnwebgpu port downloads, compiles, and links; port size cost recorded |
 | 2 | Patch 05 | WebGPU probe: _godot_webgpu_probe() runs the full driver path (device import, surface, swap chain, clear, submit) under a software adapter; hard gates = probe rc 0, success marker, no pageerror, no GPU validation error. Pixel readback is advisory in CI (see below) and strict locally on a real GPU; exported-project boot moves to stage 3 |
-| 2.5 (now) | Patch 06 | Probe additionally uploads a 64x64 pattern through the staging path (shadow map -> queue write -> buffer-to-texture -> texture-to-texture into the acquired frame); Dawn validates every copy (gpu-error hard gate), strict local pixel check asserts the pattern color |
+| 2.5 | Patch 06 | Probe additionally uploads a 64x64 pattern through the staging path (shadow map -> queue write -> buffer-to-texture -> texture-to-texture into the acquired frame); Dawn validates every copy (gpu-error hard gate), strict local pixel check asserts the pattern color |
+| 2.7 (now) | Patch 07 | Probe additionally creates a WGSL shader module containing an override (marker hard-gated, Dawn-validated); shader BAKING is verified locally only (tint is not on CI runners) - see the Shader baking section |
 | 3 | Patch 08 | Browser boots exported project; triangle pixel test |
 | 4 | Patch 09+ | Unlit-cube screenshot diff vs goldens (tolerance ~1-2%) |
 
@@ -35,6 +36,40 @@ The probe smoke SKIPs (exit 0, with a notice in the log) when the runner's
 Chromium cannot deliver a WebGPU device - check the job log, a skip is not a
 pass. CI runners have no GPU - these are smoke tests, never performance
 tests.
+
+## Shader baking (patch 07)
+
+Baking WebGPU shaders needs an external Tint binary (interim until Tint is
+vendored; build once from Dawn source pinned to the same release as the
+runtime bindings):
+
+    git clone --depth 1 --branch v20250531.224602 https://github.com/google/dawn.git
+    cmake -S dawn -B dawn/out -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DDAWN_FETCH_DEPENDENCIES=ON -DTINT_BUILD_CMD_TOOLS=ON \
+      -DTINT_BUILD_SPV_READER=ON -DTINT_BUILD_WGSL_WRITER=ON \
+      -DDAWN_BUILD_SAMPLES=OFF -DDAWN_BUILD_TESTS=OFF -DTINT_BUILD_TESTS=OFF
+    cmake --build dawn/out --target tint_cmd_tint_cmd
+
+Then set GODOT_TINT_PATH to the tint executable and export a web project
+with `shader_baker/enabled` on. The project must set
+`rendering/rendering_device/driver.web = "webgpu"` and the editor must run
+an RD renderer (baking is inactive under --headless, which uses the dummy
+renderer).
+
+Translation coverage (baketest project, mobile renderer, 2026-07-08):
+90 of 205 shader variants bake. All remaining failures are WGSL capability
+gaps, not pipeline bugs, and are the renderer-fallback/roadmap items:
+
+| Failure class | Count | Resolution path |
+|---------------|-------|-----------------|
+| texture/sampler arrays (WGSL has no binding arrays) | 61 | dedicated array-flattening patch (blocks SceneForwardMobile + Canvas main variants) |
+| PointSize writes | 6 | strip-transform or shader variant |
+| rgb10a2 storage images | 5 | renderer-level capability fallback |
+| -inf float constants | 8 | constant rewrite transform |
+| isInf calls (WGSL lacks it) | 3 | shader variant or transform |
+
+Partial coverage is safe today: missing variants only matter once the
+engine renders through the WebGPU driver (patch 08+).
 
 Pixel readback findings (recorded 2026-07-08, the hard way):
 - drawImage()/2D readback of a WebGPU canvas reads the CURRENT texture,
