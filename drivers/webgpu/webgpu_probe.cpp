@@ -50,6 +50,42 @@ static const uint8_t PROBE_PATTERN_R = 230;
 static const uint8_t PROBE_PATTERN_G = 102;
 static const uint8_t PROBE_PATTERN_B = 26;
 static const uint32_t PROBE_SIZE = 64;
+static const uint8_t PROBE_TRIANGLE_R = 230;
+static const uint8_t PROBE_TRIANGLE_G = 51;
+static const uint8_t PROBE_TRIANGLE_B = 230;
+
+// Feeds hand-written WGSL through the same container the baked-shader path
+// uses, so the probe exercises shader_create_from_container and
+// render_pipeline_create exactly like an exported project would.
+class ProbeShaderContainer : public RenderingShaderContainerWebGPU {
+	GDSOFTCLASS(ProbeShaderContainer, RenderingShaderContainerWebGPU);
+
+public:
+	bool set_from_wgsl(const char *p_vertex_wgsl, const char *p_fragment_wgsl) {
+		reflection_data.stage_count = 2;
+		reflection_data.push_constant_size = 16; // One vec4 color.
+		reflection_data.push_constant_stages_mask = 1 << RDC::SHADER_STAGE_FRAGMENT;
+		reflection_shader_stages.push_back(RDC::SHADER_STAGE_VERTEX);
+		reflection_shader_stages.push_back(RDC::SHADER_STAGE_FRAGMENT);
+
+		const char *sources[2] = { p_vertex_wgsl, p_fragment_wgsl };
+		const RDC::ShaderStage stages[2] = { RDC::SHADER_STAGE_VERTEX, RDC::SHADER_STAGE_FRAGMENT };
+		shaders.resize(2);
+		for (int i = 0; i < 2; i++) {
+			Shader &shader = shaders.ptrw()[i];
+			shader.shader_stage = stages[i];
+			const uint32_t size = (uint32_t)strlen(sources[i]);
+			shader.code_decompressed_size = size;
+			shader.code_compressed_bytes.resize(size);
+			uint32_t compressed_size = 0;
+			if (!compress_code((const uint8_t *)sources[i], size, shader.code_compressed_bytes.ptrw(), &compressed_size, &shader.code_compression_flags)) {
+				return false;
+			}
+			shader.code_compressed_bytes.resize(compressed_size);
+		}
+		return true;
+	}
+};
 
 #define PROBE_FAIL(m_stage, m_msg)                        \
 	{                                                     \
@@ -172,6 +208,68 @@ extern "C" EMSCRIPTEN_KEEPALIVE int godot_webgpu_probe() {
 		}
 	}
 
+	// Drive a full draw through the same path exported projects use: WGSL
+	// container -> shader -> pipeline -> push constants -> draw, composited
+	// over the pattern so the copy checks above stay verifiable at (0,0)
+	// while the triangle owns the canvas center.
+	RenderingDeviceDriver::ShaderID triangle_shader;
+	RenderingDeviceDriver::PipelineID triangle_pipeline;
+	if (stage == 0) {
+		static const char *vertex_wgsl =
+				"@vertex fn main(@builtin(vertex_index) vi : u32) -> @builtin(position) vec4f {\n"
+				"    var positions = array<vec2f, 3>(vec2f(0.0, 0.6), vec2f(-0.6, -0.6), vec2f(0.6, -0.6));\n"
+				"    return vec4f(positions[vi], 0.0, 1.0);\n"
+				"}\n";
+		static const char *fragment_wgsl =
+				"struct PC { color : vec4f, }\n"
+				"@group(0) @binding(510) var<storage, read> pc : PC;\n"
+				"@fragment fn main() -> @location(0) vec4f {\n"
+				"    return pc.color;\n"
+				"}\n";
+		Ref<ProbeShaderContainer> container;
+		container.instantiate();
+		if (!container->set_from_wgsl(vertex_wgsl, fragment_wgsl)) {
+			stage = 12;
+		} else {
+			triangle_shader = driver->shader_create_from_container(container, Vector<RenderingDeviceDriver::ImmutableSampler>());
+			if (!triangle_shader) {
+				stage = 12;
+			}
+		}
+	}
+
+	if (stage == 0) {
+		const int32_t color_attachment = 0;
+		triangle_pipeline = driver->render_pipeline_create(
+				triangle_shader,
+				RenderingDeviceDriver::VertexFormatID(),
+				RenderingDeviceDriver::RENDER_PRIMITIVE_TRIANGLES,
+				RenderingDeviceDriver::PipelineRasterizationState(),
+				RenderingDeviceDriver::PipelineMultisampleState(),
+				RenderingDeviceDriver::PipelineDepthStencilState(),
+				RenderingDeviceDriver::PipelineColorBlendState::create_disabled(1),
+				color_attachment,
+				BitField<RenderingDeviceDriver::PipelineDynamicStateFlags>(),
+				driver->swap_chain_get_render_pass(swap_chain),
+				0,
+				VectorView<RenderingDeviceDriver::PipelineSpecializationConstant>());
+		if (!triangle_pipeline) {
+			stage = 13;
+		}
+	}
+
+	if (stage == 0) {
+		// No clear values: the swap chain pass loads the pattern frame.
+		driver->command_begin_render_pass(cmd_buffer, driver->swap_chain_get_render_pass(swap_chain), framebuffer, RenderingDeviceDriver::COMMAND_BUFFER_TYPE_PRIMARY, Rect2i(0, 0, PROBE_SIZE, PROBE_SIZE), VectorView<RenderingDeviceDriver::RenderPassClearValue>());
+		driver->command_bind_render_pipeline(cmd_buffer, triangle_pipeline);
+		const float triangle_color[4] = { PROBE_TRIANGLE_R / 255.0f, PROBE_TRIANGLE_G / 255.0f, PROBE_TRIANGLE_B / 255.0f, 1.0f };
+		driver->command_bind_push_constants(cmd_buffer, triangle_shader, 0, VectorView<uint32_t>((const uint32_t *)triangle_color, 4));
+		driver->command_render_draw(cmd_buffer, 3, 1, 0, 0);
+		driver->command_end_render_pass(cmd_buffer);
+		printf("WebGPU probe: triangle OK\n");
+		fflush(stdout);
+	}
+
 	if (stage == 0) {
 		driver->command_buffer_end(cmd_buffer);
 		if (driver->command_queue_execute_and_present(cmd_queue, VectorView<RenderingDeviceDriver::SemaphoreID>(), cmd_buffer, VectorView<RenderingDeviceDriver::SemaphoreID>(), RenderingDeviceDriver::FenceID(), swap_chain) != OK) {
@@ -203,6 +301,12 @@ extern "C" EMSCRIPTEN_KEEPALIVE int godot_webgpu_probe() {
 		}
 	}
 
+	if (triangle_pipeline) {
+		driver->pipeline_free(triangle_pipeline);
+	}
+	if (triangle_shader) {
+		driver->shader_free(triangle_shader);
+	}
 	if (staging) {
 		driver->buffer_free(staging);
 	}
