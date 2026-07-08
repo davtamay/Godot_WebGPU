@@ -75,12 +75,30 @@ private:
 		// pipeline creation keys WGPUConstantEntry by their decimal strings.
 		LocalVector<uint32_t> specialization_constant_ids;
 		uint32_t push_constant_size = 0;
+		// Created for shaders whose set 0 holds nothing but the reserved
+		// push-constant binding, so draws can still bind the ring buffer.
+		WGPUBindGroup push_constant_bind_group = nullptr;
 	};
+
+	static const uint32_t MAX_BIND_GROUPS = 4;
+	static const uint32_t PUSH_CONSTANT_SLOT_SIZE = 256; // Matches the dynamic offset alignment limit.
+	static const uint32_t PUSH_CONSTANT_RING_SIZE = 256 * 1024;
+
+	struct UniformSetInfo;
 
 	struct CommandBufferInfo {
 		WGPUCommandEncoder encoder = nullptr;
 		WGPUCommandBuffer command_buffer = nullptr;
 		WGPURenderPassEncoder render_pass_encoder = nullptr;
+		WGPUComputePassEncoder compute_pass_encoder = nullptr;
+		// Bind groups are deferred to draw/dispatch time: the group that
+		// carries the push-constant ring entry needs a dynamic offset that
+		// only arrives with command_bind_push_constants, which the engine
+		// records after binding uniform sets.
+		const ShaderInfo *current_shader = nullptr;
+		UniformSetInfo *pending_bind_groups[MAX_BIND_GROUPS] = {};
+		uint32_t push_constant_offset = 0;
+		bool bind_groups_dirty = false;
 	};
 
 	struct CommandPoolInfo {
@@ -88,15 +106,42 @@ private:
 		LocalVector<CommandBufferInfo *> command_buffers;
 	};
 
+	struct RenderPassAttachment {
+		WGPUTextureFormat format = WGPUTextureFormat_Undefined;
+		WGPULoadOp load_op = WGPULoadOp_Clear;
+		WGPUStoreOp store_op = WGPUStoreOp_Store;
+		WGPULoadOp stencil_load_op = WGPULoadOp_Clear;
+		WGPUStoreOp stencil_store_op = WGPUStoreOp_Store;
+		bool is_depth_stencil = false;
+	};
+
 	struct RenderPassInfo {
-		DataFormat color_format = DATA_FORMAT_MAX;
+		LocalVector<RenderPassAttachment> attachments;
 		bool from_swap_chain = false;
 	};
 
 	struct FramebufferInfo {
-		WGPUTextureView view = nullptr;
+		LocalVector<WGPUTextureView> views;
 		uint32_t width = 0;
 		uint32_t height = 0;
+	};
+
+	struct VertexFormatInfo {
+		LocalVector<LocalVector<WGPUVertexAttribute>> attributes;
+		LocalVector<WGPUVertexBufferLayout> buffer_layouts;
+	};
+
+	struct UniformSetInfo {
+		WGPUBindGroup bind_group = nullptr;
+		// True when the group carries the push-constant ring buffer entry and
+		// therefore needs the current dynamic offset when bound.
+		bool has_push_constant_offset = false;
+	};
+
+	struct PipelineInfo {
+		WGPURenderPipeline render_pipeline = nullptr;
+		WGPUComputePipeline compute_pipeline = nullptr;
+		const ShaderInfo *shader = nullptr;
 	};
 
 	struct SwapChainInfo {
@@ -113,6 +158,17 @@ private:
 	WGPUDevice device = nullptr;
 	WGPUQueue queue = nullptr;
 	WGPULimits device_limits = {};
+
+	// Push-constant ring: values are written into a shadow at 256-aligned
+	// offsets and flushed with one wgpuQueueWriteBuffer before submission;
+	// bind groups reference the buffer with a dynamic offset.
+	WGPUBuffer push_constant_buffer = nullptr;
+	uint8_t *push_constant_shadow = nullptr;
+	uint32_t push_constant_capacity = 0;
+	uint32_t push_constant_used = 0;
+
+	void _flush_bind_groups(CommandBufferInfo *p_cb_info);
+	void _end_compute_pass(CommandBufferInfo *p_cb_info);
 
 	MultiviewCapabilities multiview_capabilities;
 	FragmentShadingRateCapabilities fragment_shading_rate_capabilities;
@@ -144,8 +200,8 @@ public:
 	virtual SamplerID sampler_create(const SamplerState &p_state) override;
 	virtual void sampler_free(SamplerID p_sampler) override;
 	virtual bool sampler_is_format_supported_for_filter(DataFormat p_format, SamplerFilter p_filter) override;
-	virtual VertexFormatID vertex_format_create(Span<VertexAttribute> p_vertex_attribs, const VertexAttributeBindingsMap &p_vertex_bindings) override { ERR_FAIL_V_MSG((VertexFormatID()), UNIMPLEMENTED); }
-	virtual void vertex_format_free(VertexFormatID p_vertex_format) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
+	virtual VertexFormatID vertex_format_create(Span<VertexAttribute> p_vertex_attribs, const VertexAttributeBindingsMap &p_vertex_bindings) override;
+	virtual void vertex_format_free(VertexFormatID p_vertex_format) override;
 	virtual void command_pipeline_barrier(CommandBufferID p_cmd_buffer, BitField<PipelineStageBits> p_src_stages, BitField<PipelineStageBits> p_dst_stages, VectorView<MemoryAccessBarrier> p_memory_barriers, VectorView<BufferBarrier> p_buffer_barriers, VectorView<TextureBarrier> p_texture_barriers, VectorView<AccelerationStructureBarrier> p_acceleration_structure_barriers) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual FenceID fence_create() override;
 	virtual Error fence_wait(FenceID p_fence) override;
@@ -174,15 +230,15 @@ public:
 	virtual ColorSpace swap_chain_get_color_space(SwapChainID p_swap_chain) override { ERR_FAIL_V_MSG((ColorSpace()), UNIMPLEMENTED); }
 	virtual bool swap_chain_get_hdr_output_supported(SwapChainID p_swap_chain) override { ERR_FAIL_V_MSG(false, UNIMPLEMENTED); }
 	virtual void swap_chain_free(SwapChainID p_swap_chain) override;
-	virtual FramebufferID framebuffer_create(RenderPassID p_render_pass, VectorView<TextureID> p_attachments, uint32_t p_width, uint32_t p_height) override { ERR_FAIL_V_MSG((FramebufferID()), UNIMPLEMENTED); }
-	virtual void framebuffer_free(FramebufferID p_framebuffer) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
+	virtual FramebufferID framebuffer_create(RenderPassID p_render_pass, VectorView<TextureID> p_attachments, uint32_t p_width, uint32_t p_height) override;
+	virtual void framebuffer_free(FramebufferID p_framebuffer) override;
 	virtual ShaderID shader_create_from_container(const Ref<RenderingShaderContainer> &p_shader_container, const Vector<ImmutableSampler> &p_immutable_samplers) override;
 	virtual void shader_free(ShaderID p_shader) override;
 	virtual void shader_destroy_modules(ShaderID p_shader) override;
-	virtual UniformSetID uniform_set_create(VectorView<BoundUniform> p_uniforms, ShaderID p_shader, uint32_t p_set_index, int p_linear_pool_index) override { ERR_FAIL_V_MSG((UniformSetID()), UNIMPLEMENTED); }
-	virtual void uniform_set_free(UniformSetID p_uniform_set) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
+	virtual UniformSetID uniform_set_create(VectorView<BoundUniform> p_uniforms, ShaderID p_shader, uint32_t p_set_index, int p_linear_pool_index) override;
+	virtual void uniform_set_free(UniformSetID p_uniform_set) override;
 	virtual uint32_t uniform_sets_get_dynamic_offsets(VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count) const override { ERR_FAIL_V_MSG(0, UNIMPLEMENTED); }
-	virtual void command_uniform_set_prepare_for_use(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
+	virtual void command_uniform_set_prepare_for_use(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) override {}
 	virtual void command_clear_buffer(CommandBufferID p_cmd_buffer, BufferID p_buffer, uint64_t p_offset, uint64_t p_size) override;
 	virtual void command_copy_buffer(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, BufferID p_dst_buffer, VectorView<BufferCopyRegion> p_regions) override;
 	virtual void command_copy_texture(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<TextureCopyRegion> p_regions) override;
@@ -191,39 +247,39 @@ public:
 	virtual void command_clear_depth_stencil_texture(CommandBufferID p_cmd_buffer, TextureID p_texture, TextureLayout p_texture_layout, float p_depth, uint8_t p_stencil, const TextureSubresourceRange &p_subresources) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual void command_copy_buffer_to_texture(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<BufferTextureCopyRegion> p_regions) override;
 	virtual void command_copy_texture_to_buffer(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, BufferID p_dst_buffer, VectorView<BufferTextureCopyRegion> p_regions) override;
-	virtual void pipeline_free(PipelineID p_pipeline) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void command_bind_push_constants(CommandBufferID p_cmd_buffer, ShaderID p_shader, uint32_t p_first_index, VectorView<uint32_t> p_data) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
+	virtual void pipeline_free(PipelineID p_pipeline) override;
+	virtual void command_bind_push_constants(CommandBufferID p_cmd_buffer, ShaderID p_shader, uint32_t p_first_index, VectorView<uint32_t> p_data) override;
 	// The browser manages pipeline caching; declining makes the engine skip it.
 	virtual bool pipeline_cache_create(const Vector<uint8_t> &p_data) override { return false; }
 	virtual void pipeline_cache_free() override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual size_t pipeline_cache_query_size() override { ERR_FAIL_V_MSG((size_t()), UNIMPLEMENTED); }
 	virtual Vector<uint8_t> pipeline_cache_serialize() override { ERR_FAIL_V_MSG((Vector<uint8_t>()), UNIMPLEMENTED); }
-	virtual RenderPassID render_pass_create(VectorView<Attachment> p_attachments, VectorView<Subpass> p_subpasses, VectorView<SubpassDependency> p_subpass_dependencies, uint32_t p_view_count, AttachmentReference p_fragment_density_map_attachment) override { ERR_FAIL_V_MSG((RenderPassID()), UNIMPLEMENTED); }
-	virtual void render_pass_free(RenderPassID p_render_pass) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
+	virtual RenderPassID render_pass_create(VectorView<Attachment> p_attachments, VectorView<Subpass> p_subpasses, VectorView<SubpassDependency> p_subpass_dependencies, uint32_t p_view_count, AttachmentReference p_fragment_density_map_attachment) override;
+	virtual void render_pass_free(RenderPassID p_render_pass) override;
 	virtual void command_begin_render_pass(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, FramebufferID p_framebuffer, CommandBufferType p_cmd_buffer_type, const Rect2i &p_rect, VectorView<RenderPassClearValue> p_clear_values) override;
 	virtual void command_end_render_pass(CommandBufferID p_cmd_buffer) override;
 	virtual void command_next_render_subpass(CommandBufferID p_cmd_buffer, CommandBufferType p_cmd_buffer_type) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void command_render_set_viewport(CommandBufferID p_cmd_buffer, VectorView<Rect2i> p_viewports) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void command_render_set_scissor(CommandBufferID p_cmd_buffer, VectorView<Rect2i> p_scissors) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
+	virtual void command_render_set_viewport(CommandBufferID p_cmd_buffer, VectorView<Rect2i> p_viewports) override;
+	virtual void command_render_set_scissor(CommandBufferID p_cmd_buffer, VectorView<Rect2i> p_scissors) override;
 	virtual void command_render_clear_attachments(CommandBufferID p_cmd_buffer, VectorView<AttachmentClear> p_attachment_clears, VectorView<Rect2i> p_rects) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void command_bind_render_pipeline(CommandBufferID p_cmd_buffer, PipelineID p_pipeline) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void command_bind_render_uniform_sets(CommandBufferID p_cmd_buffer, VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count, uint32_t p_dynamic_offsets) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void command_render_draw(CommandBufferID p_cmd_buffer, uint32_t p_vertex_count, uint32_t p_instance_count, uint32_t p_base_vertex, uint32_t p_first_instance) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void command_render_draw_indexed(CommandBufferID p_cmd_buffer, uint32_t p_index_count, uint32_t p_instance_count, uint32_t p_first_index, int32_t p_vertex_offset, uint32_t p_first_instance) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
+	virtual void command_bind_render_pipeline(CommandBufferID p_cmd_buffer, PipelineID p_pipeline) override;
+	virtual void command_bind_render_uniform_sets(CommandBufferID p_cmd_buffer, VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count, uint32_t p_dynamic_offsets) override;
+	virtual void command_render_draw(CommandBufferID p_cmd_buffer, uint32_t p_vertex_count, uint32_t p_instance_count, uint32_t p_base_vertex, uint32_t p_first_instance) override;
+	virtual void command_render_draw_indexed(CommandBufferID p_cmd_buffer, uint32_t p_index_count, uint32_t p_instance_count, uint32_t p_first_index, int32_t p_vertex_offset, uint32_t p_first_instance) override;
 	virtual void command_render_draw_indexed_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual void command_render_draw_indexed_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void command_render_draw_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
+	virtual void command_render_draw_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) override;
 	virtual void command_render_draw_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void command_render_bind_vertex_buffers(CommandBufferID p_cmd_buffer, uint32_t p_binding_count, const BufferID *p_buffers, const uint64_t *p_offsets, uint64_t p_dynamic_offsets) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void command_render_bind_index_buffer(CommandBufferID p_cmd_buffer, BufferID p_buffer, IndexBufferFormat p_format, uint64_t p_offset) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void command_render_set_blend_constants(CommandBufferID p_cmd_buffer, const Color &p_constants) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
+	virtual void command_render_bind_vertex_buffers(CommandBufferID p_cmd_buffer, uint32_t p_binding_count, const BufferID *p_buffers, const uint64_t *p_offsets, uint64_t p_dynamic_offsets) override;
+	virtual void command_render_bind_index_buffer(CommandBufferID p_cmd_buffer, BufferID p_buffer, IndexBufferFormat p_format, uint64_t p_offset) override;
+	virtual void command_render_set_blend_constants(CommandBufferID p_cmd_buffer, const Color &p_constants) override;
 	virtual void command_render_set_line_width(CommandBufferID p_cmd_buffer, float p_width) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual PipelineID render_pipeline_create(ShaderID p_shader, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, PipelineRasterizationState p_rasterization_state, PipelineMultisampleState p_multisample_state, PipelineDepthStencilState p_depth_stencil_state, PipelineColorBlendState p_blend_state, VectorView<int32_t> p_color_attachments, BitField<PipelineDynamicStateFlags> p_dynamic_state, RenderPassID p_render_pass, uint32_t p_render_subpass, VectorView<PipelineSpecializationConstant> p_specialization_constants) override { ERR_FAIL_V_MSG((PipelineID()), UNIMPLEMENTED); }
-	virtual void command_bind_compute_pipeline(CommandBufferID p_cmd_buffer, PipelineID p_pipeline) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void command_bind_compute_uniform_sets(CommandBufferID p_cmd_buffer, VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count, uint32_t p_dynamic_offsets) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void command_compute_dispatch(CommandBufferID p_cmd_buffer, uint32_t p_x_groups, uint32_t p_y_groups, uint32_t p_z_groups) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void command_compute_dispatch_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual PipelineID compute_pipeline_create(ShaderID p_shader, VectorView<PipelineSpecializationConstant> p_specialization_constants) override { ERR_FAIL_V_MSG((PipelineID()), UNIMPLEMENTED); }
+	virtual PipelineID render_pipeline_create(ShaderID p_shader, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, PipelineRasterizationState p_rasterization_state, PipelineMultisampleState p_multisample_state, PipelineDepthStencilState p_depth_stencil_state, PipelineColorBlendState p_blend_state, VectorView<int32_t> p_color_attachments, BitField<PipelineDynamicStateFlags> p_dynamic_state, RenderPassID p_render_pass, uint32_t p_render_subpass, VectorView<PipelineSpecializationConstant> p_specialization_constants) override;
+	virtual void command_bind_compute_pipeline(CommandBufferID p_cmd_buffer, PipelineID p_pipeline) override;
+	virtual void command_bind_compute_uniform_sets(CommandBufferID p_cmd_buffer, VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count, uint32_t p_dynamic_offsets) override;
+	virtual void command_compute_dispatch(CommandBufferID p_cmd_buffer, uint32_t p_x_groups, uint32_t p_y_groups, uint32_t p_z_groups) override;
+	virtual void command_compute_dispatch_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset) override;
+	virtual PipelineID compute_pipeline_create(ShaderID p_shader, VectorView<PipelineSpecializationConstant> p_specialization_constants) override;
 	virtual AccelerationStructureID blas_create(VectorView<AccelerationStructureGeometry> p_geometries, BitField<AccelerationStructureFlagBits> p_flags) override { ERR_FAIL_V_MSG((AccelerationStructureID()), UNIMPLEMENTED); }
 	virtual AccelerationStructureID tlas_create(uint32_t p_max_instance_count, BitField<AccelerationStructureFlagBits> p_flags) override { ERR_FAIL_V_MSG((AccelerationStructureID()), UNIMPLEMENTED); }
 	virtual void acceleration_structure_instance_write(uint8_t *r_driver_instance, const AccelerationStructureInstance &p_instance) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
@@ -269,6 +325,7 @@ public:
 	virtual String get_pipeline_cache_uuid() const override { ERR_FAIL_V_MSG((String()), UNIMPLEMENTED); }
 	virtual const Capabilities &get_capabilities() const override { return capabilities; }
 	virtual const RenderingShaderContainerFormat &get_shader_container_format() const override { return shader_container_format; }
+	virtual uint64_t api_trait_get(ApiTrait p_trait) override;
 
 	// Driver-internal (non-RDD) helper: the current acquired texture of a swap
 	// chain, as a native handle for texture_create_from_extension. Used by the
