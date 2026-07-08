@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  rendering_shader_container_webgpu.h                                   */
+/*  shader_baker_export_plugin_platform_webgpu.cpp                        */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -28,52 +28,25 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-#pragma once
+#include "shader_baker_export_plugin_platform_webgpu.h"
 
-#include "servers/rendering/rendering_shader_container.h"
+#include "core/io/file_access.h"
+#include "core/os/os.h"
+#include "drivers/webgpu/rendering_shader_container_webgpu.h"
 
-// Serializes shaders as WGSL translated from SPIR-V by an external Tint
-// binary at bake time (see docs/webgpu-testing.md). No webgpu.h dependency:
-// this compiles into editor builds on every platform so any editor can bake
-// web exports, mirroring the Metal/D3D12 shader containers. At runtime only
-// the deserialization path is used; translating on the web platform itself
-// is not possible.
-class RenderingShaderContainerWebGPU : public RenderingShaderContainer {
-	GDSOFTCLASS(RenderingShaderContainerWebGPU, RenderingShaderContainer);
+RenderingShaderContainerFormat *ShaderBakerExportPluginPlatformWebGPU::create_shader_container_format(const Ref<EditorExportPlatform> &p_platform, const Ref<EditorExportPreset> &p_preset) {
+	// Interim external translator until Tint is vendored: the path to a tint
+	// binary comes from the GODOT_TINT_PATH environment variable (see
+	// docs/webgpu-testing.md for how to build one).
+	const String tint_path = OS::get_singleton()->get_environment("GODOT_TINT_PATH");
+	ERR_FAIL_COND_V_MSG(tint_path.is_empty() || !FileAccess::exists(tint_path), nullptr,
+			"Baking WebGPU shaders requires the Tint translator; set the GODOT_TINT_PATH environment variable to a tint executable.");
 
-public:
-	static const uint32_t FORMAT_VERSION;
+	RenderingShaderContainerFormatWebGPU *format = memnew(RenderingShaderContainerFormatWebGPU);
+	format->set_tint_path(tint_path);
+	return format;
+}
 
-	// Fixed binding remaps agreed between the SPIR-V pre-transform applied
-	// before translation and the runtime driver's bind group layouts:
-	// - Push constants become a read-only storage buffer at this group and
-	//   binding (Tint rejects the PushConstant storage class, and their std430
-	//   packing is not legal in a uniform buffer).
-	// - Combined image samplers are split by Tint: within each group, a
-	//   binding moves up by the number of combined samplers at lower
-	//   bindings, and each synthesized sampler lands right after its texture.
-	static const uint32_t PUSH_CONSTANT_GROUP = 0;
-	static const uint32_t PUSH_CONSTANT_BINDING = 510;
-
-	// Bake-time only; when empty (runtime), only from_bytes() works.
-	String tint_path;
-
-protected:
-	virtual uint32_t _format() const override;
-	virtual uint32_t _format_version() const override;
-	virtual bool _set_code_from_spirv(const ReflectShader &p_shader) override;
-
-private:
-	bool _transform_spirv(Vector<uint8_t> &r_spirv) const;
-};
-
-class RenderingShaderContainerFormatWebGPU : public RenderingShaderContainerFormat {
-	String tint_path;
-
-public:
-	void set_tint_path(const String &p_tint_path);
-
-	virtual Ref<RenderingShaderContainer> create_container() const override;
-	virtual ShaderLanguageVersion get_shader_language_version() const override;
-	virtual ShaderSpirvVersion get_shader_spirv_version() const override;
-};
+bool ShaderBakerExportPluginPlatformWebGPU::matches_driver(const String &p_driver) {
+	return p_driver == "webgpu";
+}

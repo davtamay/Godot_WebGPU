@@ -249,6 +249,9 @@ async function runProbe(browser, base) {
 	if (!consoleMessages.some((m) => m.includes('WebGPU probe: OK'))) {
 		fail('[probe] success marker not found in console output');
 	}
+	if (!consoleMessages.some((m) => m.includes('WebGPU probe: shader module OK'))) {
+		fail('[probe] shader module marker not found in console output');
+	}
 
 	// Read back the presented pixels via a compositor screenshot. A 2D
 	// drawImage of a WebGPU canvas reads the CURRENT texture, which is
