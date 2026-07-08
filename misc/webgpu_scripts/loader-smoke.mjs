@@ -62,8 +62,10 @@ engine.init('godot').then(function () {
 // CI (see docs/webgpu-testing.md).
 const PROBE_CHROMIUM_FLAGS = ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'];
 
-// Must match PROBE_CLEAR_COLOR in drivers/webgpu/webgpu_probe.cpp.
-const PROBE_RGB = [51, 153, 229];
+// Must match PROBE_PATTERN_R/G/B in drivers/webgpu/webgpu_probe.cpp: the
+// pattern uploaded through the staging path and copied over the cleared
+// frame.
+const PROBE_RGB = [230, 102, 26];
 const PROBE_TOLERANCE = 12;
 
 const probePage = `<!DOCTYPE html>
