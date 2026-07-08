@@ -32,39 +32,43 @@
 
 #include "rendering_device_driver_webgpu.h"
 
-#ifdef WEBGPU_ENABLED
-#include <webgpu/webgpu.h>
-#endif
-
-static constexpr const char *UNIMPLEMENTED = "The WebGPU rendering context driver is not implemented yet.";
+// See platform/web/js/libs/library_godot_webgpu.js.
+extern "C" {
+WGPUDevice godot_js_webgpu_device_import();
+}
 
 Error RenderingContextDriverWebGPU::initialize() {
-#ifdef WEBGPU_ENABLED
-	// Probe the API so the emdawnwebgpu port is linked and exercised; surface
-	// and presentation support land in later patches, so still report the
-	// context as unavailable.
-	WGPUInstance instance = wgpuCreateInstance(nullptr);
-	if (instance != nullptr) {
-		wgpuInstanceRelease(instance);
+	instance = wgpuCreateInstance(nullptr);
+	ERR_FAIL_NULL_V_MSG(instance, ERR_CANT_CREATE, "Failed to create the WebGPU instance.");
+
+	// Imports the GPUDevice the loader acquired before start-up; requesting
+	// one here is not possible because the browser API is asynchronous.
+	device = godot_js_webgpu_device_import();
+	if (device == nullptr) {
+		ERR_FAIL_V_MSG(ERR_UNAVAILABLE, "No pre-initialized WebGPU device. Enable `experimentalWebGPU` in the web export configuration.");
 	}
-#endif
-	ERR_FAIL_V_MSG(ERR_UNAVAILABLE, UNIMPLEMENTED);
+
+	device_info.name = "WebGPU";
+	device_info.vendor = Vendor::VENDOR_UNKNOWN;
+	device_info.type = DEVICE_TYPE_INTEGRATED_GPU;
+	return OK;
 }
 
 const RenderingContextDriver::Device &RenderingContextDriverWebGPU::device_get(uint32_t p_device_index) const {
-	ERR_FAIL_V_MSG(device, UNIMPLEMENTED);
+	ERR_FAIL_COND_V(p_device_index != 0, device_info);
+	return device_info;
 }
 
 uint32_t RenderingContextDriverWebGPU::device_get_count() const {
-	return 0;
+	return device != nullptr ? 1 : 0;
 }
 
 bool RenderingContextDriverWebGPU::device_supports_present(uint32_t p_device_index, SurfaceID p_surface) const {
-	return false;
+	return device != nullptr;
 }
 
 RenderingDeviceDriver *RenderingContextDriverWebGPU::driver_create() {
-	return memnew(RenderingDeviceDriverWebGPU);
+	return memnew(RenderingDeviceDriverWebGPU(this));
 }
 
 void RenderingContextDriverWebGPU::driver_free(RenderingDeviceDriver *p_driver) {
@@ -72,23 +76,43 @@ void RenderingContextDriverWebGPU::driver_free(RenderingDeviceDriver *p_driver) 
 }
 
 RenderingContextDriver::SurfaceID RenderingContextDriverWebGPU::surface_create(const void *p_platform_data) {
-	ERR_FAIL_V_MSG(SurfaceID(), UNIMPLEMENTED);
+	const WindowPlatformData *wpd = (const WindowPlatformData *)p_platform_data;
+	ERR_FAIL_NULL_V(wpd, SurfaceID());
+	ERR_FAIL_NULL_V(wpd->canvas_selector, SurfaceID());
+
+	WGPUEmscriptenSurfaceSourceCanvasHTMLSelector canvas_source = WGPU_EMSCRIPTEN_SURFACE_SOURCE_CANVAS_HTML_SELECTOR_INIT;
+	canvas_source.selector = { wpd->canvas_selector, WGPU_STRLEN };
+	WGPUSurfaceDescriptor surface_desc = WGPU_SURFACE_DESCRIPTOR_INIT;
+	surface_desc.nextInChain = &canvas_source.chain;
+
+	WGPUSurface wgpu_surface = wgpuInstanceCreateSurface(instance, &surface_desc);
+	ERR_FAIL_NULL_V_MSG(wgpu_surface, SurfaceID(), vformat("Failed to create a WebGPU surface for canvas '%s'.", wpd->canvas_selector));
+
+	Surface *surface = memnew(Surface);
+	surface->wgpu_surface = wgpu_surface;
+	return SurfaceID(surface);
 }
 
 void RenderingContextDriverWebGPU::surface_set_size(SurfaceID p_surface, uint32_t p_width, uint32_t p_height) {
-	ERR_FAIL_MSG(UNIMPLEMENTED);
+	Surface *surface = (Surface *)p_surface;
+	if (surface->width != p_width || surface->height != p_height) {
+		surface->width = p_width;
+		surface->height = p_height;
+		surface->needs_resize = true;
+	}
 }
 
 void RenderingContextDriverWebGPU::surface_set_vsync_mode(SurfaceID p_surface, DisplayServerEnums::VSyncMode p_vsync_mode) {
-	ERR_FAIL_MSG(UNIMPLEMENTED);
+	// The browser always presents in sync with the compositor; store the
+	// preference for reporting purposes only.
+	((Surface *)p_surface)->vsync_mode = p_vsync_mode;
 }
 
 DisplayServerEnums::VSyncMode RenderingContextDriverWebGPU::surface_get_vsync_mode(SurfaceID p_surface) const {
-	ERR_FAIL_V_MSG(DisplayServerEnums::VSYNC_ENABLED, UNIMPLEMENTED);
+	return ((Surface *)p_surface)->vsync_mode;
 }
 
 void RenderingContextDriverWebGPU::surface_set_hdr_output_enabled(SurfaceID p_surface, bool p_enabled) {
-	ERR_FAIL_MSG(UNIMPLEMENTED);
 }
 
 bool RenderingContextDriverWebGPU::surface_get_hdr_output_enabled(SurfaceID p_surface) const {
@@ -96,7 +120,6 @@ bool RenderingContextDriverWebGPU::surface_get_hdr_output_enabled(SurfaceID p_su
 }
 
 void RenderingContextDriverWebGPU::surface_set_hdr_output_reference_luminance(SurfaceID p_surface, float p_reference_luminance) {
-	ERR_FAIL_MSG(UNIMPLEMENTED);
 }
 
 float RenderingContextDriverWebGPU::surface_get_hdr_output_reference_luminance(SurfaceID p_surface) const {
@@ -104,7 +127,6 @@ float RenderingContextDriverWebGPU::surface_get_hdr_output_reference_luminance(S
 }
 
 void RenderingContextDriverWebGPU::surface_set_hdr_output_max_luminance(SurfaceID p_surface, float p_max_luminance) {
-	ERR_FAIL_MSG(UNIMPLEMENTED);
 }
 
 float RenderingContextDriverWebGPU::surface_get_hdr_output_max_luminance(SurfaceID p_surface) const {
@@ -112,7 +134,6 @@ float RenderingContextDriverWebGPU::surface_get_hdr_output_max_luminance(Surface
 }
 
 void RenderingContextDriverWebGPU::surface_set_hdr_output_linear_luminance_scale(SurfaceID p_surface, float p_linear_luminance_scale) {
-	ERR_FAIL_MSG(UNIMPLEMENTED);
 }
 
 float RenderingContextDriverWebGPU::surface_get_hdr_output_linear_luminance_scale(SurfaceID p_surface) const {
@@ -124,25 +145,38 @@ float RenderingContextDriverWebGPU::surface_get_hdr_output_max_value(SurfaceID p
 }
 
 uint32_t RenderingContextDriverWebGPU::surface_get_width(SurfaceID p_surface) const {
-	ERR_FAIL_V_MSG(0, UNIMPLEMENTED);
+	return ((Surface *)p_surface)->width;
 }
 
 uint32_t RenderingContextDriverWebGPU::surface_get_height(SurfaceID p_surface) const {
-	ERR_FAIL_V_MSG(0, UNIMPLEMENTED);
+	return ((Surface *)p_surface)->height;
 }
 
 void RenderingContextDriverWebGPU::surface_set_needs_resize(SurfaceID p_surface, bool p_needs_resize) {
-	ERR_FAIL_MSG(UNIMPLEMENTED);
+	((Surface *)p_surface)->needs_resize = p_needs_resize;
 }
 
 bool RenderingContextDriverWebGPU::surface_get_needs_resize(SurfaceID p_surface) const {
-	return false;
+	return ((Surface *)p_surface)->needs_resize;
 }
 
 void RenderingContextDriverWebGPU::surface_destroy(SurfaceID p_surface) {
-	ERR_FAIL_MSG(UNIMPLEMENTED);
+	Surface *surface = (Surface *)p_surface;
+	if (surface->wgpu_surface != nullptr) {
+		wgpuSurfaceRelease(surface->wgpu_surface);
+	}
+	memdelete(surface);
 }
 
 bool RenderingContextDriverWebGPU::is_debug_utils_enabled() const {
 	return false;
+}
+
+RenderingContextDriverWebGPU::~RenderingContextDriverWebGPU() {
+	if (device != nullptr) {
+		wgpuDeviceRelease(device);
+	}
+	if (instance != nullptr) {
+		wgpuInstanceRelease(instance);
+	}
 }
