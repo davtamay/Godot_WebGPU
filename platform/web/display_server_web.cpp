@@ -50,6 +50,10 @@
 #include "drivers/gles3/rasterizer_gles3.h"
 #endif
 
+#ifdef WEBGPU_ENABLED
+#include "drivers/webgpu/rendering_context_driver_webgpu.h"
+#endif
+
 #include <emscripten.h>
 #include <png.h>
 
@@ -1006,6 +1010,9 @@ Vector<String> DisplayServerWeb::get_rendering_drivers_func() {
 #ifdef GLES3_ENABLED
 	drivers.push_back("opengl3");
 #endif
+#ifdef WEBGPU_ENABLED
+	drivers.push_back("webgpu");
+#endif
 	return drivers;
 }
 
@@ -1130,6 +1137,19 @@ DisplayServerWeb::DisplayServerWeb(const String &p_rendering_driver, DisplayServ
 
 	// Expose method for requesting quit.
 	godot_js_os_request_quit_cb(request_quit_callback);
+
+#ifdef WEBGPU_ENABLED
+	if (p_rendering_driver == "webgpu") {
+		// The WebGPU context cannot create surfaces or present yet; probe it
+		// and fall back to the WebGL 2 path below.
+		RenderingContextDriverWebGPU *webgpu_context = memnew(RenderingContextDriverWebGPU);
+		Error webgpu_err = webgpu_context->initialize();
+		memdelete(webgpu_context);
+		if (webgpu_err != OK) {
+			WARN_PRINT("The WebGPU rendering driver is experimental and cannot render yet; falling back to WebGL 2.");
+		}
+	}
+#endif
 
 #ifdef GLES3_ENABLED
 	bool webgl2_inited = false;

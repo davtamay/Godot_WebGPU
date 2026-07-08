@@ -38,7 +38,7 @@ jobs:
           - leg: stock
             extra_flags: ""
           - leg: rd
-            extra_flags: use_rendering_device=yes
+            extra_flags: webgpu=yes
 
     steps:
       - name: Checkout
