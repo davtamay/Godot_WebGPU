@@ -51,7 +51,7 @@
 #endif
 
 #ifdef WEBGPU_ENABLED
-#include "drivers/webgpu/rendering_context_driver_webgpu.h"
+#include "drivers/webgpu/webgpu_probe.h"
 #endif
 
 #include <emscripten.h>
@@ -1140,13 +1140,13 @@ DisplayServerWeb::DisplayServerWeb(const String &p_rendering_driver, DisplayServ
 
 #ifdef WEBGPU_ENABLED
 	if (p_rendering_driver == "webgpu") {
-		// The WebGPU context cannot create surfaces or present yet; probe it
-		// and fall back to the WebGL 2 path below.
-		RenderingContextDriverWebGPU *webgpu_context = memnew(RenderingContextDriverWebGPU);
-		Error webgpu_err = webgpu_context->initialize();
-		memdelete(webgpu_context);
-		if (webgpu_err != OK) {
-			WARN_PRINT("The WebGPU rendering driver is experimental and cannot render yet; falling back to WebGL 2.");
+		// Present a cleared frame through the whole driver stack on a hidden
+		// probe canvas (a canvas is locked to its first context type, so the
+		// main canvas must stay WebGL until the driver can render scenes).
+		if (godot_webgpu_probe() != 0) {
+			WARN_PRINT("The WebGPU probe failed; falling back to WebGL 2.");
+		} else {
+			WARN_PRINT("The WebGPU driver presented the probe frame but cannot render scenes yet; falling back to WebGL 2.");
 		}
 	}
 #endif
