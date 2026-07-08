@@ -99,6 +99,17 @@ jobs:
           npx playwright install --with-deps chromium
           node ../../misc/webgpu_scripts/loader-smoke.mjs ../../bin
 
+      # Stage 2: call the exported _godot_webgpu_probe() with a software
+      # WebGPU adapter and assert the presented clear color on the probe
+      # canvas. Skips gracefully when the runner cannot deliver an adapter.
+      - name: WebGPU probe smoke test
+        if: matrix.leg == 'rd'
+        run: |
+          cd platform/web
+          npm i --no-save playwright
+          npx playwright install --with-deps chromium
+          node ../../misc/webgpu_scripts/loader-smoke.mjs ../../bin probe
+
       - name: Upload WASM sizes
         uses: actions/upload-artifact@v7
         with:
