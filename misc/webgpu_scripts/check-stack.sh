@@ -6,7 +6,7 @@ set -euo pipefail
 # Files any patch may add/edit freely.
 ALLOWED='^(drivers/webgpu/|platform/web/rendering_context_driver_webgpu|platform/web/js/libs/library_godot_webgpu\.js|misc/webgpu_scripts/|docs/webgpu-|\.github/workflows/web-baseline\.yml)'
 # Shared upstream files: edits allowed ONLY in commits tagged [shared].
-SHARED_OK='^(platform/web/detect\.py|platform/web/SCsub|drivers/SCsub|main/main\.cpp|servers/rendering_server\.cpp|platform/web/js/engine/)'
+SHARED_OK='^(platform/web/detect\.py|platform/web/SCsub|drivers/SCsub|main/main\.cpp|servers/rendering_server\.cpp|platform/web/js/engine/|platform/web/display_server_web\.(cpp|h))'
 
 fail=0
 for c in $(git rev-list --reverse upstream/master..HEAD); do
