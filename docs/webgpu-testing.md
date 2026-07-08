@@ -23,7 +23,8 @@ Prereqs: emsdk (version pinned to match upstream CI - see
 | 0.5 | Patches 01-02 | rd leg (use_rendering_device=yes) also builds, incl. the drivers/webgpu scaffold from patch 02; sizes recorded per leg; stock leg size must not move vs the Patch 00 baseline |
 | 1 | Patch 03 | Loader smoke in headless Chromium (loader-smoke.mjs): Engine.init() resolves, isWebGPUAvailable exposed, WebGL-fallback warning asserted when no WebGPU device is obtainable, no pageerror |
 | 1.5 | Patch 04 | rd leg builds with webgpu=yes: emdawnwebgpu port downloads, compiles, and links; port size cost recorded |
-| 2 (now) | Patch 05 | WebGPU probe: _godot_webgpu_probe() runs the full driver path (device import, surface, swap chain, clear, submit) under a software adapter; hard gates = probe rc 0, success marker, no pageerror, no GPU validation error. Pixel readback is advisory in CI (see below) and strict locally on a real GPU; exported-project boot moves to stage 3 |
+| 2 | Patch 05 | WebGPU probe: _godot_webgpu_probe() runs the full driver path (device import, surface, swap chain, clear, submit) under a software adapter; hard gates = probe rc 0, success marker, no pageerror, no GPU validation error. Pixel readback is advisory in CI (see below) and strict locally on a real GPU; exported-project boot moves to stage 3 |
+| 2.5 (now) | Patch 06 | Probe additionally uploads a 64x64 pattern through the staging path (shadow map -> queue write -> buffer-to-texture -> texture-to-texture into the acquired frame); Dawn validates every copy (gpu-error hard gate), strict local pixel check asserts the pattern color |
 | 3 | Patch 08 | Browser boots exported project; triangle pixel test |
 | 4 | Patch 09+ | Unlit-cube screenshot diff vs goldens (tolerance ~1-2%) |
 
@@ -45,8 +46,9 @@ Pixel readback findings (recorded 2026-07-08, the hard way):
   returns 0, success marker printed, no pageerror, no GPU validation error.
 - Strict pixel verification runs on a real GPU:
   `PROBE_CHANNEL=chrome PROBE_REQUIRE_PIXELS=1 node misc/webgpu_scripts/loader-smoke.mjs bin probe`
-  (verified exact rgb(51,153,229) on 2026-07-08). Re-verify after driver
-  changes to the presentation path.
+  (clear color rgb(51,153,229) verified exact on 2026-07-08; since patch 06
+  the asserted color is the uploaded pattern rgb(230,102,26)). Re-verify
+  after driver changes to the presentation or upload paths.
 
 ## Size policy
 
