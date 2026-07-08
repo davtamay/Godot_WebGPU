@@ -9,8 +9,9 @@
 | 02 | [shared] drivers: Add stubbed WebGPU driver scaffold | RenderingContextDriverWebGPU + RenderingDeviceDriverWebGPU + shader-container-format stubs under drivers/webgpu/, compiled on web when use_rendering_device=yes; unreachable at runtime | 2 (drivers/SCsub) | not yet |
 | 03 | [shared] web: Add async WebGPU device pre-init to the loader | experimentalWebGPU config (default off): loader requests adapter/device before start, stashes Module.preinitializedWebGPUDevice (consumed by our own glue in later patches via Module.WebGPU.importJsDevice), warns + falls back to WebGL otherwise; engine still always boots GL until 05 | ~28 engine.js, ~11 config.js, ~12 features.js | not yet |
 | 04 | [shared] web: Add webgpu option registering the WebGPU driver | webgpu=yes links the emdawnwebgpu port (Dawn-pinned remote port, needs network on cold builds), defines WEBGPU_ENABLED, implies use_rendering_device; "webgpu" advertised by DisplayServerWeb, boot probes the context and falls back to WebGL 2 (context still reports unavailable until 05) | ~12 detect.py, ~20 display_server_web.cpp | not yet |
+| 05 | [shared] webgpu: Implement swap chain presentation with a probe clear | Real context (device import, canvas surfaces) + driver command/swap-chain/present paths; godot_webgpu_probe() presents a cleared frame on a hidden canvas (canvases are locked to their first context type); engine still renders WebGL until textures/shaders land. drivers/webgpu now requires webgpu=yes (not just use_rendering_device) | ~4 SCsub, ~12 display_server_web.cpp | not yet |
 
-(Planned next: 05 canvas surface/presentation + clear screen; 06 buffers/
+(Planned next: 06 buffers/
 textures/samplers/staging; 07 shader translation; 08 command recording;
 09 renderer fallbacks. Old roadmap 04 was split into 04+05 for smaller,
 independently green patches. NOTE: upstream already compiles
