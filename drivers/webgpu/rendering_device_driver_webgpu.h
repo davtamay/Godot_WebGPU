@@ -66,6 +66,17 @@ private:
 		bool owned = true; // False for textures wrapped from external handles.
 	};
 
+	struct ShaderInfo {
+		LocalVector<WGPUShaderModule> modules;
+		LocalVector<ShaderStage> module_stages;
+		LocalVector<WGPUBindGroupLayout> bind_group_layouts;
+		WGPUPipelineLayout pipeline_layout = nullptr;
+		// Constant IDs for WGSL `override` expressions, in reflection order;
+		// pipeline creation keys WGPUConstantEntry by their decimal strings.
+		LocalVector<uint32_t> specialization_constant_ids;
+		uint32_t push_constant_size = 0;
+	};
+
 	struct CommandBufferInfo {
 		WGPUCommandEncoder encoder = nullptr;
 		WGPUCommandBuffer command_buffer = nullptr;
@@ -165,9 +176,9 @@ public:
 	virtual void swap_chain_free(SwapChainID p_swap_chain) override;
 	virtual FramebufferID framebuffer_create(RenderPassID p_render_pass, VectorView<TextureID> p_attachments, uint32_t p_width, uint32_t p_height) override { ERR_FAIL_V_MSG((FramebufferID()), UNIMPLEMENTED); }
 	virtual void framebuffer_free(FramebufferID p_framebuffer) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual ShaderID shader_create_from_container(const Ref<RenderingShaderContainer> &p_shader_container, const Vector<ImmutableSampler> &p_immutable_samplers) override { ERR_FAIL_V_MSG((ShaderID()), UNIMPLEMENTED); }
-	virtual void shader_free(ShaderID p_shader) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void shader_destroy_modules(ShaderID p_shader) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
+	virtual ShaderID shader_create_from_container(const Ref<RenderingShaderContainer> &p_shader_container, const Vector<ImmutableSampler> &p_immutable_samplers) override;
+	virtual void shader_free(ShaderID p_shader) override;
+	virtual void shader_destroy_modules(ShaderID p_shader) override;
 	virtual UniformSetID uniform_set_create(VectorView<BoundUniform> p_uniforms, ShaderID p_shader, uint32_t p_set_index, int p_linear_pool_index) override { ERR_FAIL_V_MSG((UniformSetID()), UNIMPLEMENTED); }
 	virtual void uniform_set_free(UniformSetID p_uniform_set) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual uint32_t uniform_sets_get_dynamic_offsets(VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count) const override { ERR_FAIL_V_MSG(0, UNIMPLEMENTED); }
