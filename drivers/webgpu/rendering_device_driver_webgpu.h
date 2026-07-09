@@ -54,6 +54,10 @@ private:
 		// frame_idx * slice_stride (stride is alignment-padded, the binding
 		// window keeps the requested size).
 		bool dynamic = false;
+		// Set by buffer_persistent_map_advance; the CPU writes that follow
+		// have no flush call on coherent-memory platforms, so the driver
+		// flushes dirty slices itself at submission.
+		bool dirty = false;
 		uint64_t slice_size = 0;
 		uint64_t slice_stride = 0;
 		uint32_t slice_count = 1;
@@ -69,6 +73,8 @@ private:
 	struct TextureInfo {
 		WGPUTexture texture = nullptr;
 		WGPUTextureView view = nullptr;
+		WGPUTextureViewDimension view_dimension = WGPUTextureViewDimension_2D;
+		WGPUTextureUsage usage = WGPUTextureUsage_None;
 		WGPUTextureFormat wgpu_format = WGPUTextureFormat_Undefined;
 		DataFormat format = DATA_FORMAT_MAX;
 		uint64_t allocation_size = 0;
@@ -172,6 +178,7 @@ private:
 	WGPUQueue queue = nullptr;
 	WGPULimits device_limits = {};
 	uint32_t frame_count = 1;
+	LocalVector<BufferInfo *> dynamic_buffers_all;
 
 	// Push-constant ring: values are written into a shadow at 256-aligned
 	// offsets and flushed with one wgpuQueueWriteBuffer before submission;
@@ -193,7 +200,10 @@ private:
 public:
 	virtual Error initialize(uint32_t p_device_index, uint32_t p_frame_count) override;
 	virtual BufferID buffer_create(uint64_t p_size, BitField<BufferUsageBits> p_usage, MemoryAllocationType p_allocation_type, uint64_t p_frames_drawn) override;
-	virtual bool buffer_set_texel_format(BufferID p_buffer, DataFormat p_format) override { ERR_FAIL_V_MSG(false, UNIMPLEMENTED); }
+	// Texel buffers have no WGSL equivalent; they exist only as placeholder
+	// storage bindings (shaders never reference them: the transform removes
+	// the unused declarations), so the texel format is irrelevant.
+	virtual bool buffer_set_texel_format(BufferID p_buffer, DataFormat p_format) override { return true; }
 	virtual void buffer_free(BufferID p_buffer) override;
 	virtual uint64_t buffer_get_allocation_size(BufferID p_buffer) override;
 	virtual uint8_t *buffer_map(BufferID p_buffer) override;
@@ -204,14 +214,17 @@ public:
 	virtual uint64_t buffer_get_device_address(BufferID p_buffer) override { ERR_FAIL_V_MSG(0, UNIMPLEMENTED); }
 	virtual TextureID texture_create(const TextureFormat &p_format, const TextureView &p_view) override;
 	virtual TextureID texture_create_from_extension(uint64_t p_native_texture, TextureType p_type, DataFormat p_format, uint32_t p_array_layers, bool p_depth_stencil, uint32_t p_mipmaps) override;
-	virtual TextureID texture_create_shared(TextureID p_original_texture, const TextureView &p_view) override { ERR_FAIL_V_MSG((TextureID()), UNIMPLEMENTED); }
-	virtual TextureID texture_create_shared_from_slice(TextureID p_original_texture, const TextureView &p_view, TextureSliceType p_slice_type, uint32_t p_layer, uint32_t p_layers, uint32_t p_mipmap, uint32_t p_mipmaps) override { ERR_FAIL_V_MSG((TextureID()), UNIMPLEMENTED); }
+	virtual TextureID texture_create_shared(TextureID p_original_texture, const TextureView &p_view) override;
+	virtual TextureID texture_create_shared_from_slice(TextureID p_original_texture, const TextureView &p_view, TextureSliceType p_slice_type, uint32_t p_layer, uint32_t p_layers, uint32_t p_mipmap, uint32_t p_mipmaps) override;
 	virtual void texture_free(TextureID p_texture) override;
 	virtual uint64_t texture_get_allocation_size(TextureID p_texture) override;
 	virtual void texture_get_copyable_layout(TextureID p_texture, const TextureSubresource &p_subresource, TextureCopyableLayout *r_layout) override;
 	virtual Vector<uint8_t> texture_get_data(TextureID p_texture, uint32_t p_layer) override { ERR_FAIL_V_MSG((Vector<uint8_t>()), UNIMPLEMENTED); }
-	virtual BitField<TextureUsageBits> texture_get_usages_supported_by_format(DataFormat p_format, bool p_cpu_readable) override { ERR_FAIL_V_MSG((BitField<TextureUsageBits>()), UNIMPLEMENTED); }
-	virtual bool texture_can_make_shared_with_format(TextureID p_texture, DataFormat p_format, bool &r_raw_reinterpretation) override { ERR_FAIL_V_MSG(false, UNIMPLEMENTED); }
+	virtual BitField<TextureUsageBits> texture_get_usages_supported_by_format(DataFormat p_format, bool p_cpu_readable) override;
+	virtual bool texture_can_make_shared_with_format(TextureID p_texture, DataFormat p_format, bool &r_raw_reinterpretation) override {
+		r_raw_reinterpretation = false;
+		return true; // Views are created directly from the texture; formats resolve at view creation.
+	}
 	virtual SamplerID sampler_create(const SamplerState &p_state) override;
 	virtual void sampler_free(SamplerID p_sampler) override;
 	virtual bool sampler_is_format_supported_for_filter(DataFormat p_format, SamplerFilter p_filter) override;
@@ -230,7 +243,10 @@ public:
 	virtual CommandPoolID command_pool_create(CommandQueueFamilyID p_cmd_queue_family, CommandBufferType p_cmd_buffer_type) override;
 	// Encoders are transient in WebGPU; returning false makes the engine skip
 	// pool reuse and simply create new command buffers.
-	virtual bool command_pool_reset(CommandPoolID p_cmd_pool) override { return false; }
+	// Encoders and command buffers are released at submission; nothing
+	// lingers, so a reset only has to succeed (returning false aborts the
+	// engine's frame setup before begin_segment runs).
+	virtual bool command_pool_reset(CommandPoolID p_cmd_pool) override { return true; }
 	virtual void command_pool_free(CommandPoolID p_cmd_pool) override;
 	virtual CommandBufferID command_buffer_create(CommandPoolID p_cmd_pool) override;
 	virtual bool command_buffer_begin(CommandBufferID p_cmd_buffer) override;
@@ -242,7 +258,7 @@ public:
 	virtual FramebufferID swap_chain_acquire_framebuffer(CommandQueueID p_cmd_queue, SwapChainID p_swap_chain, bool &r_resize_required) override;
 	virtual RenderPassID swap_chain_get_render_pass(SwapChainID p_swap_chain) override;
 	virtual DataFormat swap_chain_get_format(SwapChainID p_swap_chain) override;
-	virtual ColorSpace swap_chain_get_color_space(SwapChainID p_swap_chain) override { ERR_FAIL_V_MSG((ColorSpace()), UNIMPLEMENTED); }
+	virtual ColorSpace swap_chain_get_color_space(SwapChainID p_swap_chain) override { return COLOR_SPACE_REC709_NONLINEAR_SRGB; }
 	virtual bool swap_chain_get_hdr_output_supported(SwapChainID p_swap_chain) override { ERR_FAIL_V_MSG(false, UNIMPLEMENTED); }
 	virtual void swap_chain_free(SwapChainID p_swap_chain) override;
 	virtual FramebufferID framebuffer_create(RenderPassID p_render_pass, VectorView<TextureID> p_attachments, uint32_t p_width, uint32_t p_height) override;
@@ -258,7 +274,7 @@ public:
 	virtual void command_copy_buffer(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, BufferID p_dst_buffer, VectorView<BufferCopyRegion> p_regions) override;
 	virtual void command_copy_texture(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<TextureCopyRegion> p_regions) override;
 	virtual void command_resolve_texture(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, uint32_t p_src_layer, uint32_t p_src_mipmap, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, uint32_t p_dst_layer, uint32_t p_dst_mipmap) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void command_clear_color_texture(CommandBufferID p_cmd_buffer, TextureID p_texture, TextureLayout p_texture_layout, const Color &p_color, const TextureSubresourceRange &p_subresources) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
+	virtual void command_clear_color_texture(CommandBufferID p_cmd_buffer, TextureID p_texture, TextureLayout p_texture_layout, const Color &p_color, const TextureSubresourceRange &p_subresources) override;
 	virtual void command_clear_depth_stencil_texture(CommandBufferID p_cmd_buffer, TextureID p_texture, TextureLayout p_texture_layout, float p_depth, uint8_t p_stencil, const TextureSubresourceRange &p_subresources) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual void command_copy_buffer_to_texture(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<BufferTextureCopyRegion> p_regions) override;
 	virtual void command_copy_texture_to_buffer(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, BufferID p_dst_buffer, VectorView<BufferTextureCopyRegion> p_regions) override;
@@ -328,15 +344,25 @@ public:
 	virtual void end_segment() override;
 	virtual void set_object_name(ObjectType p_type, ID p_driver_id, const String &p_name) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual uint64_t get_resource_native_handle(DriverResource p_type, ID p_driver_id) override { ERR_FAIL_V_MSG(0, UNIMPLEMENTED); }
-	virtual uint64_t get_total_memory_used() override { ERR_FAIL_V_MSG(0, UNIMPLEMENTED); }
-	virtual uint64_t get_lazily_memory_used() override { ERR_FAIL_V_MSG(0, UNIMPLEMENTED); }
+	// WebGPU exposes no memory statistics.
+	virtual uint64_t get_total_memory_used() override { return 0; }
+	virtual uint64_t get_lazily_memory_used() override { return 0; }
 	virtual uint64_t limit_get(Limit p_limit) override;
-	virtual bool has_feature(Features p_feature) override { ERR_FAIL_V_MSG(false, UNIMPLEMENTED); }
+	virtual bool has_feature(Features p_feature) override {
+		switch (p_feature) {
+			// Half float needs the shader-f16 device feature (tint emits
+			// enable f16), which the loader does not request yet.
+			case SUPPORTS_FRAGMENT_SHADER_WITH_ONLY_SIDE_EFFECTS:
+				return true;
+			default:
+				return false;
+		}
+	}
 	virtual const MultiviewCapabilities &get_multiview_capabilities() override { return multiview_capabilities; }
 	virtual const FragmentShadingRateCapabilities &get_fragment_shading_rate_capabilities() override { return fragment_shading_rate_capabilities; }
 	virtual const FragmentDensityMapCapabilities &get_fragment_density_map_capabilities() override { return fragment_density_map_capabilities; }
-	virtual String get_api_name() const override { ERR_FAIL_V_MSG((String()), UNIMPLEMENTED); }
-	virtual String get_api_version() const override { ERR_FAIL_V_MSG((String()), UNIMPLEMENTED); }
+	virtual String get_api_name() const override { return "WebGPU"; }
+	virtual String get_api_version() const override { return "1.0"; }
 	virtual String get_pipeline_cache_uuid() const override { ERR_FAIL_V_MSG((String()), UNIMPLEMENTED); }
 	virtual const Capabilities &get_capabilities() const override { return capabilities; }
 	virtual const RenderingShaderContainerFormat &get_shader_container_format() const override { return shader_container_format; }
