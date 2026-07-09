@@ -455,6 +455,72 @@ static void _spirv_rewrite_non_finite_tests(LocalVector<uint32_t> &p_module) {
 	p_module = out;
 }
 
+// Tint's reader lacks GLSL.std.450 ModfStruct; lower it to
+// Trunc + subtract + composite (member 0 = fraction, member 1 = whole).
+static void _spirv_rewrite_modf_struct(LocalVector<uint32_t> &p_module) {
+	const uint32_t OP_EXT_INST = 12;
+	const uint32_t GLSL450_MODF_STRUCT = 36;
+	const uint32_t GLSL450_TRUNC = 3;
+	const uint32_t OP_F_SUB = 131;
+	bool any = false;
+	HashMap<uint32_t, uint32_t> struct_member_type; // Struct id -> first member type.
+	uint32_t i = 5;
+	while (i < p_module.size()) {
+		const uint32_t count = p_module[i] >> 16;
+		const uint32_t opcode = p_module[i] & 0xFFFF;
+		if (opcode == 30 && count >= 3) { // OpTypeStruct.
+			struct_member_type[p_module[i + 1]] = p_module[i + 2];
+		} else if (opcode == OP_EXT_INST && count == 6 && p_module[i + 4] == GLSL450_MODF_STRUCT) {
+			any = true;
+		}
+		i += count;
+	}
+	if (!any) {
+		return;
+	}
+	uint32_t next_id = p_module[3];
+	LocalVector<uint32_t> out;
+	out.reserve(p_module.size() + 16);
+	i = 0;
+	while (i < p_module.size()) {
+		const uint32_t count = i < 5 ? 1 : p_module[i] >> 16;
+		const uint32_t opcode = i < 5 ? 0xFFFFFFFF : p_module[i] & 0xFFFF;
+		if (opcode == OP_EXT_INST && count == 6 && p_module[i + 4] == GLSL450_MODF_STRUCT) {
+			const uint32_t result_type = p_module[i + 1];
+			const uint32_t result_id = p_module[i + 2];
+			const uint32_t set_id = p_module[i + 3];
+			const uint32_t x = p_module[i + 5];
+			const uint32_t *member_type = struct_member_type.getptr(result_type);
+			ERR_FAIL_NULL(member_type);
+			const uint32_t whole_id = next_id++;
+			const uint32_t frac_id = next_id++;
+			out.push_back((6 << 16) | OP_EXT_INST);
+			out.push_back(*member_type);
+			out.push_back(whole_id);
+			out.push_back(set_id);
+			out.push_back(GLSL450_TRUNC);
+			out.push_back(x);
+			out.push_back((5 << 16) | OP_F_SUB);
+			out.push_back(*member_type);
+			out.push_back(frac_id);
+			out.push_back(x);
+			out.push_back(whole_id);
+			out.push_back((5 << 16) | SPIRV_OP_COMPOSITE_CONSTRUCT);
+			out.push_back(result_type);
+			out.push_back(result_id);
+			out.push_back(frac_id);
+			out.push_back(whole_id);
+		} else {
+			for (uint32_t w = 0; w < count; w++) {
+				out.push_back(p_module[i + w]);
+			}
+		}
+		i += count;
+	}
+	out[3] = next_id;
+	p_module = out;
+}
+
 // Tint only accepts the constant 1.0 stored to PointSize; the engine writes
 // computed sizes for point primitives. Dropping the stores loses point-size
 // control on WebGPU (points render 1px) but keeps the variants compiling.
@@ -626,19 +692,46 @@ static void _spirv_convert_memory_barriers(LocalVector<uint32_t> &p_module) {
 
 	uint32_t next_id = p_module[3];
 	LocalVector<uint32_t> new_globals;
+	if (uint_type == 0) {
+		uint_type = next_id++;
+		new_globals.push_back((4 << 16) | SPIRV_OP_TYPE_INT);
+		new_globals.push_back(uint_type);
+		new_globals.push_back(32);
+		new_globals.push_back(0);
+	}
 	if (workgroup_const == 0) {
-		if (uint_type == 0) {
-			uint_type = next_id++;
-			new_globals.push_back((4 << 16) | SPIRV_OP_TYPE_INT);
-			new_globals.push_back(uint_type);
-			new_globals.push_back(32);
-			new_globals.push_back(0);
-		}
 		workgroup_const = next_id++;
 		new_globals.push_back((4 << 16) | SPIRV_OP_CONSTANT);
 		new_globals.push_back(uint_type);
 		new_globals.push_back(workgroup_const);
 		new_globals.push_back(SPIRV_SCOPE_WORKGROUP);
+	}
+	// Tint only accepts the exact semantics of workgroupBarrier() and
+	// storageBarrier(); canonicalize instead of passing the originals.
+	const uint32_t SEM_WORKGROUP = 0x108; // AcquireRelease | WorkgroupMemory.
+	const uint32_t SEM_STORAGE = 0x48; // AcquireRelease | UniformMemory.
+	uint32_t sem_workgroup_const = 0;
+	uint32_t sem_storage_const = 0;
+	for (const KeyValue<uint32_t, uint32_t> &constant : constant_values) {
+		if (constant.value == SEM_WORKGROUP && sem_workgroup_const == 0) {
+			sem_workgroup_const = constant.key;
+		} else if (constant.value == SEM_STORAGE && sem_storage_const == 0) {
+			sem_storage_const = constant.key;
+		}
+	}
+	if (sem_workgroup_const == 0) {
+		sem_workgroup_const = next_id++;
+		new_globals.push_back((4 << 16) | SPIRV_OP_CONSTANT);
+		new_globals.push_back(uint_type);
+		new_globals.push_back(sem_workgroup_const);
+		new_globals.push_back(SEM_WORKGROUP);
+	}
+	if (sem_storage_const == 0) {
+		sem_storage_const = next_id++;
+		new_globals.push_back((4 << 16) | SPIRV_OP_CONSTANT);
+		new_globals.push_back(uint_type);
+		new_globals.push_back(sem_storage_const);
+		new_globals.push_back(SEM_STORAGE);
 	}
 
 	LocalVector<uint32_t> out;
@@ -653,15 +746,12 @@ static void _spirv_convert_memory_barriers(LocalVector<uint32_t> &p_module) {
 		const uint32_t count = i < 5 ? 1 : p_module[i] >> 16;
 		const uint32_t opcode = i < 5 ? 0xFFFFFFFF : p_module[i] & 0xFFFF;
 		if (opcode == SPIRV_OP_MEMORY_BARRIER) {
-			uint32_t memory_scope = p_module[i + 1];
-			const uint32_t *scope_value = constant_values.getptr(memory_scope);
-			if (scope_value != nullptr && *scope_value == SPIRV_SCOPE_DEVICE) {
-				memory_scope = workgroup_const;
-			}
+			const uint32_t *semantics_value = constant_values.getptr(p_module[i + 2]);
+			const bool workgroup_memory = semantics_value == nullptr || (*semantics_value & 0x100) != 0;
 			out.push_back((4 << 16) | SPIRV_OP_CONTROL_BARRIER);
 			out.push_back(workgroup_const);
-			out.push_back(memory_scope);
-			out.push_back(p_module[i + 2]);
+			out.push_back(workgroup_const);
+			out.push_back(workgroup_memory ? sem_workgroup_const : sem_storage_const);
 		} else {
 			for (uint32_t w = 0; w < count; w++) {
 				out.push_back(p_module[i + w]);
@@ -886,6 +976,7 @@ bool RenderingShaderContainerWebGPU::_transform_spirv(Vector<uint8_t> &r_spirv) 
 	_spirv_clamp_infinite_constants(out);
 	_spirv_splat_select_conditions(out);
 	_spirv_rewrite_non_finite_tests(out);
+	_spirv_rewrite_modf_struct(out);
 	_spirv_strip_point_size_stores(out);
 	_spirv_convert_memory_barriers(out);
 	_spirv_remove_unused_resource_bindings(out);
@@ -904,6 +995,18 @@ uint32_t RenderingShaderContainerWebGPU::_format_version() const {
 }
 
 bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p_shader) {
+	// Read-write storage images beyond 32-bit single-channel formats cannot
+	// exist in WebGPU; failing the bake here turns those variants into
+	// ordinary runtime cache misses (benign) instead of runtime shader
+	// failures.
+	for (const ReflectionBindingData &binding : reflection_binding_set_uniforms_data) {
+		if (binding.type != RDC::UNIFORM_TYPE_IMAGE || binding.writable == 0) {
+			continue;
+		}
+		const bool rw_ok = binding.texture_format == RDC::DATA_FORMAT_R32_SFLOAT || binding.texture_format == RDC::DATA_FORMAT_R32_UINT || binding.texture_format == RDC::DATA_FORMAT_R32_SINT;
+		ERR_FAIL_COND_V_MSG(!rw_ok, false, vformat("Variant uses read-write storage on format %d, which WebGPU does not support.", binding.texture_format));
+	}
+
 	ERR_FAIL_COND_V_MSG(tint_path.is_empty(), false,
 			"WebGPU shaders can only be compiled at export time with the Tint translator configured; runtime shader compilation is not supported on the web platform.");
 
@@ -942,13 +1045,42 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 			ERR_FAIL_V_MSG(false, vformat("Tint translation of shader '%s' stage #%d failed (exit code %d): %s", String::utf8(shader_name.get_data()), i, exit_code, output));
 		}
 
-		const PackedByteArray wgsl = FileAccess::get_file_as_bytes(wgsl_path);
+		PackedByteArray wgsl = FileAccess::get_file_as_bytes(wgsl_path);
 		DirAccess::remove_absolute(spirv_path);
 		DirAccess::remove_absolute(wgsl_path);
 		ERR_FAIL_COND_V_MSG(wgsl.is_empty(), false, "Tint produced no WGSL output.");
 
 		RenderingShaderContainer::Shader &shader = shaders.ptrw()[i];
 		shader.shader_stage = spirv_stages[i].shader_stage;
+		// Newer WGSL reserves words Tint's pinned version still emits as
+		// identifiers (e.g. struct members named 'target'); rename them.
+		{
+			String text;
+			text.append_utf8((const char *)wgsl.ptr(), wgsl.size());
+			bool changed = false;
+			for (const char *reserved : { "target", "unorm", "snorm", "filter" }) {
+				const String word = reserved;
+				int pos = 0;
+				while ((pos = text.find(word, pos)) != -1) {
+					const char32_t before = pos > 0 ? text[pos - 1] : ' ';
+					const char32_t after = pos + word.length() < text.length() ? text[pos + word.length()] : ' ';
+					const bool ident_before = is_ascii_identifier_char(before);
+					const bool ident_after = is_ascii_identifier_char(after);
+					if (!ident_before && !ident_after) {
+						text = text.substr(0, pos) + word + "_gd" + text.substr(pos + word.length());
+						changed = true;
+						pos += word.length() + 3;
+					} else {
+						pos += word.length();
+					}
+				}
+			}
+			if (changed) {
+				CharString utf8 = text.utf8();
+				wgsl.resize(utf8.length());
+				memcpy(wgsl.ptrw(), utf8.get_data(), utf8.length());
+			}
+		}
 		shader.code_decompressed_size = wgsl.size();
 		shader.code_compressed_bytes.resize(wgsl.size());
 		uint32_t compressed_size = 0;
