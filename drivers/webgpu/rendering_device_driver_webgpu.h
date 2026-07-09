@@ -71,6 +71,15 @@ private:
 	};
 
 	struct TextureInfo {
+		// WebGPU has no view component swizzle; the driver emulates the
+		// patterns the engine uses (LA8/L8/A8 images) by promoting the
+		// texture to RGBA8 and expanding texels at upload time.
+		enum SwizzleExpand : uint8_t {
+			SWIZZLE_EXPAND_NONE,
+			SWIZZLE_EXPAND_RG_TO_RRRG,
+			SWIZZLE_EXPAND_R_TO_RRR1,
+			SWIZZLE_EXPAND_R_TO_000R,
+		};
 		WGPUTexture texture = nullptr;
 		WGPUTextureView view = nullptr;
 		WGPUTextureViewDimension view_dimension = WGPUTextureViewDimension_2D;
@@ -79,6 +88,7 @@ private:
 		DataFormat format = DATA_FORMAT_MAX;
 		uint64_t allocation_size = 0;
 		bool owned = true; // False for textures wrapped from external handles.
+		SwizzleExpand swizzle_expand = SWIZZLE_EXPAND_NONE;
 	};
 
 	struct ShaderInfo {
