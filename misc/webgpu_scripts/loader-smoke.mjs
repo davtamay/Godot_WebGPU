@@ -67,6 +67,10 @@ const PROBE_CHROMIUM_FLAGS = ['--enable-unsafe-webgpu', '--use-webgpu-adapter=sw
 // frame.
 const PROBE_RGB = [230, 102, 26];
 const TRIANGLE_RGB = [230, 51, 230];
+// Instanced-quad stage: two quads pulling rect + color from a storage buffer
+// (the canvas renderer's pattern). Colors match webgpu_probe.cpp.
+const INST0_RGB = [51, 230, 76];
+const INST1_RGB = [242, 217, 25];
 const PROBE_TOLERANCE = 12;
 
 const probePage = `<!DOCTYPE html>
@@ -294,6 +298,9 @@ async function runProbe(browser, base) {
 	if (!consoleMessages.some((m) => m.includes('WebGPU probe: dynamic buffer OK'))) {
 		fail('[probe] dynamic buffer marker not found in console output');
 	}
+	if (!consoleMessages.some((m) => m.includes('WebGPU probe: instanced quads OK'))) {
+		fail('[probe] instanced quads marker not found in console output');
+	}
 
 	// Read back the presented pixels via a compositor screenshot. A 2D
 	// drawImage of a WebGPU canvas reads the CURRENT texture, which is
@@ -329,6 +336,10 @@ async function runProbe(browser, base) {
 	};
 	checkPixel('pattern', cornerPixel, PROBE_RGB);
 	checkPixel('triangle', centerPixel, TRIANGLE_RGB);
+	// Instanced quads: left rect spans NDC x [-0.9,-0.5] (uv center 0.15),
+	// right rect [0.5,0.9] (uv center 0.85); both span NDC y [-0.2,0.2].
+	checkPixel('instanced quad 0', samplePngPixel(shot, 0.15, 0.5), INST0_RGB);
+	checkPixel('instanced quad 1', samplePngPixel(shot, 0.85, 0.5), INST1_RGB);
 
 	console.log(`loader-smoke: [probe] rc=0, markers found, corner=${JSON.stringify(cornerPixel)}, center=${JSON.stringify(centerPixel)}, pageErrors=${pageErrors.length}`);
 	await page.close();
