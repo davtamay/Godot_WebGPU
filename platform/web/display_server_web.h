@@ -43,6 +43,11 @@ class InputEvent;
 class InputEventWithModifiers;
 class NativeMenu;
 
+#ifdef WEBGPU_ENABLED
+class RenderingContextDriver;
+class RenderingDevice;
+#endif
+
 class DisplayServerWeb : public DisplayServer {
 	GDSOFTCLASS(DisplayServerWeb, DisplayServer);
 
@@ -62,6 +67,11 @@ private:
 
 #ifdef GLES3_ENABLED
 	EMSCRIPTEN_WEBGL_CONTEXT_HANDLE webgl_ctx = 0;
+#ifdef WEBGPU_ENABLED
+	RenderingContextDriver *rendering_context = nullptr;
+	RenderingDevice *rendering_device = nullptr;
+	Size2i rd_window_size;
+#endif
 #endif
 
 	HashMap<int64_t, CharString> utterance_ids;
