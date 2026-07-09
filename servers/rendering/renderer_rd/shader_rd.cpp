@@ -338,10 +338,10 @@ void ShaderRD::_build_variant_code(StringBuilder &builder, uint32_t p_variant, c
 }
 
 Vector<String> ShaderRD::_build_variant_stage_sources(uint32_t p_variant, CompileData p_data) {
-	if (!variants_enabled[p_variant]) {
-		return Vector<String>(); // Variant is disabled, return.
-	}
-
+	// Disabled variants are not skipped here: runtime compile paths already
+	// gate on enablement before building sources, and the shader baker needs
+	// sources for variants the HOST renderer disabled (the target device may
+	// enable them).
 	Vector<String> stage_sources;
 	stage_sources.resize(RD::SHADER_STAGE_MAX);
 
