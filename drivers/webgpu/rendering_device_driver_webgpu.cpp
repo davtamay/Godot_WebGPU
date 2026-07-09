@@ -30,6 +30,10 @@
 
 #include "rendering_device_driver_webgpu.h"
 
+#include "core/string/print_string.h"
+
+
+
 // See platform/web/js/libs/library_godot_webgpu.js.
 extern "C" {
 // Returns 1 for bgra8unorm, 2 for rgba8unorm.
@@ -94,6 +98,15 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 		}
 		if (push_constant_used > 0) {
 			wgpuQueueWriteBuffer(queue, push_constant_buffer, 0, push_constant_shadow, push_constant_used);
+		}
+		// Persistent-map writes have no flush on coherent-memory platforms;
+		// push dirty slices before their commands execute.
+		for (BufferInfo *dynamic_buffer : dynamic_buffers_all) {
+			if (dynamic_buffer->dirty) {
+				const uint64_t slice_offset = dynamic_buffer->frame_idx * dynamic_buffer->slice_stride;
+				wgpuQueueWriteBuffer(queue, dynamic_buffer->buffer, slice_offset, dynamic_buffer->shadow + slice_offset, dynamic_buffer->slice_stride);
+				dynamic_buffer->dirty = false;
+			}
 		}
 		wgpuQueueSubmit(queue, wgpu_buffers.size(), wgpu_buffers.ptr());
 		for (uint32_t i = 0; i < p_cmd_buffers.size(); i++) {
@@ -170,6 +183,41 @@ bool RenderingDeviceDriverWebGPU::command_buffer_begin(CommandBufferID p_cmd_buf
 		cb_info->pending_dynamic_offsets[i].clear();
 	}
 	return true;
+}
+
+void RenderingDeviceDriverWebGPU::command_clear_color_texture(CommandBufferID p_cmd_buffer, TextureID p_texture, TextureLayout p_texture_layout, const Color &p_color, const TextureSubresourceRange &p_subresources) {
+	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	const TextureInfo *texture = (const TextureInfo *)p_texture.id;
+	ERR_FAIL_NULL(cb_info->encoder);
+	_end_compute_pass(cb_info);
+	// WebGPU has no texture clear command; run an empty render pass with a
+	// clear load op per mip/layer.
+	for (uint32_t mip = 0; mip < p_subresources.mipmap_count; mip++) {
+		for (uint32_t layer = 0; layer < p_subresources.layer_count; layer++) {
+			WGPUTextureViewDescriptor view_desc = WGPU_TEXTURE_VIEW_DESCRIPTOR_INIT;
+			view_desc.format = texture->wgpu_format;
+			view_desc.dimension = WGPUTextureViewDimension_2D;
+			view_desc.baseMipLevel = p_subresources.base_mipmap + mip;
+			view_desc.mipLevelCount = 1;
+			view_desc.baseArrayLayer = p_subresources.base_layer + layer;
+			view_desc.arrayLayerCount = 1;
+			WGPUTextureView view = wgpuTextureCreateView(texture->texture, &view_desc);
+			ERR_FAIL_NULL(view);
+			WGPURenderPassColorAttachment color_attachment = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
+			color_attachment.view = view;
+			color_attachment.loadOp = WGPULoadOp_Clear;
+			color_attachment.storeOp = WGPUStoreOp_Store;
+			color_attachment.clearValue = { p_color.r, p_color.g, p_color.b, p_color.a };
+			WGPURenderPassDescriptor pass_desc = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
+			pass_desc.colorAttachmentCount = 1;
+			pass_desc.colorAttachments = &color_attachment;
+			WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(cb_info->encoder, &pass_desc);
+			ERR_FAIL_NULL(pass);
+			wgpuRenderPassEncoderEnd(pass);
+			wgpuRenderPassEncoderRelease(pass);
+			wgpuTextureViewRelease(view);
+		}
+	}
 }
 
 void RenderingDeviceDriverWebGPU::command_buffer_end(CommandBufferID p_cmd_buffer) {
@@ -347,6 +395,47 @@ void RenderingDeviceDriverWebGPU::swap_chain_free(SwapChainID p_swap_chain) {
 
 // Uncompressed color, packed, and depth/stencil formats plus the BC family.
 // ETC2/EAC and ASTC (mobile-web) are deferred until a consumer exists.
+#include <emscripten/proxying.h>
+#include <emscripten/threading.h>
+
+#include <type_traits>
+
+// The emdawnwebgpu bindings keep their JS object tables on the thread that
+// imported the device, and WebGPU objects cannot be shared across workers.
+// The engine creates resources from worker threads (ShaderRD variant loads,
+// resource loading), so creation and destruction proxy synchronously to the
+// main thread. The main thread processes the system proxying queue while it
+// is blocked on futexes (e.g. waiting on WorkerThreadPool group tasks), so
+// this cannot deadlock. Command recording and submission stay unproxied:
+// they happen on the main thread's render loop.
+template <typename F>
+static auto _webgpu_run_on_main(F p_func) -> decltype(p_func()) {
+	using ReturnType = decltype(p_func());
+	if constexpr (std::is_void_v<ReturnType>) {
+		struct Context {
+			F *func;
+		} context = { &p_func };
+		emscripten_proxy_sync(emscripten_proxy_get_system_queue(), emscripten_main_runtime_thread_id(), [](void *p_context) { (*((Context *)p_context)->func)(); }, &context);
+	} else {
+		ReturnType result{};
+		struct Context {
+			F *func;
+			ReturnType *result;
+		} context = { &p_func, &result };
+		emscripten_proxy_sync(emscripten_proxy_get_system_queue(), emscripten_main_runtime_thread_id(), [](void *p_context) { Context *c = (Context *)p_context; *c->result = (*c->func)(); }, &context);
+		return result;
+	}
+}
+
+// Re-enters the same method on the main thread (where the guard passes).
+#define WEBGPU_MAIN_THREAD_GUARD(...)                                 \
+	if (!emscripten_is_main_runtime_thread()) {                       \
+		return _webgpu_run_on_main([&]() { return __VA_ARGS__; });    \
+	}
+
+static WGPUTextureViewDimension _texture_type_to_wgpu_view_dimension(RenderingDeviceCommons::TextureType p_type);
+static bool _is_depth_stencil_format(RenderingDeviceCommons::DataFormat p_format);
+
 static WGPUTextureFormat _data_format_to_wgpu(RenderingDeviceCommons::DataFormat p_format) {
 	switch (p_format) {
 		case RenderingDeviceCommons::DATA_FORMAT_R8_UNORM:
@@ -523,7 +612,8 @@ static uint32_t _data_format_texel_size(RenderingDeviceCommons::DataFormat p_for
 }
 
 RenderingDeviceDriver::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint64_t p_size, BitField<BufferUsageBits> p_usage, MemoryAllocationType p_allocation_type, uint64_t p_frames_drawn) {
-	ERR_FAIL_COND_V_MSG(p_usage.has_flag(BUFFER_USAGE_TEXEL_BIT), BufferID(), "Texel buffers are not supported by WebGPU.");
+	WEBGPU_MAIN_THREAD_GUARD(buffer_create(p_size, p_usage, p_allocation_type, p_frames_drawn));
+
 	ERR_FAIL_COND_V_MSG(p_usage.has_flag(BUFFER_USAGE_DEVICE_ADDRESS_BIT), BufferID(), "Buffer device addresses are not supported by WebGPU.");
 
 	WGPUBufferUsage usage = WGPUBufferUsage_None;
@@ -537,6 +627,10 @@ RenderingDeviceDriver::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint6
 		usage |= WGPUBufferUsage_Uniform;
 	}
 	if (p_usage.has_flag(BUFFER_USAGE_STORAGE_BIT)) {
+		usage |= WGPUBufferUsage_Storage;
+	}
+	if (p_usage.has_flag(BUFFER_USAGE_TEXEL_BIT)) {
+		// No WGSL equivalent; bound only as a placeholder storage buffer.
 		usage |= WGPUBufferUsage_Storage;
 	}
 	if (p_usage.has_flag(BUFFER_USAGE_INDEX_BIT)) {
@@ -581,6 +675,7 @@ RenderingDeviceDriver::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint6
 		buffer->slice_count = frame_count;
 		buffer->shadow = (uint8_t *)memalloc(alloc_size);
 		memset(buffer->shadow, 0, alloc_size);
+		dynamic_buffers_all.push_back(buffer);
 		return BufferID(buffer);
 	}
 	if (p_allocation_type == MEMORY_ALLOCATION_TYPE_CPU) {
@@ -590,6 +685,13 @@ RenderingDeviceDriver::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint6
 }
 
 void RenderingDeviceDriverWebGPU::buffer_free(BufferID p_buffer) {
+	WEBGPU_MAIN_THREAD_GUARD(buffer_free(p_buffer));
+	{
+		BufferInfo *freed = (BufferInfo *)p_buffer.id;
+		if (freed->dynamic) {
+			dynamic_buffers_all.erase(freed);
+		}
+	}
 	BufferInfo *buffer = (BufferInfo *)p_buffer.id;
 	wgpuBufferRelease(buffer->buffer);
 	if (buffer->shadow != nullptr) {
@@ -603,19 +705,23 @@ uint64_t RenderingDeviceDriverWebGPU::buffer_get_allocation_size(BufferID p_buff
 }
 
 uint8_t *RenderingDeviceDriverWebGPU::buffer_persistent_map_advance(BufferID p_buffer, uint64_t p_frames_drawn) {
+	WEBGPU_MAIN_THREAD_GUARD(buffer_persistent_map_advance(p_buffer, p_frames_drawn));
 	BufferInfo *buffer = (BufferInfo *)p_buffer.id;
 	ERR_FAIL_COND_V_MSG(!buffer->dynamic, nullptr, "Buffer must have BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT. Use buffer_map() instead.");
 	buffer->frame_idx = (buffer->frame_idx + 1u) % buffer->slice_count;
+	buffer->dirty = true;
 	return buffer->shadow + buffer->frame_idx * buffer->slice_stride;
 }
 
 void RenderingDeviceDriverWebGPU::buffer_flush(BufferID p_buffer) {
+	WEBGPU_MAIN_THREAD_GUARD(buffer_flush(p_buffer));
 	const BufferInfo *buffer = (const BufferInfo *)p_buffer.id;
 	ERR_FAIL_COND(!buffer->dynamic);
 	// Executes before any subsequently submitted command buffer, matching the
 	// staging shadow semantics in buffer_unmap().
 	const uint64_t offset = buffer->frame_idx * buffer->slice_stride;
 	wgpuQueueWriteBuffer(queue, buffer->buffer, offset, buffer->shadow + offset, buffer->slice_stride);
+	((BufferInfo *)p_buffer.id)->dirty = false;
 }
 
 uint64_t RenderingDeviceDriverWebGPU::buffer_get_dynamic_offsets(Span<BufferID> p_buffers) {
@@ -648,6 +754,7 @@ uint32_t RenderingDeviceDriverWebGPU::uniform_sets_get_dynamic_offsets(VectorVie
 }
 
 uint8_t *RenderingDeviceDriverWebGPU::buffer_map(BufferID p_buffer) {
+	WEBGPU_MAIN_THREAD_GUARD(buffer_map(p_buffer));
 	ERR_FAIL_COND_V_MSG(((BufferInfo *)p_buffer.id)->dynamic, nullptr, "Use buffer_persistent_map_advance() for dynamic buffers.");
 	BufferInfo *buffer = (BufferInfo *)p_buffer.id;
 	ERR_FAIL_NULL_V_MSG(buffer->shadow, nullptr, "Only CPU (upload) buffers can be mapped by the WebGPU driver; downloads are not supported yet.");
@@ -655,12 +762,55 @@ uint8_t *RenderingDeviceDriverWebGPU::buffer_map(BufferID p_buffer) {
 }
 
 void RenderingDeviceDriverWebGPU::buffer_unmap(BufferID p_buffer) {
+	WEBGPU_MAIN_THREAD_GUARD(buffer_unmap(p_buffer));
 	BufferInfo *buffer = (BufferInfo *)p_buffer.id;
 	ERR_FAIL_NULL(buffer->shadow);
 	wgpuQueueWriteBuffer(queue, buffer->buffer, 0, buffer->shadow, buffer->size);
 }
 
+// WebGPU only allows view reinterpretation between srgb/non-srgb siblings,
+// and the sibling must be declared in viewFormats at texture creation.
+static bool _wgpu_format_supports_storage(WGPUTextureFormat p_format) {
+	switch (p_format) {
+		case WGPUTextureFormat_RGBA8Unorm:
+		case WGPUTextureFormat_RGBA8Snorm:
+		case WGPUTextureFormat_RGBA8Uint:
+		case WGPUTextureFormat_RGBA8Sint:
+		case WGPUTextureFormat_RGBA16Float:
+		case WGPUTextureFormat_RGBA16Uint:
+		case WGPUTextureFormat_RGBA16Sint:
+		case WGPUTextureFormat_R32Float:
+		case WGPUTextureFormat_RG32Float:
+		case WGPUTextureFormat_RGBA32Float:
+		case WGPUTextureFormat_R32Uint:
+		case WGPUTextureFormat_R32Sint:
+		case WGPUTextureFormat_RG32Uint:
+		case WGPUTextureFormat_RG32Sint:
+		case WGPUTextureFormat_RGBA32Uint:
+		case WGPUTextureFormat_RGBA32Sint:
+			return true;
+		default:
+			return false;
+	}
+}
+
+static WGPUTextureFormat _wgpu_srgb_sibling(WGPUTextureFormat p_format) {
+	switch (p_format) {
+		case WGPUTextureFormat_RGBA8Unorm:
+			return WGPUTextureFormat_RGBA8UnormSrgb;
+		case WGPUTextureFormat_RGBA8UnormSrgb:
+			return WGPUTextureFormat_RGBA8Unorm;
+		case WGPUTextureFormat_BGRA8Unorm:
+			return WGPUTextureFormat_BGRA8UnormSrgb;
+		case WGPUTextureFormat_BGRA8UnormSrgb:
+			return WGPUTextureFormat_BGRA8Unorm;
+		default:
+			return WGPUTextureFormat_Undefined;
+	}
+}
+
 RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &p_format, const TextureView &p_view) {
+	WEBGPU_MAIN_THREAD_GUARD(texture_create(p_format, p_view));
 	const WGPUTextureFormat wgpu_format = _data_format_to_wgpu(p_format.format);
 	ERR_FAIL_COND_V_MSG(wgpu_format == WGPUTextureFormat_Undefined, TextureID(), vformat("Unsupported texture format %d on the WebGPU driver.", p_format.format));
 	ERR_FAIL_COND_V_MSG(p_view.format != p_format.format, TextureID(), "Texture views with a different format are not supported by the WebGPU driver yet.");
@@ -673,7 +823,14 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 		usage |= WGPUTextureUsage_TextureBinding;
 	}
 	if (p_format.usage_bits & (TEXTURE_USAGE_STORAGE_BIT | TEXTURE_USAGE_STORAGE_ATOMIC_BIT)) {
-		usage |= WGPUTextureUsage_StorageBinding;
+		// Degrade instead of failing: upstream creates the default VRS
+		// texture as R8Uint storage unconditionally, a combination WebGPU
+		// rejects at the descriptor level. The texture only breaks if a
+		// shader actually reads it as a storage image, which Dawn validates
+		// at bind group creation.
+		if (_wgpu_format_supports_storage(wgpu_format)) {
+			usage |= WGPUTextureUsage_StorageBinding;
+		}
 	}
 	if (p_format.usage_bits & (TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
 		usage |= WGPUTextureUsage_RenderAttachment;
@@ -688,6 +845,19 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 	WGPUTextureDescriptor texture_desc = WGPU_TEXTURE_DESCRIPTOR_INIT;
 	texture_desc.usage = usage;
 	texture_desc.format = wgpu_format;
+	const WGPUTextureFormat srgb_sibling = _wgpu_srgb_sibling(wgpu_format);
+	if (srgb_sibling != WGPUTextureFormat_Undefined) {
+		texture_desc.viewFormatCount = 1;
+		texture_desc.viewFormats = &srgb_sibling;
+		if ((usage & WGPUTextureUsage_StorageBinding) != 0) {
+			// The pinned Dawn ignores per-view usage, so an sRGB view of a
+			// storage-capable texture is unavoidably invalid; drop storage
+			// from the texture instead (render targets do not use it on the
+			// currently supported paths).
+			usage = usage & ~(WGPUTextureUsage)WGPUTextureUsage_StorageBinding;
+			texture_desc.usage = usage;
+		}
+	}
 	texture_desc.mipLevelCount = p_format.mipmaps;
 	texture_desc.sampleCount = p_format.samples == TEXTURE_SAMPLES_4 ? 4 : 1;
 	switch (p_format.texture_type) {
@@ -707,7 +877,12 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 
 	WGPUTexture wgpu_texture = wgpuDeviceCreateTexture(device, &texture_desc);
 	ERR_FAIL_NULL_V(wgpu_texture, TextureID());
-	WGPUTextureView wgpu_view = wgpuTextureCreateView(wgpu_texture, nullptr);
+	// Explicit view: the default view of a cube texture is 2d-array, which
+	// breaks cube sampling.
+	WGPUTextureViewDescriptor view_desc = WGPU_TEXTURE_VIEW_DESCRIPTOR_INIT;
+	view_desc.format = _data_format_to_wgpu(p_view.format);
+	view_desc.dimension = _texture_type_to_wgpu_view_dimension(p_format.texture_type);
+	WGPUTextureView wgpu_view = wgpuTextureCreateView(wgpu_texture, &view_desc);
 	if (wgpu_view == nullptr) {
 		wgpuTextureRelease(wgpu_texture);
 		ERR_FAIL_V(TextureID());
@@ -716,6 +891,8 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 	TextureInfo *texture = memnew(TextureInfo);
 	texture->texture = wgpu_texture;
 	texture->view = wgpu_view;
+	texture->view_dimension = view_desc.dimension;
+	texture->usage = usage;
 	texture->wgpu_format = wgpu_format;
 	texture->format = p_format.format;
 	const uint64_t texel_size = MAX(1U, _data_format_texel_size(p_format.format));
@@ -724,6 +901,7 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 }
 
 RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create_from_extension(uint64_t p_native_texture, TextureType p_type, DataFormat p_format, uint32_t p_array_layers, bool p_depth_stencil, uint32_t p_mipmaps) {
+	WEBGPU_MAIN_THREAD_GUARD(texture_create_from_extension(p_native_texture, p_type, p_format, p_array_layers, p_depth_stencil, p_mipmaps));
 	WGPUTexture wgpu_texture = (WGPUTexture)p_native_texture;
 	ERR_FAIL_NULL_V(wgpu_texture, TextureID());
 	WGPUTextureView wgpu_view = wgpuTextureCreateView(wgpu_texture, nullptr);
@@ -738,7 +916,142 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create_fro
 	return TextureID(texture);
 }
 
+BitField<RenderingDeviceDriver::TextureUsageBits> RenderingDeviceDriverWebGPU::texture_get_usages_supported_by_format(DataFormat p_format, bool p_cpu_readable) {
+	const WGPUTextureFormat format = _data_format_to_wgpu(p_format);
+	// BitField's default constructor leaves the value UNINITIALIZED.
+	BitField<TextureUsageBits> supported = {};
+	if (format == WGPUTextureFormat_Undefined) {
+		return supported;
+	}
+	supported.set_flag(TEXTURE_USAGE_SAMPLING_BIT);
+	supported.set_flag(TEXTURE_USAGE_CAN_UPDATE_BIT);
+	supported.set_flag(TEXTURE_USAGE_CAN_COPY_FROM_BIT);
+	supported.set_flag(TEXTURE_USAGE_CAN_COPY_TO_BIT);
+	const bool compressed = p_format >= DATA_FORMAT_BC1_RGB_UNORM_BLOCK && p_format <= DATA_FORMAT_BC7_SRGB_BLOCK;
+	if (_is_depth_stencil_format(p_format)) {
+		supported.set_flag(TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+		supported.set_flag(TEXTURE_USAGE_INPUT_ATTACHMENT_BIT);
+	} else if (!compressed) {
+		supported.set_flag(TEXTURE_USAGE_COLOR_ATTACHMENT_BIT);
+		supported.set_flag(TEXTURE_USAGE_INPUT_ATTACHMENT_BIT);
+	}
+	switch (format) {
+		case WGPUTextureFormat_RGBA8Unorm:
+		case WGPUTextureFormat_RGBA8Snorm:
+		case WGPUTextureFormat_RGBA8Uint:
+		case WGPUTextureFormat_RGBA8Sint:
+		case WGPUTextureFormat_RGBA16Float:
+		case WGPUTextureFormat_RGBA16Uint:
+		case WGPUTextureFormat_RGBA16Sint:
+		case WGPUTextureFormat_R32Float:
+		case WGPUTextureFormat_RG32Float:
+		case WGPUTextureFormat_RGBA32Float:
+		case WGPUTextureFormat_R32Uint:
+		case WGPUTextureFormat_R32Sint:
+		case WGPUTextureFormat_RG32Uint:
+		case WGPUTextureFormat_RG32Sint:
+		case WGPUTextureFormat_RGBA32Uint:
+		case WGPUTextureFormat_RGBA32Sint:
+			supported.set_flag(TEXTURE_USAGE_STORAGE_BIT);
+			break;
+		default:
+			break;
+	}
+	if (format == WGPUTextureFormat_R32Uint || format == WGPUTextureFormat_R32Sint) {
+		supported.set_flag(TEXTURE_USAGE_STORAGE_ATOMIC_BIT);
+	}
+	return supported;
+}
+
+RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create_shared(TextureID p_original_texture, const TextureView &p_view) {
+	WEBGPU_MAIN_THREAD_GUARD(texture_create_shared(p_original_texture, p_view));
+	const TextureInfo *original = (const TextureInfo *)p_original_texture.id;
+	// WebGPU views have no component swizzle; non-identity swizzles fall back
+	// to the plain channels.
+	WGPUTextureViewDescriptor view_desc = WGPU_TEXTURE_VIEW_DESCRIPTOR_INIT;
+	view_desc.format = _data_format_to_wgpu(p_view.format);
+	// Only srgb/non-srgb reinterpretation is expressible; other formats
+	// degrade to the texture's own (raw reinterpretation is unavailable).
+	if (view_desc.format != original->wgpu_format && view_desc.format != _wgpu_srgb_sibling(original->wgpu_format)) {
+		view_desc.format = original->wgpu_format;
+	}
+	view_desc.dimension = original->view_dimension;
+	if (view_desc.format == WGPUTextureFormat_RGBA8UnormSrgb || view_desc.format == WGPUTextureFormat_BGRA8UnormSrgb) {
+		// sRGB views cannot carry storage usage; this must hold for views of
+		// views too (the recorded format may already be the sRGB sibling).
+		view_desc.usage = original->usage & ~(WGPUTextureUsage)WGPUTextureUsage_StorageBinding;
+		if (original->usage == WGPUTextureUsage_None) {
+			// Unknown source usage: assume the common RT set minus storage.
+			view_desc.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst;
+		}
+	}
+	if (view_desc.format == WGPUTextureFormat_RGBA8UnormSrgb || view_desc.format == WGPUTextureFormat_BGRA8UnormSrgb) {
+		// sRGB views cannot carry storage usage; this must hold for views of
+		// views too (the recorded format may already be the sRGB sibling).
+		view_desc.usage = original->usage & ~(WGPUTextureUsage)WGPUTextureUsage_StorageBinding;
+		if (original->usage == WGPUTextureUsage_None) {
+			// Unknown source usage: assume the common RT set minus storage.
+			view_desc.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst;
+		}
+	}
+	WGPUTextureView view = wgpuTextureCreateView(original->texture, &view_desc);
+	ERR_FAIL_NULL_V(view, TextureID());
+
+	TextureInfo *texture = memnew(TextureInfo);
+	texture->texture = original->texture;
+	texture->view = view;
+	texture->view_dimension = view_desc.dimension;
+	texture->usage = original->usage;
+	texture->wgpu_format = view_desc.format;
+	texture->format = p_view.format;
+	texture->owned = false;
+	return TextureID(texture);
+}
+
+RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create_shared_from_slice(TextureID p_original_texture, const TextureView &p_view, TextureSliceType p_slice_type, uint32_t p_layer, uint32_t p_layers, uint32_t p_mipmap, uint32_t p_mipmaps) {
+	WEBGPU_MAIN_THREAD_GUARD(texture_create_shared_from_slice(p_original_texture, p_view, p_slice_type, p_layer, p_layers, p_mipmap, p_mipmaps));
+	const TextureInfo *original = (const TextureInfo *)p_original_texture.id;
+	WGPUTextureViewDescriptor view_desc = WGPU_TEXTURE_VIEW_DESCRIPTOR_INIT;
+	view_desc.format = _data_format_to_wgpu(p_view.format);
+	if (view_desc.format != original->wgpu_format && view_desc.format != _wgpu_srgb_sibling(original->wgpu_format)) {
+		view_desc.format = original->wgpu_format;
+	}
+	view_desc.baseMipLevel = p_mipmap;
+	view_desc.mipLevelCount = p_mipmaps;
+	view_desc.baseArrayLayer = p_layer;
+	view_desc.arrayLayerCount = p_layers;
+	switch (p_slice_type) {
+		case TEXTURE_SLICE_2D:
+			view_desc.dimension = WGPUTextureViewDimension_2D;
+			break;
+		case TEXTURE_SLICE_2D_ARRAY:
+			view_desc.dimension = WGPUTextureViewDimension_2DArray;
+			break;
+		case TEXTURE_SLICE_CUBEMAP:
+			view_desc.dimension = WGPUTextureViewDimension_Cube;
+			break;
+		case TEXTURE_SLICE_3D:
+			view_desc.dimension = WGPUTextureViewDimension_3D;
+			break;
+		default:
+			ERR_FAIL_V_MSG(TextureID(), vformat("Unsupported texture slice type %d on the WebGPU driver.", p_slice_type));
+	}
+	WGPUTextureView view = wgpuTextureCreateView(original->texture, &view_desc);
+	ERR_FAIL_NULL_V(view, TextureID());
+
+	TextureInfo *texture = memnew(TextureInfo);
+	texture->texture = original->texture;
+	texture->view = view;
+	texture->view_dimension = view_desc.dimension;
+	texture->usage = original->usage;
+	texture->wgpu_format = view_desc.format;
+	texture->format = p_view.format;
+	texture->owned = false;
+	return TextureID(texture);
+}
+
 void RenderingDeviceDriverWebGPU::texture_free(TextureID p_texture) {
+	WEBGPU_MAIN_THREAD_GUARD(texture_free(p_texture));
 	TextureInfo *texture = (TextureInfo *)p_texture.id;
 	wgpuTextureViewRelease(texture->view);
 	if (texture->owned) {
@@ -764,6 +1077,7 @@ void RenderingDeviceDriverWebGPU::texture_get_copyable_layout(TextureID p_textur
 }
 
 RenderingDeviceDriver::SamplerID RenderingDeviceDriverWebGPU::sampler_create(const SamplerState &p_state) {
+	WEBGPU_MAIN_THREAD_GUARD(sampler_create(p_state));
 	ERR_FAIL_COND_V_MSG(p_state.unnormalized_uvw, SamplerID(), "Unnormalized sampler coordinates are not supported by WebGPU.");
 
 	// Border colors do not exist in WebGPU; CLAMP_TO_BORDER degrades to
@@ -817,7 +1131,11 @@ RenderingDeviceDriver::SamplerID RenderingDeviceDriverWebGPU::sampler_create(con
 				break;
 		}
 	}
-	sampler_desc.maxAnisotropy = p_state.use_anisotropy ? (uint16_t)CLAMP((int)p_state.anisotropy_max, 1, 16) : 1;
+	// WebGPU requires all three filters to be linear when anisotropy is
+	// enabled; degrade to no anisotropy otherwise (upstream enables it on
+	// nearest-filter samplers).
+	const bool all_linear = p_state.mag_filter == SAMPLER_FILTER_LINEAR && p_state.min_filter == SAMPLER_FILTER_LINEAR && p_state.mip_filter == SAMPLER_FILTER_LINEAR;
+	sampler_desc.maxAnisotropy = (p_state.use_anisotropy && all_linear) ? (uint16_t)CLAMP((int)p_state.anisotropy_max, 1, 16) : 1;
 
 	WGPUSampler sampler = wgpuDeviceCreateSampler(device, &sampler_desc);
 	ERR_FAIL_NULL_V(sampler, SamplerID());
@@ -825,6 +1143,7 @@ RenderingDeviceDriver::SamplerID RenderingDeviceDriverWebGPU::sampler_create(con
 }
 
 void RenderingDeviceDriverWebGPU::sampler_free(SamplerID p_sampler) {
+	WEBGPU_MAIN_THREAD_GUARD(sampler_free(p_sampler));
 	wgpuSamplerRelease((WGPUSampler)p_sampler.id);
 }
 
@@ -856,6 +1175,21 @@ void RenderingDeviceDriverWebGPU::command_clear_buffer(CommandBufferID p_cmd_buf
 }
 
 void RenderingDeviceDriverWebGPU::command_copy_buffer(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, BufferID p_dst_buffer, VectorView<BufferCopyRegion> p_regions) {
+		// The engine keeps staging buffers persistently mapped and never calls
+	// unmap (Vulkan memory is coherent), so the shadow's bytes have not
+	// reached the GPU buffer. Queue writes execute before this command
+	// buffer's submission, which restores the intended ordering.
+	{
+		BufferInfo *src_sync = (BufferInfo *)p_src_buffer.id;
+		if (src_sync->shadow != nullptr && !src_sync->dynamic) {
+			for (uint32_t i = 0; i < p_regions.size(); i++) {
+				const BufferCopyRegion &region = p_regions[i];
+				const uint64_t write_offset = region.src_offset & ~3ull;
+				const uint64_t write_size = MIN((((region.src_offset + region.size + 3ull) & ~3ull) - write_offset), src_sync->size - write_offset);
+				wgpuQueueWriteBuffer(queue, src_sync->buffer, write_offset, src_sync->shadow + write_offset, write_size);
+			}
+		}
+	}
 	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	_end_compute_pass(cb_info);
 	ERR_FAIL_NULL(cb_info->encoder);
@@ -887,6 +1221,22 @@ void RenderingDeviceDriverWebGPU::command_copy_texture(CommandBufferID p_cmd_buf
 }
 
 void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<BufferTextureCopyRegion> p_regions) {
+		// See command_copy_buffer: persistently mapped staging never unmaps, so
+	// push each region's source bytes from the shadow before the copy runs.
+	{
+		BufferInfo *src_sync = (BufferInfo *)p_src_buffer.id;
+		if (src_sync->shadow != nullptr && !src_sync->dynamic) {
+			TextureInfo *dst_sync = (TextureInfo *)p_dst_texture.id;
+			for (uint32_t i = 0; i < p_regions.size(); i++) {
+				const BufferTextureCopyRegion &region = p_regions[i];
+				const uint32_t sync_bytes_per_row = region.row_pitch != 0 ? (uint32_t)region.row_pitch : (uint32_t)region.texture_region_size.x * _data_format_texel_size(dst_sync->format);
+				const uint64_t data_size = (uint64_t)sync_bytes_per_row * (uint64_t)region.texture_region_size.y * (uint64_t)region.texture_region_size.z;
+				const uint64_t write_offset = region.buffer_offset & ~3ull;
+				const uint64_t write_size = MIN((((region.buffer_offset + data_size + 3ull) & ~3ull) - write_offset), src_sync->size - write_offset);
+				wgpuQueueWriteBuffer(queue, src_sync->buffer, write_offset, src_sync->shadow + write_offset, write_size);
+			}
+		}
+	}
 	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	_end_compute_pass(cb_info);
 	ERR_FAIL_NULL(cb_info->encoder);
@@ -896,10 +1246,35 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 		WGPUTexelCopyBufferInfo src = WGPU_TEXEL_COPY_BUFFER_INFO_INIT;
 		src.buffer = ((BufferInfo *)p_src_buffer.id)->buffer;
 		src.layout.offset = region.buffer_offset;
-		src.layout.bytesPerRow = region.row_pitch != 0 ? (uint32_t)region.row_pitch : (uint32_t)region.texture_region_size.x * _data_format_texel_size(texture->format);
+		const uint32_t bytes_per_row = region.row_pitch != 0 ? (uint32_t)region.row_pitch : (uint32_t)region.texture_region_size.x * _data_format_texel_size(texture->format);
+		src.layout.bytesPerRow = bytes_per_row;
 		src.layout.rowsPerImage = region.texture_region_size.y;
 		WGPUTexelCopyTextureInfo dst = _texel_copy_texture_info(((TextureInfo *)p_dst_texture.id)->texture, region.texture_subresource.mipmap, region.texture_offset);
 		WGPUExtent3D size = { (uint32_t)region.texture_region_size.x, (uint32_t)region.texture_region_size.y, (uint32_t)region.texture_region_size.z };
+		if (bytes_per_row % 256 != 0 && (region.texture_region_size.y > 1 || region.texture_region_size.z > 1)) {
+			// WebGPU requires bytesPerRow to be a multiple of 256 for
+			// multi-row copies, and depth subresources must be copied whole:
+			// repack small uploads (e.g. 4x4 default textures) through a
+			// transient 256-stride buffer.
+			const uint32_t rows = (uint32_t)region.texture_region_size.y * (uint32_t)region.texture_region_size.z;
+			const uint32_t packed_stride = (bytes_per_row + 255u) & ~255u;
+			WGPUBufferDescriptor staging_desc = WGPU_BUFFER_DESCRIPTOR_INIT;
+			staging_desc.usage = WGPUBufferUsage_CopySrc | WGPUBufferUsage_CopyDst;
+			staging_desc.size = (uint64_t)rows * packed_stride;
+			WGPUBuffer staging = wgpuDeviceCreateBuffer(device, &staging_desc);
+			ERR_FAIL_NULL(staging);
+			for (uint32_t row = 0; row < rows; row++) {
+				wgpuCommandEncoderCopyBufferToBuffer(cb_info->encoder, src.buffer, region.buffer_offset + (uint64_t)row * bytes_per_row, staging, (uint64_t)row * packed_stride, bytes_per_row);
+			}
+			WGPUTexelCopyBufferInfo packed_src = WGPU_TEXEL_COPY_BUFFER_INFO_INIT;
+			packed_src.buffer = staging;
+			packed_src.layout.offset = 0;
+			packed_src.layout.bytesPerRow = packed_stride;
+			packed_src.layout.rowsPerImage = region.texture_region_size.y;
+			wgpuCommandEncoderCopyBufferToTexture(cb_info->encoder, &packed_src, &dst, &size);
+			wgpuBufferRelease(staging);
+			continue;
+		}
 		wgpuCommandEncoderCopyBufferToTexture(cb_info->encoder, &src, &dst, &size);
 	}
 }
@@ -1036,7 +1411,7 @@ static WGPUTextureViewDimension _texture_type_to_wgpu_view_dimension(RenderingDe
 }
 
 static WGPUTextureSampleType _data_format_to_wgpu_sample_type(RenderingDeviceCommons::DataFormat p_format) {
-	switch (p_format) {
+switch (p_format) {
 		case RenderingDeviceCommons::DATA_FORMAT_D16_UNORM:
 		case RenderingDeviceCommons::DATA_FORMAT_X8_D24_UNORM_PACK32:
 		case RenderingDeviceCommons::DATA_FORMAT_D32_SFLOAT:
@@ -1069,6 +1444,7 @@ static WGPUTextureSampleType _data_format_to_wgpu_sample_type(RenderingDeviceCom
 }
 
 RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_container(const Ref<RenderingShaderContainer> &p_shader_container, const Vector<ImmutableSampler> &p_immutable_samplers) {
+	WEBGPU_MAIN_THREAD_GUARD(shader_create_from_container(p_shader_container, p_immutable_samplers));
 	const ShaderReflection reflection = p_shader_container->get_shader_reflection();
 
 	ShaderInfo *shader = memnew(ShaderInfo);
@@ -1077,6 +1453,13 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 	for (const ShaderSpecializationConstant &constant : reflection.specialization_constants) {
 		shader->specialization_constant_ids.push_back(constant.constant_id);
 	}
+
+	// Declared (group << 32 | binding) pairs per stage, parsed from the WGSL
+	// text: the transform removes unused declarations per stage, so this is
+	// the exact visibility each binding needs. Bindings no stage declares
+	// (e.g. dead-eliminated arrays) get empty visibility and count toward no
+	// per-stage limits.
+	HashSet<uint64_t> stage_bindings[SHADER_STAGE_MAX];
 
 	// Shader modules from the container's WGSL.
 	for (int64_t i = 0; i < p_shader_container->shaders.size(); i++) {
@@ -1088,6 +1471,40 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 			ERR_FAIL_V_MSG(ShaderID(), vformat("Failed to decompress WGSL for stage #%d.", i));
 		}
 		wgsl.ptrw()[stage.code_decompressed_size] = 0;
+		{
+			// Attribute order varies (@group @binding or @binding @group);
+			// pair each @binding with the nearest @group either side.
+			const char *text = (const char *)wgsl.ptr();
+			const char *cursor = text;
+			while ((cursor = strstr(cursor, "@binding(")) != nullptr) {
+				const uint32_t binding = (uint32_t)atoi(cursor + 9);
+				const char *group_str = nullptr;
+				for (const char *back = cursor - 1; back >= text && cursor - back < 40; back--) {
+					if (strncmp(back, "@group(", 7) == 0) {
+						group_str = back;
+						break;
+					}
+				}
+				if (group_str == nullptr) {
+					const char *forward = strstr(cursor, "@group(");
+					if (forward != nullptr && forward - cursor < 40) {
+						group_str = forward;
+					}
+				}
+				if (group_str != nullptr) {
+					const uint32_t group = (uint32_t)atoi(group_str + 7);
+					stage_bindings[stage.shader_stage].insert(((uint64_t)group << 32) | binding);
+				}
+				cursor += 9;
+			}
+		}
+		if (strstr((const char *)wgsl.ptr(), "enable f16;") != nullptr) {
+			// The device was not requested with shader-f16; a module that
+			// enables it would be an error object that poisons every frame
+			// command buffer it touches. Fail cleanly instead.
+			shader_free(ShaderID(shader));
+			ERR_FAIL_V_MSG(ShaderID(), "Shader requires f16, which the WebGPU device does not have enabled.");
+		}
 
 		WGPUShaderSourceWGSL wgsl_source = WGPU_SHADER_SOURCE_WGSL_INIT;
 		wgsl_source.code = { (const char *)wgsl.ptr(), stage.code_decompressed_size };
@@ -1102,6 +1519,128 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 		shader->module_stages.push_back((ShaderStage)stage.shader_stage);
 	}
 
+	// Validate per-stage binding budgets up front: WebGPU rejects layouts
+	// over the limits, and the resulting error objects would poison every
+	// frame command buffer that binds them. Failing here yields a null
+	// shader, which the engine handles gracefully.
+	{
+		enum { VIS_VERTEX,
+			VIS_FRAGMENT,
+			VIS_COMPUTE,
+			VIS_MAX };
+		uint32_t samplers[VIS_MAX] = {};
+		uint32_t textures[VIS_MAX] = {};
+		uint32_t storage_buffers[VIS_MAX] = {};
+		uint32_t uniform_buffers[VIS_MAX] = {};
+		for (int64_t set_index = 0; set_index < reflection.uniform_sets.size(); set_index++) {
+			for (const ShaderUniform &uniform : reflection.uniform_sets[set_index]) {
+				// length is the element count for textures/samplers but the
+				// BYTE size for buffers; buffers always occupy one binding.
+				const bool is_buffer_type = uniform.type == UNIFORM_TYPE_UNIFORM_BUFFER || uniform.type == UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC || uniform.type == UNIFORM_TYPE_STORAGE_BUFFER || uniform.type == UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC || uniform.type == UNIFORM_TYPE_TEXTURE_BUFFER || uniform.type == UNIFORM_TYPE_SAMPLER_WITH_TEXTURE_BUFFER || uniform.type == UNIFORM_TYPE_IMAGE_BUFFER;
+				const uint32_t count = is_buffer_type ? 1u : MAX(1u, (uint32_t)uniform.length);
+				const WGPUShaderStage visibility = _shader_stages_to_wgpu(uniform.stages);
+				for (uint32_t stage = 0; stage < VIS_MAX; stage++) {
+					const WGPUShaderStage stage_bit = stage == VIS_VERTEX ? WGPUShaderStage_Vertex : (stage == VIS_FRAGMENT ? WGPUShaderStage_Fragment : WGPUShaderStage_Compute);
+					if ((visibility & stage_bit) == 0) {
+						continue;
+					}
+					switch (uniform.type) {
+						case UNIFORM_TYPE_SAMPLER:
+							samplers[stage] += count;
+							break;
+						case UNIFORM_TYPE_SAMPLER_WITH_TEXTURE:
+							samplers[stage] += count;
+							textures[stage] += count;
+							break;
+						case UNIFORM_TYPE_TEXTURE:
+						case UNIFORM_TYPE_INPUT_ATTACHMENT:
+							textures[stage] += count;
+							break;
+						case UNIFORM_TYPE_UNIFORM_BUFFER:
+						case UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC:
+							uniform_buffers[stage] += count;
+							break;
+						case UNIFORM_TYPE_STORAGE_BUFFER:
+						case UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC:
+						case UNIFORM_TYPE_TEXTURE_BUFFER:
+						case UNIFORM_TYPE_SAMPLER_WITH_TEXTURE_BUFFER:
+						case UNIFORM_TYPE_IMAGE_BUFFER:
+							storage_buffers[stage] += count;
+							break;
+						default:
+							break;
+					}
+				}
+			}
+		}
+		const WGPUShaderStage pc_visibility = shader->push_constant_size > 0 ? _shader_stages_to_wgpu(reflection.push_constant_stages) : WGPUShaderStage_None;
+		for (uint32_t stage = 0; stage < VIS_MAX; stage++) {
+			const WGPUShaderStage stage_bit = stage == VIS_VERTEX ? WGPUShaderStage_Vertex : (stage == VIS_FRAGMENT ? WGPUShaderStage_Fragment : WGPUShaderStage_Compute);
+			// The push constant ring adds one storage buffer to every stage
+			// that reads it.
+			const uint32_t pc_extra = (pc_visibility & stage_bit) != 0 ? 1 : 0;
+			// Sampler/texture overflows are handled by the vertex visibility
+			// cap below; only buffer overflows are unfixable here.
+			if (storage_buffers[stage] + pc_extra > device_limits.maxStorageBuffersPerShaderStage || uniform_buffers[stage] > device_limits.maxUniformBuffersPerShaderStage) {
+				shader_free(ShaderID(shader));
+				ERR_FAIL_V_MSG(ShaderID(), vformat("Shader exceeds WebGPU per-stage binding limits (stage %d: %d samplers, %d textures, %d storage buffers, %d uniform buffers).", stage, samplers[stage], textures[stage], storage_buffers[stage] + pc_extra, uniform_buffers[stage]));
+			}
+		}
+	}
+
+	// Visibility from the per-stage WGSL declarations collected above.
+	auto binding_visibility = [&](uint32_t p_group, uint32_t p_binding) -> WGPUShaderStage {
+		WGPUShaderStage visibility = WGPUShaderStage_None;
+		const uint64_t key = ((uint64_t)p_group << 32) | p_binding;
+		for (uint32_t stage_index = 0; stage_index < shader->module_stages.size(); stage_index++) {
+			if (!stage_bindings[shader->module_stages[stage_index]].has(key)) {
+				continue;
+			}
+			switch (shader->module_stages[stage_index]) {
+				case SHADER_STAGE_VERTEX:
+					visibility |= WGPUShaderStage_Vertex;
+					break;
+				case SHADER_STAGE_FRAGMENT:
+					visibility |= WGPUShaderStage_Fragment;
+					break;
+				case SHADER_STAGE_COMPUTE:
+					visibility |= WGPUShaderStage_Compute;
+					break;
+				default:
+					break;
+			}
+		}
+		return visibility;
+	};
+
+	// Per-stage sampler/texture budgets are summed across the whole pipeline
+	// layout; ubershaders can exceed them in the vertex stage (dynamic
+	// branching keeps every declaration alive). Cap vertex visibility at the
+	// device budget: vertex-stage material sampling is exceedingly rare, and
+	// an over-budget layout would poison every frame command buffer that
+	// binds it.
+	uint32_t vertex_samplers_used = 0;
+	uint32_t vertex_textures_used = 0;
+	auto cap_vertex_budget = [&](WGPUBindGroupLayoutEntry &p_entry) {
+		if ((p_entry.visibility & WGPUShaderStage_Vertex) == 0) {
+			return;
+		}
+		if (p_entry.sampler.type != WGPUSamplerBindingType_BindingNotUsed) {
+			if (vertex_samplers_used >= device_limits.maxSamplersPerShaderStage) {
+				p_entry.visibility &= ~WGPUShaderStage_Vertex;
+				return;
+			}
+			vertex_samplers_used++;
+		}
+		if (p_entry.texture.sampleType != WGPUTextureSampleType_BindingNotUsed) {
+			if (vertex_textures_used >= device_limits.maxSampledTexturesPerShaderStage) {
+				p_entry.visibility &= ~WGPUShaderStage_Vertex;
+				return;
+			}
+			vertex_textures_used++;
+		}
+	};
+
 	// Bind group layouts. Binding numbers follow the fixed remaps described in
 	// rendering_shader_container_webgpu.h: combined image samplers shift later
 	// bindings up and add a sampler right after their texture, and push
@@ -1113,7 +1652,7 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 			const uint32_t remapped_binding = uniform.binding + combined_before;
 			WGPUBindGroupLayoutEntry entry = WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT;
 			entry.binding = remapped_binding;
-			entry.visibility = _shader_stages_to_wgpu(uniform.stages);
+			entry.visibility = binding_visibility((uint32_t)set_index, remapped_binding);
 			if (uniform.length > 1 && (uniform.type == UNIFORM_TYPE_TEXTURE || uniform.type == UNIFORM_TYPE_IMAGE || uniform.type == UNIFORM_TYPE_SAMPLER)) {
 				// Arrayed handles fan out to one binding per element (see
 				// ARRAY_BINDING_BASE). The module may not reference them (the
@@ -1126,6 +1665,7 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 				for (uint32_t element = 0; element < (uint32_t)uniform.length; element++) {
 					WGPUBindGroupLayoutEntry element_entry = entry;
 					element_entry.binding = RenderingShaderContainerWebGPU::ARRAY_BINDING_BASE + uniform.binding * RenderingShaderContainerWebGPU::ARRAY_BINDING_STRIDE + element;
+					element_entry.visibility = binding_visibility((uint32_t)set_index, element_entry.binding);
 					if (uniform.type == UNIFORM_TYPE_SAMPLER) {
 						element_entry.sampler.type = WGPUSamplerBindingType_Filtering;
 					} else if (uniform.type == UNIFORM_TYPE_TEXTURE) {
@@ -1149,11 +1689,18 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 					entry.texture.sampleType = _data_format_to_wgpu_sample_type(uniform.texture_format);
 					entry.texture.viewDimension = _texture_type_to_wgpu_view_dimension(uniform.texture_type);
 					break;
-				case UNIFORM_TYPE_IMAGE:
-					entry.storageTexture.access = uniform.writable ? WGPUStorageTextureAccess_ReadWrite : WGPUStorageTextureAccess_ReadOnly;
-					entry.storageTexture.format = _data_format_to_wgpu(uniform.texture_format);
+				case UNIFORM_TYPE_IMAGE: {
+					const WGPUTextureFormat storage_format = _data_format_to_wgpu(uniform.texture_format);
+					// Read-write storage is limited to 32-bit single-channel
+					// formats in WebGPU; shaders needing more fail cleanly
+					// (renderer capability fallbacks are roadmap patch 13).
+					const bool rw_ok = storage_format == WGPUTextureFormat_R32Float || storage_format == WGPUTextureFormat_R32Uint || storage_format == WGPUTextureFormat_R32Sint;
+					// Variants needing broader read-write access are excluded
+					// at bake time; anything else degrades to write-only.
+					entry.storageTexture.access = uniform.writable ? (rw_ok ? WGPUStorageTextureAccess_ReadWrite : WGPUStorageTextureAccess_WriteOnly) : WGPUStorageTextureAccess_ReadOnly;
+					entry.storageTexture.format = storage_format;
 					entry.storageTexture.viewDimension = _texture_type_to_wgpu_view_dimension(uniform.texture_type);
-					break;
+				} break;
 				case UNIFORM_TYPE_UNIFORM_BUFFER:
 					entry.buffer.type = WGPUBufferBindingType_Uniform;
 					break;
@@ -1165,17 +1712,28 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 					entry.buffer.type = uniform.writable ? WGPUBufferBindingType_Storage : WGPUBufferBindingType_ReadOnlyStorage;
 					entry.buffer.hasDynamicOffset = true;
 					break;
+				case UNIFORM_TYPE_TEXTURE_BUFFER:
+				case UNIFORM_TYPE_SAMPLER_WITH_TEXTURE_BUFFER:
+				case UNIFORM_TYPE_IMAGE_BUFFER:
+					// Texel buffers have no WGSL equivalent; the transform
+					// removes their (unused) declarations from the modules,
+					// so a placeholder storage binding keeps layouts and
+					// bind groups consistent.
+					entry.buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
+					break;
 				case UNIFORM_TYPE_STORAGE_BUFFER:
 					entry.buffer.type = uniform.writable ? WGPUBufferBindingType_Storage : WGPUBufferBindingType_ReadOnlyStorage;
 					break;
 				case UNIFORM_TYPE_SAMPLER_WITH_TEXTURE: {
 					entry.texture.sampleType = _data_format_to_wgpu_sample_type(uniform.texture_format);
 					entry.texture.viewDimension = _texture_type_to_wgpu_view_dimension(uniform.texture_type);
+					cap_vertex_budget(entry);
 					entries.push_back(entry);
-					WGPUBindGroupLayoutEntry sampler_entry = WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT;
+						WGPUBindGroupLayoutEntry sampler_entry = WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT;
 					sampler_entry.binding = remapped_binding + 1;
-					sampler_entry.visibility = entry.visibility;
+					sampler_entry.visibility = binding_visibility((uint32_t)set_index, remapped_binding + 1);
 					sampler_entry.sampler.type = WGPUSamplerBindingType_Filtering;
+						cap_vertex_budget(sampler_entry);
 					entries.push_back(sampler_entry);
 					combined_before++;
 					continue;
@@ -1184,6 +1742,7 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 					shader_free(ShaderID(shader));
 					ERR_FAIL_V_MSG(ShaderID(), vformat("Unsupported uniform type %d in set %d binding %d on the WebGPU driver.", uniform.type, set_index, uniform.binding));
 			}
+			cap_vertex_budget(entry);
 			entries.push_back(entry);
 		}
 
@@ -1191,7 +1750,7 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 			set0_only_push_constant = entries.is_empty();
 			WGPUBindGroupLayoutEntry pc_entry = WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT;
 			pc_entry.binding = RenderingShaderContainerWebGPU::PUSH_CONSTANT_BINDING;
-			pc_entry.visibility = _shader_stages_to_wgpu(reflection.push_constant_stages);
+			pc_entry.visibility = binding_visibility(RenderingShaderContainerWebGPU::PUSH_CONSTANT_GROUP, RenderingShaderContainerWebGPU::PUSH_CONSTANT_BINDING);
 			pc_entry.buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
 			pc_entry.buffer.hasDynamicOffset = true;
 			entries.push_back(pc_entry);
@@ -1213,7 +1772,7 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 		set0_only_push_constant = true;
 		WGPUBindGroupLayoutEntry pc_entry = WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT;
 		pc_entry.binding = RenderingShaderContainerWebGPU::PUSH_CONSTANT_BINDING;
-		pc_entry.visibility = _shader_stages_to_wgpu(reflection.push_constant_stages);
+		pc_entry.visibility = binding_visibility(RenderingShaderContainerWebGPU::PUSH_CONSTANT_GROUP, RenderingShaderContainerWebGPU::PUSH_CONSTANT_BINDING);
 		pc_entry.buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
 		pc_entry.buffer.hasDynamicOffset = true;
 		WGPUBindGroupLayoutDescriptor layout_desc = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
@@ -1254,6 +1813,7 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 }
 
 void RenderingDeviceDriverWebGPU::shader_free(ShaderID p_shader) {
+	WEBGPU_MAIN_THREAD_GUARD(shader_free(p_shader));
 	ShaderInfo *shader = (ShaderInfo *)p_shader.id;
 	shader_destroy_modules(p_shader);
 	for (WGPUBindGroupLayout layout : shader->bind_group_layouts) {
@@ -1269,6 +1829,7 @@ void RenderingDeviceDriverWebGPU::shader_free(ShaderID p_shader) {
 }
 
 void RenderingDeviceDriverWebGPU::shader_destroy_modules(ShaderID p_shader) {
+	WEBGPU_MAIN_THREAD_GUARD(shader_destroy_modules(p_shader));
 	ShaderInfo *shader = (ShaderInfo *)p_shader.id;
 	for (WGPUShaderModule module : shader->modules) {
 		wgpuShaderModuleRelease(module);
@@ -1280,6 +1841,8 @@ void RenderingDeviceDriverWebGPU::shader_destroy_modules(ShaderID p_shader) {
 /*******************/
 /**** PIPELINES ****/
 /*******************/
+
+
 
 static const char *SHADER_ENTRY_POINT = "main"; // Tint keeps the SPIR-V entry point name.
 
@@ -1434,6 +1997,7 @@ static WGPUVertexFormat _vertex_format_to_wgpu(RenderingDeviceCommons::DataForma
 }
 
 RenderingDeviceDriver::VertexFormatID RenderingDeviceDriverWebGPU::vertex_format_create(Span<VertexAttribute> p_vertex_attribs, const VertexAttributeBindingsMap &p_vertex_bindings) {
+	WEBGPU_MAIN_THREAD_GUARD(vertex_format_create(p_vertex_attribs, p_vertex_bindings));
 	VertexFormatInfo *format = memnew(VertexFormatInfo);
 	// One WGPU buffer layout per binding, in binding order.
 	LocalVector<uint32_t> bindings;
@@ -1474,10 +2038,12 @@ RenderingDeviceDriver::VertexFormatID RenderingDeviceDriverWebGPU::vertex_format
 }
 
 void RenderingDeviceDriverWebGPU::vertex_format_free(VertexFormatID p_vertex_format) {
+	WEBGPU_MAIN_THREAD_GUARD(vertex_format_free(p_vertex_format));
 	memdelete((VertexFormatInfo *)p_vertex_format.id);
 }
 
 RenderingDeviceDriver::RenderPassID RenderingDeviceDriverWebGPU::render_pass_create(VectorView<Attachment> p_attachments, VectorView<Subpass> p_subpasses, VectorView<SubpassDependency> p_subpass_dependencies, uint32_t p_view_count, AttachmentReference p_fragment_density_map_attachment) {
+	WEBGPU_MAIN_THREAD_GUARD(render_pass_create(p_attachments, p_subpasses, p_subpass_dependencies, p_view_count, p_fragment_density_map_attachment));
 	ERR_FAIL_COND_V_MSG(p_subpasses.size() > 1, RenderPassID(), "Multiple subpasses are not supported by WebGPU.");
 	ERR_FAIL_COND_V_MSG(p_view_count > 1, RenderPassID(), "Multiview is not supported by the WebGPU driver yet.");
 
@@ -1497,12 +2063,14 @@ RenderingDeviceDriver::RenderPassID RenderingDeviceDriverWebGPU::render_pass_cre
 }
 
 void RenderingDeviceDriverWebGPU::render_pass_free(RenderPassID p_render_pass) {
+	WEBGPU_MAIN_THREAD_GUARD(render_pass_free(p_render_pass));
 	RenderPassInfo *pass = (RenderPassInfo *)p_render_pass.id;
 	ERR_FAIL_COND(pass->from_swap_chain); // Owned by the swap chain.
 	memdelete(pass);
 }
 
 RenderingDeviceDriver::FramebufferID RenderingDeviceDriverWebGPU::framebuffer_create(RenderPassID p_render_pass, VectorView<TextureID> p_attachments, uint32_t p_width, uint32_t p_height) {
+	WEBGPU_MAIN_THREAD_GUARD(framebuffer_create(p_render_pass, p_attachments, p_width, p_height));
 	FramebufferInfo *framebuffer = memnew(FramebufferInfo);
 	framebuffer->width = p_width;
 	framebuffer->height = p_height;
@@ -1513,11 +2081,13 @@ RenderingDeviceDriver::FramebufferID RenderingDeviceDriverWebGPU::framebuffer_cr
 }
 
 void RenderingDeviceDriverWebGPU::framebuffer_free(FramebufferID p_framebuffer) {
+	WEBGPU_MAIN_THREAD_GUARD(framebuffer_free(p_framebuffer));
 	// Views are owned by their textures.
 	memdelete((FramebufferInfo *)p_framebuffer.id);
 }
 
 RenderingDeviceDriver::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_create(VectorView<BoundUniform> p_uniforms, ShaderID p_shader, uint32_t p_set_index, int p_linear_pool_index) {
+	WEBGPU_MAIN_THREAD_GUARD(uniform_set_create(p_uniforms, p_shader, p_set_index, p_linear_pool_index));
 	const ShaderInfo *shader = (const ShaderInfo *)p_shader.id;
 	ERR_FAIL_COND_V(p_set_index >= shader->bind_group_layouts.size(), UniformSetID());
 
@@ -1562,6 +2132,17 @@ RenderingDeviceDriver::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_cre
 			case UNIFORM_TYPE_UNIFORM_BUFFER:
 			case UNIFORM_TYPE_STORAGE_BUFFER: {
 				entry.buffer = ((BufferInfo *)uniform.ids[0].id)->buffer;
+				entry.size = WGPU_WHOLE_SIZE;
+			} break;
+			case UNIFORM_TYPE_TEXTURE_BUFFER:
+			case UNIFORM_TYPE_IMAGE_BUFFER: {
+				entry.buffer = ((BufferInfo *)uniform.ids[0].id)->buffer;
+				entry.size = WGPU_WHOLE_SIZE;
+			} break;
+			case UNIFORM_TYPE_SAMPLER_WITH_TEXTURE_BUFFER: {
+				// ids are [sampler, buffer] pairs; only the buffer exists in
+				// the placeholder binding.
+				entry.buffer = ((BufferInfo *)uniform.ids[1].id)->buffer;
 				entry.size = WGPU_WHOLE_SIZE;
 			} break;
 			case UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC:
@@ -1614,6 +2195,7 @@ RenderingDeviceDriver::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_cre
 }
 
 void RenderingDeviceDriverWebGPU::uniform_set_free(UniformSetID p_uniform_set) {
+	WEBGPU_MAIN_THREAD_GUARD(uniform_set_free(p_uniform_set));
 	UniformSetInfo *uniform_set = (UniformSetInfo *)p_uniform_set.id;
 	wgpuBindGroupRelease(uniform_set->bind_group);
 	memdelete(uniform_set);
@@ -1725,9 +2307,17 @@ void RenderingDeviceDriverWebGPU::command_render_draw_indirect(CommandBufferID p
 void RenderingDeviceDriverWebGPU::command_render_bind_vertex_buffers(CommandBufferID p_cmd_buffer, uint32_t p_binding_count, const BufferID *p_buffers, const uint64_t *p_offsets, uint64_t p_dynamic_offsets) {
 	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
-	ERR_FAIL_COND_MSG(p_dynamic_offsets != 0, "Dynamic vertex buffer offsets are not supported by the WebGPU driver yet.");
+	uint32_t shift = 0;
 	for (uint32_t i = 0; i < p_binding_count; i++) {
-		wgpuRenderPassEncoderSetVertexBuffer(cb_info->render_pass_encoder, i, ((BufferInfo *)p_buffers[i].id)->buffer, p_offsets[i], WGPU_WHOLE_SIZE);
+		const BufferInfo *buffer = (const BufferInfo *)p_buffers[i].id;
+		uint64_t offset = p_offsets[i];
+		if (buffer->dynamic) {
+			// Two bits per dynamic buffer (see buffer_get_dynamic_offsets).
+			const uint32_t frame_idx = (p_dynamic_offsets >> shift) & 0x3u;
+			shift += 2u;
+			offset += frame_idx * buffer->slice_stride;
+		}
+		wgpuRenderPassEncoderSetVertexBuffer(cb_info->render_pass_encoder, i, buffer->buffer, offset, WGPU_WHOLE_SIZE);
 	}
 }
 
@@ -1788,6 +2378,7 @@ static void _specialization_constants_to_wgpu(const LocalVector<uint32_t> &p_sha
 }
 
 RenderingDeviceDriver::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(ShaderID p_shader, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, PipelineRasterizationState p_rasterization_state, PipelineMultisampleState p_multisample_state, PipelineDepthStencilState p_depth_stencil_state, PipelineColorBlendState p_blend_state, VectorView<int32_t> p_color_attachments, BitField<PipelineDynamicStateFlags> p_dynamic_state, RenderPassID p_render_pass, uint32_t p_render_subpass, VectorView<PipelineSpecializationConstant> p_specialization_constants) {
+	WEBGPU_MAIN_THREAD_GUARD(render_pipeline_create(p_shader, p_vertex_format, p_render_primitive, p_rasterization_state, p_multisample_state, p_depth_stencil_state, p_blend_state, p_color_attachments, p_dynamic_state, p_render_pass, p_render_subpass, p_specialization_constants));
 	const ShaderInfo *shader = (const ShaderInfo *)p_shader.id;
 	const RenderPassInfo *pass = (const RenderPassInfo *)p_render_pass.id;
 
@@ -1919,6 +2510,7 @@ RenderingDeviceDriver::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_c
 }
 
 RenderingDeviceDriver::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_create(ShaderID p_shader, VectorView<PipelineSpecializationConstant> p_specialization_constants) {
+	WEBGPU_MAIN_THREAD_GUARD(compute_pipeline_create(p_shader, p_specialization_constants));
 	const ShaderInfo *shader = (const ShaderInfo *)p_shader.id;
 	ERR_FAIL_COND_V(shader->modules.is_empty(), PipelineID());
 
@@ -1943,6 +2535,7 @@ RenderingDeviceDriver::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_
 }
 
 void RenderingDeviceDriverWebGPU::pipeline_free(PipelineID p_pipeline) {
+	WEBGPU_MAIN_THREAD_GUARD(pipeline_free(p_pipeline));
 	PipelineInfo *pipeline = (PipelineInfo *)p_pipeline.id;
 	if (pipeline->render_pipeline != nullptr) {
 		wgpuRenderPipelineRelease(pipeline->render_pipeline);
