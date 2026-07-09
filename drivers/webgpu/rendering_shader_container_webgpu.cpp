@@ -1042,7 +1042,11 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 		if (err != OK || exit_code != 0) {
 			DirAccess::remove_absolute(spirv_path);
 			DirAccess::remove_absolute(wgsl_path);
-			ERR_FAIL_V_MSG(false, vformat("Tint translation of shader '%s' stage #%d failed (exit code %d): %s", String::utf8(shader_name.get_data()), i, exit_code, output));
+			// Variants Tint cannot translate (e.g. multiview's ViewIndex,
+			// which WebGPU has no equivalent for) are excluded from the
+			// bake; the renderer must not select them on this driver.
+			print_verbose(vformat("WebGPU bake: excluding shader '%s' stage #%d (tint exit code %d).", String::utf8(shader_name.get_data()), i, exit_code));
+			return false;
 		}
 
 		PackedByteArray wgsl = FileAccess::get_file_as_bytes(wgsl_path);
