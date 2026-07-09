@@ -347,12 +347,15 @@ public:
 	virtual uint64_t timestamp_query_result_to_time(uint64_t p_result) override { return 0; }
 	virtual void command_timestamp_query_pool_reset(CommandBufferID p_cmd_buffer, QueryPoolID p_pool_id, uint32_t p_query_count) override {}
 	virtual void command_timestamp_write(CommandBufferID p_cmd_buffer, QueryPoolID p_pool_id, uint32_t p_index) override {}
-	virtual void command_begin_label(CommandBufferID p_cmd_buffer, const char *p_label_name, const Color &p_color) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void command_end_label(CommandBufferID p_cmd_buffer) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	virtual void command_insert_breadcrumb(CommandBufferID p_cmd_buffer, uint32_t p_data) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
+	// Debug labels and breadcrumbs are diagnostics, not functionality:
+	// no-ops rather than errors so engine paths that always emit them
+	// (object naming, RenderDoc-style regions) run silently.
+	virtual void command_begin_label(CommandBufferID p_cmd_buffer, const char *p_label_name, const Color &p_color) override {}
+	virtual void command_end_label(CommandBufferID p_cmd_buffer) override {}
+	virtual void command_insert_breadcrumb(CommandBufferID p_cmd_buffer, uint32_t p_data) override {}
 	virtual void begin_segment(uint32_t p_frame_index, uint32_t p_frames_drawn) override;
 	virtual void end_segment() override;
-	virtual void set_object_name(ObjectType p_type, ID p_driver_id, const String &p_name) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
+	virtual void set_object_name(ObjectType p_type, ID p_driver_id, const String &p_name) override {}
 	virtual uint64_t get_resource_native_handle(DriverResource p_type, ID p_driver_id) override { ERR_FAIL_V_MSG(0, UNIMPLEMENTED); }
 	// WebGPU exposes no memory statistics.
 	virtual uint64_t get_total_memory_used() override { return 0; }
