@@ -30,6 +30,12 @@
 
 #include "display_server_web.h"
 
+#ifdef WEBGPU_ENABLED
+#include "drivers/webgpu/rendering_context_driver_webgpu.h"
+#include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
+#include "servers/rendering/rendering_device.h"
+#endif
+
 #include "dom_keys.inc"
 #include "godot_js.h"
 #include "os_web.h"
@@ -1140,20 +1146,55 @@ DisplayServerWeb::DisplayServerWeb(const String &p_rendering_driver, DisplayServ
 
 #ifdef WEBGPU_ENABLED
 	if (p_rendering_driver == "webgpu") {
-		// Present a cleared frame through the whole driver stack on a hidden
-		// probe canvas (a canvas is locked to its first context type, so the
-		// main canvas must stay WebGL until the driver can render scenes).
-		if (godot_webgpu_probe() != 0) {
-			WARN_PRINT("The WebGPU probe failed; falling back to WebGL 2.");
+		// Boot the RenderingDevice stack on the main canvas, mirroring the
+		// native display servers. Every failure path tears down and falls
+		// through to the WebGL block (the canvas is still context-free).
+		// Keep the CI probe entry point linked: EMSCRIPTEN_KEEPALIVE only
+		// marks the export, but the archive member still needs a reference
+		// to be pulled in by the linker.
+		static int (*volatile probe_anchor)() = &godot_webgpu_probe;
+		(void)probe_anchor;
+
+		rendering_context = memnew(RenderingContextDriverWebGPU);
+		if (rendering_context->initialize() != OK) {
+			memdelete(rendering_context);
+			rendering_context = nullptr;
+			WARN_PRINT("A WebGPU device is unavailable; falling back to WebGL 2.");
 		} else {
-			WARN_PRINT("The WebGPU driver presented the probe frame but cannot render scenes yet; falling back to WebGL 2.");
+			RenderingContextDriverWebGPU::WindowPlatformData wpd;
+			wpd.canvas_selector = canvas_id;
+			if (rendering_context->window_create(DisplayServerEnums::MAIN_WINDOW_ID, &wpd) != OK) {
+				memdelete(rendering_context);
+				rendering_context = nullptr;
+				WARN_PRINT("The WebGPU canvas surface failed; falling back to WebGL 2.");
+			} else {
+				rendering_context->window_set_size(DisplayServerEnums::MAIN_WINDOW_ID, p_resolution.x, p_resolution.y);
+				rd_window_size = Size2i(p_resolution.x, p_resolution.y);
+				rendering_device = memnew(RenderingDevice);
+				if (rendering_device->initialize(rendering_context, DisplayServerEnums::MAIN_WINDOW_ID) != OK) {
+					memdelete(rendering_device);
+					rendering_device = nullptr;
+					rendering_context->window_destroy(DisplayServerEnums::MAIN_WINDOW_ID);
+					memdelete(rendering_context);
+					rendering_context = nullptr;
+					WARN_PRINT("The WebGPU rendering device failed to initialize; falling back to WebGL 2.");
+				} else {
+					rendering_device->screen_create(DisplayServerEnums::MAIN_WINDOW_ID);
+					RendererCompositorRD::make_current();
+				}
+			}
 		}
 	}
 #endif
 
 #ifdef GLES3_ENABLED
 	bool webgl2_inited = false;
-	if (godot_js_display_has_webgl(2)) {
+#ifdef WEBGPU_ENABLED
+	const bool rd_active = rendering_device != nullptr;
+#else
+	const bool rd_active = false;
+#endif
+	if (!rd_active && godot_js_display_has_webgl(2)) {
 		EmscriptenWebGLContextAttributes attributes;
 		emscripten_webgl_init_context_attributes(&attributes);
 		attributes.alpha = OS::get_singleton()->is_layered_allowed();
@@ -1170,7 +1211,7 @@ DisplayServerWeb::DisplayServerWeb(const String &p_rendering_driver, DisplayServ
 		}
 		RasterizerGLES3::make_current(false);
 
-	} else {
+	} else if (!rd_active) {
 		OS::get_singleton()->alert(
 				"Your browser seems not to support WebGL 2.\n\n"
 				"If possible, consider updating your browser version and video card drivers.",
@@ -1214,6 +1255,15 @@ DisplayServerWeb::~DisplayServerWeb() {
 	if (webgl_ctx) {
 		emscripten_webgl_commit_frame();
 		emscripten_webgl_destroy_context(webgl_ctx);
+	}
+#endif
+#ifdef WEBGPU_ENABLED
+	if (rendering_device != nullptr) {
+		memdelete(rendering_device);
+	}
+	if (rendering_context != nullptr) {
+		rendering_context->window_destroy(DisplayServerEnums::MAIN_WINDOW_ID);
+		memdelete(rendering_context);
 	}
 #endif
 }
@@ -1487,6 +1537,16 @@ DisplayServerEnums::VSyncMode DisplayServerWeb::window_get_vsync_mode(DisplaySer
 }
 
 void DisplayServerWeb::process_events() {
+#ifdef WEBGPU_ENABLED
+	if (rendering_context != nullptr) {
+		// Keep the swap chain in sync with the canvas.
+		const Size2i size = window_get_size(DisplayServerEnums::MAIN_WINDOW_ID);
+		if (size != rd_window_size) {
+			rd_window_size = size;
+			rendering_context->window_set_size(DisplayServerEnums::MAIN_WINDOW_ID, size.width, size.height);
+		}
+	}
+#endif
 	process_keys();
 	Input::get_singleton()->flush_buffered_events();
 
