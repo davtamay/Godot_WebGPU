@@ -74,7 +74,35 @@ const Engine = (function () {
 			return Promise.resolve();
 		}
 		return navigator['gpu']['requestAdapter']().then(function (adapter) {
-			return adapter ? adapter['requestDevice']() : null;
+			if (!adapter) {
+				return null;
+			}
+			// Request the adapter's own limits for the values the engine's
+			// renderer exceeds under the defaults.
+			const requiredLimits = {};
+			[
+				'maxStorageBuffersPerShaderStage',
+				'maxSampledTexturesPerShaderStage',
+				'maxSamplersPerShaderStage',
+				'maxUniformBuffersPerShaderStage',
+				'maxStorageTexturesPerShaderStage',
+				'maxBindingsPerBindGroup',
+				'maxStorageBufferBindingSize',
+				'maxUniformBufferBindingSize',
+				'maxBufferSize',
+				'maxColorAttachmentBytesPerSample',
+			].forEach((name) => {
+				if (adapter['limits'] && adapter['limits'][name] !== undefined) {
+					requiredLimits[name] = adapter['limits'][name];
+				}
+			});
+			// Float32 textures are unfilterable without this feature; the
+			// engine's renderers filter them freely.
+			const requiredFeatures = [];
+			if (adapter['features'] && adapter['features'].has('float32-filterable')) {
+				requiredFeatures.push('float32-filterable');
+			}
+			return adapter['requestDevice']({ 'requiredLimits': requiredLimits, 'requiredFeatures': requiredFeatures });
 		}).catch(function () {
 			return null;
 		}).then(function (device) {
