@@ -811,11 +811,29 @@ static WGPUTextureFormat _wgpu_srgb_sibling(WGPUTextureFormat p_format) {
 
 RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(const TextureFormat &p_format, const TextureView &p_view) {
 	WEBGPU_MAIN_THREAD_GUARD(texture_create(p_format, p_view));
-	const WGPUTextureFormat wgpu_format = _data_format_to_wgpu(p_format.format);
-	ERR_FAIL_COND_V_MSG(wgpu_format == WGPUTextureFormat_Undefined, TextureID(), vformat("Unsupported texture format %d on the WebGPU driver.", p_format.format));
 	ERR_FAIL_COND_V_MSG(p_view.format != p_format.format, TextureID(), "Texture views with a different format are not supported by the WebGPU driver yet.");
 	const bool identity_swizzle = p_view.swizzle_r == TEXTURE_SWIZZLE_R && p_view.swizzle_g == TEXTURE_SWIZZLE_G && p_view.swizzle_b == TEXTURE_SWIZZLE_B && p_view.swizzle_a == TEXTURE_SWIZZLE_A;
-	ERR_FAIL_COND_V_MSG(!identity_swizzle, TextureID(), "Texture swizzles are not supported by WebGPU.");
+	TextureInfo::SwizzleExpand swizzle_expand = TextureInfo::SWIZZLE_EXPAND_NONE;
+	if (!identity_swizzle) {
+		// WebGPU has no view swizzle: emulate the engine's patterns by
+		// promoting to RGBA8 and expanding texels at upload.
+		const bool rrr = p_view.swizzle_r == TEXTURE_SWIZZLE_R && p_view.swizzle_g == TEXTURE_SWIZZLE_R && p_view.swizzle_b == TEXTURE_SWIZZLE_R;
+		if (p_format.format == DATA_FORMAT_R8G8_UNORM && rrr && p_view.swizzle_a == TEXTURE_SWIZZLE_G) {
+			swizzle_expand = TextureInfo::SWIZZLE_EXPAND_RG_TO_RRRG;
+		} else if (p_format.format == DATA_FORMAT_R8_UNORM && rrr && p_view.swizzle_a == TEXTURE_SWIZZLE_ONE) {
+			swizzle_expand = TextureInfo::SWIZZLE_EXPAND_R_TO_RRR1;
+		} else if (p_format.format == DATA_FORMAT_R8_UNORM && p_view.swizzle_r == TEXTURE_SWIZZLE_ZERO && p_view.swizzle_g == TEXTURE_SWIZZLE_ZERO && p_view.swizzle_b == TEXTURE_SWIZZLE_ZERO && p_view.swizzle_a == TEXTURE_SWIZZLE_R) {
+			swizzle_expand = TextureInfo::SWIZZLE_EXPAND_R_TO_000R;
+		} else if (p_view.swizzle_r == TEXTURE_SWIZZLE_R && p_view.swizzle_g == TEXTURE_SWIZZLE_G && p_view.swizzle_b == TEXTURE_SWIZZLE_B && p_view.swizzle_a == TEXTURE_SWIZZLE_ONE) {
+			// Force-opaque alpha: pass through; the stored alpha of the
+			// engine's formats using this pattern is already opaque.
+			swizzle_expand = TextureInfo::SWIZZLE_EXPAND_NONE;
+		} else {
+			ERR_FAIL_V_MSG(TextureID(), vformat("Unsupported texture swizzle (%d,%d,%d,%d) for format %d on WebGPU.", p_view.swizzle_r, p_view.swizzle_g, p_view.swizzle_b, p_view.swizzle_a, p_format.format));
+		}
+	}
+	const WGPUTextureFormat wgpu_format = swizzle_expand != TextureInfo::SWIZZLE_EXPAND_NONE ? WGPUTextureFormat_RGBA8Unorm : _data_format_to_wgpu(p_format.format);
+	ERR_FAIL_COND_V_MSG(wgpu_format == WGPUTextureFormat_Undefined, TextureID(), vformat("Unsupported texture format %d on the WebGPU driver.", p_format.format));
 	ERR_FAIL_COND_V_MSG(p_format.samples != TEXTURE_SAMPLES_1 && p_format.samples != TEXTURE_SAMPLES_4, TextureID(), "WebGPU only supports 1 or 4 samples per texture.");
 
 	WGPUTextureUsage usage = WGPUTextureUsage_None;
@@ -880,7 +898,7 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 	// Explicit view: the default view of a cube texture is 2d-array, which
 	// breaks cube sampling.
 	WGPUTextureViewDescriptor view_desc = WGPU_TEXTURE_VIEW_DESCRIPTOR_INIT;
-	view_desc.format = _data_format_to_wgpu(p_view.format);
+	view_desc.format = wgpu_format; // p_view.format equals p_format.format (checked above); use the possibly promoted format.
 	view_desc.dimension = _texture_type_to_wgpu_view_dimension(p_format.texture_type);
 	WGPUTextureView wgpu_view = wgpuTextureCreateView(wgpu_texture, &view_desc);
 	if (wgpu_view == nullptr) {
@@ -895,6 +913,7 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 	texture->usage = usage;
 	texture->wgpu_format = wgpu_format;
 	texture->format = p_format.format;
+	texture->swizzle_expand = swizzle_expand;
 	const uint64_t texel_size = MAX(1U, _data_format_texel_size(p_format.format));
 	texture->allocation_size = (uint64_t)p_format.width * p_format.height * MAX(p_format.depth, p_format.array_layers) * texel_size * (p_format.mipmaps > 1 ? 4 : 3) / 3;
 	return TextureID(texture);
@@ -1221,7 +1240,61 @@ void RenderingDeviceDriverWebGPU::command_copy_texture(CommandBufferID p_cmd_buf
 }
 
 void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<BufferTextureCopyRegion> p_regions) {
-		// See command_copy_buffer: persistently mapped staging never unmaps, so
+		{
+		TextureInfo *dst_expand = (TextureInfo *)p_dst_texture.id;
+		if (dst_expand->swizzle_expand != TextureInfo::SWIZZLE_EXPAND_NONE) {
+			// Swizzle-emulated texture: the GPU texture is RGBA8 while the
+			// engine supplies R8/R8G8 texels. Expand on the CPU and write
+			// through the queue (ordered before this submission's commands).
+			const BufferInfo *src_expand = (const BufferInfo *)p_src_buffer.id;
+			ERR_FAIL_NULL(src_expand->shadow);
+			const uint32_t src_texel = dst_expand->swizzle_expand == TextureInfo::SWIZZLE_EXPAND_RG_TO_RRRG ? 2 : 1;
+			for (uint32_t i = 0; i < p_regions.size(); i++) {
+				const BufferTextureCopyRegion &region = p_regions[i];
+				const uint32_t w = (uint32_t)region.texture_region_size.x;
+				const uint32_t rows = (uint32_t)region.texture_region_size.y * (uint32_t)region.texture_region_size.z;
+				const uint32_t src_pitch = region.row_pitch != 0 ? (uint32_t)region.row_pitch : w * src_texel;
+				LocalVector<uint8_t> expanded;
+				expanded.resize(w * 4 * rows);
+				for (uint32_t row = 0; row < rows; row++) {
+					const uint8_t *src_row = src_expand->shadow + region.buffer_offset + (uint64_t)row * src_pitch;
+					uint8_t *dst_row = expanded.ptr() + (uint64_t)row * w * 4;
+					for (uint32_t x = 0; x < w; x++) {
+						const uint8_t c0 = src_row[x * src_texel];
+						switch (dst_expand->swizzle_expand) {
+							case TextureInfo::SWIZZLE_EXPAND_RG_TO_RRRG: {
+								dst_row[x * 4 + 0] = c0;
+								dst_row[x * 4 + 1] = c0;
+								dst_row[x * 4 + 2] = c0;
+								dst_row[x * 4 + 3] = src_row[x * 2 + 1];
+							} break;
+							case TextureInfo::SWIZZLE_EXPAND_R_TO_RRR1: {
+								dst_row[x * 4 + 0] = c0;
+								dst_row[x * 4 + 1] = c0;
+								dst_row[x * 4 + 2] = c0;
+								dst_row[x * 4 + 3] = 255;
+							} break;
+							default: {
+								dst_row[x * 4 + 0] = 0;
+								dst_row[x * 4 + 1] = 0;
+								dst_row[x * 4 + 2] = 0;
+								dst_row[x * 4 + 3] = c0;
+							} break;
+						}
+					}
+				}
+				WGPUTexelCopyTextureInfo dst_info = _texel_copy_texture_info(dst_expand->texture, region.texture_subresource.mipmap, region.texture_offset);
+				WGPUTexelCopyBufferLayout layout = {};
+				layout.offset = 0;
+				layout.bytesPerRow = w * 4;
+				layout.rowsPerImage = region.texture_region_size.y;
+				WGPUExtent3D extent = { w, (uint32_t)region.texture_region_size.y, (uint32_t)region.texture_region_size.z };
+				wgpuQueueWriteTexture(queue, &dst_info, expanded.ptr(), expanded.size(), &layout, &extent);
+			}
+			return;
+		}
+	}
+	// See command_copy_buffer: persistently mapped staging never unmaps, so
 	// push each region's source bytes from the shadow before the copy runs.
 	{
 		BufferInfo *src_sync = (BufferInfo *)p_src_buffer.id;
