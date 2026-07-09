@@ -54,6 +54,10 @@ static const uint8_t PROBE_TRIANGLE_R = 230;
 static const uint8_t PROBE_TRIANGLE_G = 51;
 static const uint8_t PROBE_TRIANGLE_B = 230;
 static const uint32_t PROBE_ARRAY_TEXTURES = 4;
+// Instanced-quad stage: replicates the canvas renderer's pattern (indexed
+// unit quad, per-instance rect + color pulled from a storage buffer).
+static const uint8_t PROBE_INST0_RGB[3] = { 51, 230, 76 };
+static const uint8_t PROBE_INST1_RGB[3] = { 242, 217, 25 };
 
 // Feeds hand-written WGSL through the same container the baked-shader path
 // uses, so the probe exercises shader_create_from_container and
@@ -62,10 +66,25 @@ class ProbeShaderContainer : public RenderingShaderContainerWebGPU {
 	GDSOFTCLASS(ProbeShaderContainer, RenderingShaderContainerWebGPU);
 
 public:
+	bool set_from_wgsl_with_storage(const char *p_vertex_wgsl, const char *p_fragment_wgsl) {
+		reflection_data.stage_count = 2;
+		reflection_data.set_count = 1;
+		reflection_binding_set_uniforms_count.push_back(1);
+		ReflectionBindingData instance_uniform;
+		instance_uniform.type = RDC::UNIFORM_TYPE_STORAGE_BUFFER;
+		instance_uniform.binding = 0;
+		instance_uniform.stages = 1 << RDC::SHADER_STAGE_VERTEX;
+		instance_uniform.length = 0;
+		reflection_binding_set_uniforms_data.push_back(instance_uniform);
+		reflection_shader_stages.push_back(RDC::SHADER_STAGE_VERTEX);
+		reflection_shader_stages.push_back(RDC::SHADER_STAGE_FRAGMENT);
+		return _compress_stages(p_vertex_wgsl, p_fragment_wgsl);
+	}
+
 	bool set_from_wgsl(const char *p_vertex_wgsl, const char *p_fragment_wgsl) {
 		reflection_data.stage_count = 2;
 		reflection_data.push_constant_size = 16; // One vec4 color.
-		reflection_data.push_constant_stages_mask = 1 << RDC::SHADER_STAGE_FRAGMENT;
+		reflection_data.push_constant_stages_mask = (1 << RDC::SHADER_STAGE_VERTEX) | (1 << RDC::SHADER_STAGE_FRAGMENT);
 		// An arrayed texture uniform the WGSL never references: it exercises
 		// the driver's binding fan-out (layout + bind group), which WebGPU
 		// validates even for bindings the shader does not use.
@@ -91,6 +110,10 @@ public:
 		reflection_shader_stages.push_back(RDC::SHADER_STAGE_VERTEX);
 		reflection_shader_stages.push_back(RDC::SHADER_STAGE_FRAGMENT);
 
+		return _compress_stages(p_vertex_wgsl, p_fragment_wgsl);
+	}
+
+	bool _compress_stages(const char *p_vertex_wgsl, const char *p_fragment_wgsl) {
 		const char *sources[2] = { p_vertex_wgsl, p_fragment_wgsl };
 		const RDC::ShaderStage stages[2] = { RDC::SHADER_STAGE_VERTEX, RDC::SHADER_STAGE_FRAGMENT };
 		shaders.resize(2);
@@ -239,9 +262,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE int godot_webgpu_probe() {
 	RenderingDeviceDriver::PipelineID triangle_pipeline;
 	if (stage == 0) {
 		static const char *vertex_wgsl =
+				"struct PC { color : vec4f, }\n"
+				"@group(0) @binding(510) var<storage, read> pc : PC;\n"
 				"@vertex fn main(@builtin(vertex_index) vi : u32) -> @builtin(position) vec4f {\n"
 				"    var positions = array<vec2f, 3>(vec2f(0.0, 0.6), vec2f(-0.6, -0.6), vec2f(0.6, -0.6));\n"
-				"    return vec4f(positions[vi], 0.0, 1.0);\n"
+				"    // Scale by the push constant's alpha (1.0): a garbage read\n"
+				"    // collapses the triangle and fails the strict pixel check.\n"
+				"    return vec4f(positions[vi] * pc.color.a, 0.0, 1.0);\n"
 				"}\n";
 		static const char *fragment_wgsl =
 				"struct PC { color : vec4f, }\n"
@@ -343,6 +370,91 @@ extern "C" EMSCRIPTEN_KEEPALIVE int godot_webgpu_probe() {
 		}
 	}
 
+	// Instanced-quad shader: indexed draw, per-instance data from an SSBO.
+	RenderingDeviceDriver::ShaderID quad_shader;
+	RenderingDeviceDriver::PipelineID quad_pipeline;
+	RenderingDeviceDriver::BufferID quad_index_buffer;
+	RenderingDeviceDriver::BufferID quad_instance_buffer;
+	RenderingDeviceDriver::UniformSetID quad_uniform_set;
+	if (stage == 0) {
+		static const char *quad_vertex_wgsl =
+				"struct Inst { rect : vec4f, color : vec4f, }\n"
+				"struct Insts { data : array<Inst>, }\n"
+				"@group(0) @binding(0) var<storage, read> insts : Insts;\n"
+				"struct VOut { @builtin(position) pos : vec4f, @location(0) color : vec4f, }\n"
+				"@vertex fn main(@builtin(vertex_index) vi : u32, @builtin(instance_index) ii : u32) -> VOut {\n"
+				"    let r = insts.data[ii].rect;\n"
+				"    var corners = array<vec2f, 4>(vec2f(r.x, r.y), vec2f(r.z, r.y), vec2f(r.z, r.w), vec2f(r.x, r.w));\n"
+				"    var out : VOut;\n"
+				"    out.pos = vec4f(corners[vi], 0.0, 1.0);\n"
+				"    out.color = insts.data[ii].color;\n"
+				"    return out;\n"
+				"}\n";
+		static const char *quad_fragment_wgsl =
+				"@fragment fn main(@location(0) color : vec4f) -> @location(0) vec4f {\n"
+				"    return color;\n"
+				"}\n";
+		Ref<ProbeShaderContainer> quad_container;
+		quad_container.instantiate();
+		if (!quad_container->set_from_wgsl_with_storage(quad_vertex_wgsl, quad_fragment_wgsl)) {
+			stage = 17;
+		} else {
+			quad_shader = driver->shader_create_from_container(quad_container, Vector<RenderingDeviceDriver::ImmutableSampler>());
+			if (!quad_shader) {
+				stage = 17;
+			}
+		}
+	}
+	if (stage == 0) {
+		const int32_t color_attachment = 0;
+		quad_pipeline = driver->render_pipeline_create(
+				quad_shader,
+				RenderingDeviceDriver::VertexFormatID(),
+				RenderingDeviceDriver::RENDER_PRIMITIVE_TRIANGLES,
+				RenderingDeviceDriver::PipelineRasterizationState(),
+				RenderingDeviceDriver::PipelineMultisampleState(),
+				RenderingDeviceDriver::PipelineDepthStencilState(),
+				RenderingDeviceDriver::PipelineColorBlendState::create_disabled(1),
+				color_attachment,
+				BitField<RenderingDeviceDriver::PipelineDynamicStateFlags>(),
+				driver->swap_chain_get_render_pass(swap_chain),
+				0,
+				VectorView<RenderingDeviceDriver::PipelineSpecializationConstant>());
+		if (!quad_pipeline) {
+			stage = 18;
+		}
+	}
+	if (stage == 0) {
+		quad_index_buffer = driver->buffer_create(6 * sizeof(uint16_t), RenderingDeviceDriver::BUFFER_USAGE_INDEX_BIT, RenderingDeviceDriver::MEMORY_ALLOCATION_TYPE_CPU, 0);
+		quad_instance_buffer = driver->buffer_create(2 * 8 * sizeof(float), RenderingDeviceDriver::BUFFER_USAGE_STORAGE_BIT, RenderingDeviceDriver::MEMORY_ALLOCATION_TYPE_CPU, 0);
+		uint16_t *indices = quad_index_buffer ? (uint16_t *)driver->buffer_map(quad_index_buffer) : nullptr;
+		float *instances = quad_instance_buffer ? (float *)driver->buffer_map(quad_instance_buffer) : nullptr;
+		if (indices == nullptr || instances == nullptr) {
+			stage = 19;
+		} else {
+			const uint16_t quad_indices[6] = { 0, 1, 2, 0, 2, 3 };
+			memcpy(indices, quad_indices, sizeof(quad_indices));
+			driver->buffer_unmap(quad_index_buffer);
+			const float quad_instances[16] = {
+				-0.9f, -0.2f, -0.5f, 0.2f, PROBE_INST0_RGB[0] / 255.0f, PROBE_INST0_RGB[1] / 255.0f, PROBE_INST0_RGB[2] / 255.0f, 1.0f, // Left rect, green.
+				0.5f, -0.2f, 0.9f, 0.2f, PROBE_INST1_RGB[0] / 255.0f, PROBE_INST1_RGB[1] / 255.0f, PROBE_INST1_RGB[2] / 255.0f, 1.0f, // Right rect, yellow.
+			};
+			memcpy(instances, quad_instances, sizeof(quad_instances));
+			driver->buffer_unmap(quad_instance_buffer);
+			RenderingDeviceDriver::BoundUniform instance_uniform;
+			instance_uniform.type = RenderingDeviceDriver::UNIFORM_TYPE_STORAGE_BUFFER;
+			instance_uniform.binding = 0;
+			instance_uniform.ids.push_back(quad_instance_buffer);
+			quad_uniform_set = driver->uniform_set_create(VectorView<RenderingDeviceDriver::BoundUniform>(&instance_uniform, 1), quad_shader, 0, -1);
+			if (!quad_uniform_set) {
+				stage = 19;
+			} else {
+				printf("WebGPU probe: instanced quads ready\n");
+				fflush(stdout);
+			}
+		}
+	}
+
 	if (stage == 0) {
 		// No clear values: the swap chain pass loads the pattern frame.
 		driver->command_begin_render_pass(cmd_buffer, driver->swap_chain_get_render_pass(swap_chain), framebuffer, RenderingDeviceDriver::COMMAND_BUFFER_TYPE_PRIMARY, Rect2i(0, 0, PROBE_SIZE, PROBE_SIZE), VectorView<RenderingDeviceDriver::RenderPassClearValue>());
@@ -351,6 +463,12 @@ extern "C" EMSCRIPTEN_KEEPALIVE int godot_webgpu_probe() {
 		const float triangle_color[4] = { PROBE_TRIANGLE_R / 255.0f, PROBE_TRIANGLE_G / 255.0f, PROBE_TRIANGLE_B / 255.0f, 1.0f };
 		driver->command_bind_push_constants(cmd_buffer, triangle_shader, 0, VectorView<uint32_t>((const uint32_t *)triangle_color, 4));
 		driver->command_render_draw(cmd_buffer, 3, 1, 0, 0);
+		driver->command_bind_render_pipeline(cmd_buffer, quad_pipeline);
+		driver->command_bind_render_uniform_sets(cmd_buffer, quad_uniform_set, quad_shader, 0, 1, 0);
+		driver->command_render_bind_index_buffer(cmd_buffer, quad_index_buffer, RenderingDeviceDriver::INDEX_BUFFER_FORMAT_UINT16, 0);
+		driver->command_render_draw_indexed(cmd_buffer, 6, 2, 0, 0, 0);
+		printf("WebGPU probe: instanced quads OK\n");
+		fflush(stdout);
 		driver->command_end_render_pass(cmd_buffer);
 		printf("WebGPU probe: triangle OK\n");
 		fflush(stdout);
@@ -392,6 +510,21 @@ extern "C" EMSCRIPTEN_KEEPALIVE int godot_webgpu_probe() {
 	}
 	if (tint_buffer) {
 		driver->buffer_free(tint_buffer);
+	}
+	if (quad_uniform_set) {
+		driver->uniform_set_free(quad_uniform_set);
+	}
+	if (quad_index_buffer) {
+		driver->buffer_free(quad_index_buffer);
+	}
+	if (quad_instance_buffer) {
+		driver->buffer_free(quad_instance_buffer);
+	}
+	if (quad_pipeline) {
+		driver->pipeline_free(quad_pipeline);
+	}
+	if (quad_shader) {
+		driver->shader_free(quad_shader);
 	}
 	for (uint32_t t = 0; t < PROBE_ARRAY_TEXTURES; t++) {
 		if (array_textures[t]) {
