@@ -61,6 +61,16 @@ ToneMapper::ToneMapper(bool p_use_mobile_version) {
 			tonemap_mobile.shader.set_variant_enabled(TONEMAP_MOBILE_MODE_SUBPASS_1D_LUT_MULTIVIEW, false);
 		}
 
+#ifdef WEBGPU_ENABLED
+		// WebGPU has no render pass subpasses: the renderer always uses the
+		// separate post pass on this platform and the subpass variants
+		// cannot be baked (subpass inputs are untranslatable).
+		tonemap_mobile.shader.set_variant_enabled(TONEMAP_MOBILE_MODE_SUBPASS, false);
+		tonemap_mobile.shader.set_variant_enabled(TONEMAP_MOBILE_MODE_SUBPASS_1D_LUT, false);
+		tonemap_mobile.shader.set_variant_enabled(TONEMAP_MOBILE_MODE_SUBPASS_MULTIVIEW, false);
+		tonemap_mobile.shader.set_variant_enabled(TONEMAP_MOBILE_MODE_SUBPASS_1D_LUT_MULTIVIEW, false);
+#endif
+
 		tonemap_mobile.shader_version = tonemap_mobile.shader.version_create();
 
 		for (int i = 0; i < TONEMAP_MODE_MAX; i++) {
