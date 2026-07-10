@@ -222,6 +222,14 @@ RID RenderForwardMobile::RenderBufferDataForwardMobile::get_color_fbs(Framebuffe
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	ERR_FAIL_NULL_V(texture_storage, RID());
 
+#ifdef WEBGPU_ENABLED
+	// WebGPU has no subpasses: the two-subpass configuration degrades to
+	// the plain render pass (pipeline precompilation also requests it).
+	if (p_config_type == FB_CONFIG_RENDER_AND_POST_PASS) {
+		p_config_type = FB_CONFIG_RENDER_PASS;
+	}
+#endif
+
 	// We use our framebuffer cache here instead of building these in RenderBufferDataForwardMobile::configure
 	// This approach ensures we only build the framebuffers we actually need for this viewport.
 	// In the (near) future this means that if we cycle through a texture chain for our render target, we'll also support
@@ -882,6 +890,11 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 	bool reverse_cull = p_render_data->scene_data->cam_transform.basis.determinant() < 0;
 	bool merge_transparent_pass = true; // If true: we can do our transparent pass in the same pass as our opaque pass.
 	bool using_subpass_post_process = true; // If true: we can do our post processing in a subpass
+#ifdef WEBGPU_ENABLED
+	// WebGPU render passes have no subpasses; post processing always runs
+	// as its own pass on this platform.
+	using_subpass_post_process = false;
+#endif
 	RendererRD::MaterialStorage::Samplers samplers;
 	bool hdr_render_target = false;
 
@@ -3220,6 +3233,12 @@ void RenderForwardMobile::_geometry_instance_update(RenderGeometryInstance *p_ge
 }
 
 static RD::FramebufferFormatID _get_color_framebuffer_format_for_pipeline(RD::DataFormat p_color_format, bool p_can_be_storage, RD::TextureSamples p_samples, RD::TextureSamples p_target_samples, bool p_vrs, bool p_post_pass, bool p_hdr, uint32_t p_view_count) {
+#ifdef WEBGPU_ENABLED
+	// WebGPU has no subpasses: the renderer always separates the post pass
+	// (see get_color_fbs), so precompiling against the two-subpass format
+	// would only produce invalid pipelines.
+	p_post_pass = false;
+#endif
 	const bool multisampling = p_samples > RD::TEXTURE_SAMPLES_1;
 	RD::AttachmentFormat attachment;
 
