@@ -22,9 +22,11 @@
 
 | 32 | [shared] webgpu: Report unbaked shader versions with an actionable error | The web runtime cannot compile shaders, so a version missing from the baked cache produced a 3-errors-per-variant cascade; _compile_version_start now reports one actionable error naming the shader and the usual cause (materials constructed in scripts are invisible to the export-time baker; save them as .tres) and leaves the version invalid, which version_get_shader already handles | ~11 shader_rd.cpp | not yet |
 
-(Planned next: 33 XR-adaptive loader
-(feature-detect XRGPUBinding; boot webgpu only when usable with the
-project's XR needs, else the intact WebGL/WebXR path). NOTE: upstream
+| 33 | [shared] web: Choose the boot driver by the project's WebXR needs | New web-export option webxr/uses_webxr (default off) emits requiresWebXR into the exported config; the loader then keeps the WebGL driver on browsers that support WebXR but cannot render immersive sessions through WebGPU (a canvas locks to its first context type, so the choice is boot-time only). Detection is capability-based: Engine.isWebXRWebGPUAvailable() (XRGPUBinding) plus an engine-support constant that stays false until the WebXR-WebGPU rendering path lands. One export renders WebGPU on flat browsers and enters XR through the intact WebGL path elsewhere | ~10 export_plugin.cpp, ~13 engine.js, ~12 config.js, ~14 features.js | not yet |
+
+(Planned next: 34+ WebXR-WebGPU rendering (XRGPUBinding projection layers
+wrapped via texture_create_from_extension; stereo = one pass per view);
+Quest Browser ships experimental support since April 2026. NOTE: upstream
 already compiles RenderingDevice + renderer_rd unconditionally on all
 platforms including web; the per-platform RD_ENABLED define is the only
 gate, which is why patch 01 is a detect.py-only change.)
