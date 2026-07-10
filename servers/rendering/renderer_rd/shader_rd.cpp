@@ -743,6 +743,18 @@ void ShaderRD::_compile_version_start(Version *p_version, int p_group) {
 	}
 #endif
 
+#ifdef WEBGPU_ENABLED
+	// This platform cannot compile shaders at runtime, so a version that
+	// missed the baked cache stays unavailable (version_get_shader returns
+	// a null RID); report the actionable cause once instead of letting
+	// every variant fail compilation. The usual culprit is a material
+	// constructed at runtime (e.g. StandardMaterial3D.new() in a script):
+	// the export-time shader baker only sees saved resources, so store
+	// such materials as .tres files.
+	ERR_PRINT(vformat("Shader '%s' is missing from the baked shader cache and cannot be compiled at runtime. If a script builds materials in code (e.g. StandardMaterial3D.new()), save them as resource files so the exporter can bake their shaders.", name));
+	return;
+#endif
+
 	CompileData compile_data;
 	compile_data.version = p_version;
 	compile_data.group = p_group;
