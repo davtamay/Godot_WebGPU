@@ -40,6 +40,8 @@
 
 | 41 | [shared] webxr: Fetch per-pass XR state in one thread crossing | Every godot_webxr_* call is a synchronous worker-to-main crossing; the RD pre-draw made two per pass (color, depth), each recomputing getViewSubImage. One merged call now returns [layer_generation, color, depth]; the sub-image is computed once per animation frame (helps the GL path too); and a layer-generation counter evicts the interface's cached RD wrappers when the projection layer is recreated (resize/view-count change) instead of leaking them for the session. Quest-verified: VR+AR sessions render and track as before | ~32 library_godot_webxr.js, ~45 webxr_interface_js.cpp/.h, ~1 godot_webxr.h | not yet |
 
+| 42 | misc: Add a scheduled upstream auto-rebase workflow | Weekly (and on-demand) GitHub Action fetches upstream master, replays the stack, and only on a fully clean replay + check-stack pass pushes a dated auto-rebase/ candidate branch (plus a backup tag); the baseline workflow builds candidates automatically. webgpu-stack is never pushed by automation - promotion stays human because CI cannot run the tint bakes, the strict real-GPU pixel probe, or in-headset checks. A conflicted rebase fails loudly naming the patch | 0 (fork-only files) | n/a (fork-only) |
+
 (Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
 experimental WebXR-WebGPU since April 2026. NOTE: upstream
 already compiles RenderingDevice + renderer_rd unconditionally on all
