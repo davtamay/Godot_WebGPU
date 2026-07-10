@@ -45,6 +45,10 @@ class ShaderBakerExportPluginPlatform : public RefCounted {
 public:
 	virtual RenderingShaderContainerFormat *create_shader_container_format(const Ref<EditorExportPlatform> &p_platform, const Ref<EditorExportPreset> &p_preset) = 0;
 	virtual bool matches_driver(const String &p_driver) = 0;
+	// Lets a platform omit variants its target can never select (the baked
+	// cache stores them as tolerated holes). Sources are the fully built
+	// per-stage shader code, including the variant's #define block.
+	virtual bool skips_variant(const Vector<String> &p_stage_sources) const { return false; }
 	virtual ~ShaderBakerExportPluginPlatform() {}
 };
 
@@ -79,6 +83,7 @@ protected:
 	Mutex shader_work_results_mutex;
 	LocalVector<ShaderGroupItem> shader_group_items;
 	RenderingShaderContainerFormat *shader_container_format = nullptr;
+	Ref<ShaderBakerExportPluginPlatform> shader_container_platform;
 	String shader_container_driver;
 	Vector<Ref<ShaderBakerExportPluginPlatform>> platforms;
 	uint64_t customization_configuration_hash = 0;
