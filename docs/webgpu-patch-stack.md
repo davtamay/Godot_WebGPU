@@ -38,6 +38,8 @@
 
 | 40 | webgpu: Keep the per-draw bind path allocation-free | Stereo-frame hot-path fixes: per-draw dynamic-offset heap allocation -> fixed stack array; single dirty flag rebinding ALL sets per push-constant move -> per-set dirty bits + push-constant flag (sets without the ring entry stop rebinding per draw); per-pass color-attachment vector -> stack storage. Verified: strict probe pixel-exact + full-scene boot 0 errors | 0 | not yet |
 
+| 41 | [shared] webxr: Fetch per-pass XR state in one thread crossing | Every godot_webxr_* call is a synchronous worker-to-main crossing; the RD pre-draw made two per pass (color, depth), each recomputing getViewSubImage. One merged call now returns [layer_generation, color, depth]; the sub-image is computed once per animation frame (helps the GL path too); and a layer-generation counter evicts the interface's cached RD wrappers when the projection layer is recreated (resize/view-count change) instead of leaking them for the session. Quest-verified: VR+AR sessions render and track as before | ~32 library_godot_webxr.js, ~45 webxr_interface_js.cpp/.h, ~1 godot_webxr.h | not yet |
+
 (Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
 experimental WebXR-WebGPU since April 2026. NOTE: upstream
 already compiles RenderingDevice + renderer_rd unconditionally on all
