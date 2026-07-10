@@ -44,6 +44,8 @@
 
 | 43 | misc: Harden the upstream sync for unattended operation | Self-keepalive (GitHub disables schedules after 60 idle days), concurrency guard, failure/candidate-ready GitHub issues (label upstream-sync - conflicts land in email instead of a silent Actions tab), Emscripten-pin drift check against upstream web_builds.yml, pruning of old candidates/backup tags (newest 3), and promote-candidate.sh encoding the human promotion ritual (dirty-tree/branch/stale-candidate refusals, snapshot, reset, printed local-gate checklist; never pushes) | 0 (fork-only files) | n/a (fork-only) |
 
+| 44 | misc: Build tint in CI and publish it as a release asset | On-demand workflow builds the SPIR-V->WGSL translator from the Dawn tag the emdawnwebgpu port pins (Linux + Windows, tint command-line tools only, backends off), smoke-tests it, and uploads permanent release assets (tag tint-<ref>). Removes the hand-built-local-tint bus factor and is the prerequisite for a future CI bake-coverage leg; re-run when the Dawn pin moves | 0 (fork-only files) | n/a (fork-only) |
+
 (Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
 experimental WebXR-WebGPU since April 2026. NOTE: upstream
 already compiles RenderingDevice + renderer_rd unconditionally on all
