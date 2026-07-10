@@ -30,6 +30,8 @@
 
 #include "rendering_shader_container_webgpu.h"
 
+#include "spirv_preprocess.h"
+
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/os/os.h"
@@ -1015,6 +1017,30 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 	for (uint32_t i = 0; i < spirv_stages.size(); i++) {
 		Vector<uint8_t> spirv = spirv_stages[i].spirv_data();
 		ERR_FAIL_COND_V_MSG(!_transform_spirv(spirv), false, "Malformed SPIR-V module.");
+		// Passes adapted from dwalter/godotwebgpu (MIT): Tint rejects arrays
+		// of handle types, so collapse them to their first element (correct
+		// for variants that never index them; proper per-element fan-out is
+		// tracked separately), and mark never-written storage buffers
+		// read-only so Tint emits var<storage, read>.
+		spirv = spirv_preprocess::flatten_binding_arrays(spirv);
+		// Tint rejects the ViewIndex builtin (no WebGPU multiview): lower it
+		// to constant zero so every variant translates; view 0 is correct
+		// for the single-view rendering this driver does.
+		spirv = spirv_preprocess::lower_view_index_to_zero(spirv);
+		// Derived specialization-constant expressions become runtime code
+		// (Tint rejects OpSpecConstantOp; freezing them to defaults breaks
+		// shaders with degenerate defaults, e.g. the tonemapper's packed
+		// constants freezing the luminance divisor to zero).
+		spirv = spirv_preprocess::lower_spec_constant_ops_to_runtime(spirv);
+		// Godot bakes the GL->Vulkan Y flip into its projection matrices, so
+		// clip positions arrive in Vulkan convention (NDC Y down); WebGPU NDC
+		// is Y up, which mirrors every render target vertically. Visible
+		// passes cancel out in pairs, but matrix-computed lookups (shadow
+		// atlas UVs) sample the mirrored image. Negate Position.y in vertex
+		// stages so framebuffer contents match Vulkan exactly; this also makes
+		// the 1:1 front-face translation correct (the mirror inverts apparent
+		// winding). No-op on modules without a vertex entry point.
+		spirv = spirv_preprocess::negate_position_y(spirv);
 
 		// Translate through the external Tint binary via temporary files.
 		// Shaders bake on many worker threads at once, so temporary names use
@@ -1040,12 +1066,34 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 		int exit_code = -1;
 		Error err = OS::get_singleton()->execute(tint_path, args, &output, &exit_code, true);
 		if (err != OK || exit_code != 0) {
-			DirAccess::remove_absolute(spirv_path);
+			// Retry once with specialization-constant EXPRESSIONS frozen to
+			// their default values: Tint reads plain OpSpecConstant (WGSL
+			// overrides) but rejects OpSpecConstantOp. Shaders that translate
+			// without freezing keep live specialization; this fallback trades
+			// it for coverage only where translation would otherwise fail.
+			const Vector<uint8_t> frozen = spirv_preprocess::freeze_spec_constant_ops(spirv);
+			{
+				Ref<FileAccess> spirv_file = FileAccess::open(spirv_path, FileAccess::WRITE);
+				ERR_FAIL_COND_V(spirv_file.is_null(), false);
+				spirv_file->store_buffer(frozen.ptr(), frozen.size());
+			}
+			output = String();
+			err = OS::get_singleton()->execute(tint_path, args, &output, &exit_code, true);
+			if (err == OK && exit_code == 0) {
+				print_verbose(vformat("WebGPU bake: shader '%s' stage #%d translated with frozen specialization constants.", String::utf8(shader_name.get_data()), i));
+			}
+		}
+		if (err != OK || exit_code != 0) {
 			DirAccess::remove_absolute(wgsl_path);
 			// Variants Tint cannot translate (e.g. multiview's ViewIndex,
 			// which WebGPU has no equivalent for) are excluded from the
 			// bake; the renderer must not select them on this driver.
-			print_verbose(vformat("WebGPU bake: excluding shader '%s' stage #%d (tint exit code %d).", String::utf8(shader_name.get_data()), i, exit_code));
+			String tint_error;
+			const int error_pos = output.find("error:");
+			if (error_pos >= 0) {
+				tint_error = output.substr(error_pos, MIN(500, output.length() - error_pos)).replace("\n", " | ");
+			}
+			print_verbose(vformat("WebGPU bake: excluding shader '%s' stage #%d (tint exit code %d) [%s]: %s", String::utf8(shader_name.get_data()), i, exit_code, spirv_path, tint_error));
 			return false;
 		}
 
