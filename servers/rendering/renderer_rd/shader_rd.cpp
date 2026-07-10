@@ -412,7 +412,7 @@ void ShaderRD::_compile_variant(uint32_t p_variant, CompileData p_data) {
 
 	Vector<String> variant_stage_sources = _build_variant_stage_sources(variant, p_data);
 	Vector<RD::ShaderStageSPIRVData> variant_stages = compile_stages(variant_stage_sources, dynamic_buffers);
-	ERR_FAIL_COND(variant_stages.is_empty());
+	ERR_FAIL_COND_MSG(variant_stages.is_empty(), vformat("Shader '%s' variant %d is missing from the baked cache and this platform cannot compile shaders at runtime.", name, variant));
 
 	Vector<uint8_t> shader_data = RD::get_singleton()->shader_compile_binary_from_spirv(variant_stages, name + ":" + itos(variant));
 	ERR_FAIL_COND(shader_data.is_empty());
@@ -619,6 +619,15 @@ void ShaderRD::_load_variant_from_cache(uint32_t p_variant, CompileData p_data) 
 		return; // Variant is disabled, return.
 	}
 
+#ifdef WEBGPU_ENABLED
+	if (p_data.version->variant_data[variant].is_empty()) {
+		// Not baked for this platform (see the cache-hole tolerance in
+		// _load_from_cache); leave the variant unavailable.
+		p_data.version->variants.write[variant] = RID();
+		return;
+	}
+#endif
+
 	p_data.version->variants.write[variant] = RD::get_singleton()->shader_create_from_bytecode_with_samplers(p_data.version->variant_data[variant], p_data.version->variants[variant], immutable_samplers);
 }
 
@@ -660,9 +669,18 @@ bool ShaderRD::_load_from_cache(Version *p_version, int p_group) {
 			continue;
 		}
 		if (variant_size == 0) {
+#ifdef WEBGPU_ENABLED
+			// Baked WebGPU caches legitimately omit variants the platform
+			// cannot express (e.g. subpass inputs); the web runtime cannot
+			// regenerate shaders, so keep the rest of the group and leave
+			// this variant unavailable instead of failing the whole load.
+			print_verbose(vformat("Shader cache: variant %d of %s is not baked for this platform; continuing without it.", variant_id, name));
+			continue;
+#else
 			// A new variant has been requested, failing the entire load will generate it
 			print_verbose(vformat("Shader cache miss for %s due to missing variant %d", name.path_join(group_sha256[p_group]).path_join(_version_get_sha1(p_version)), variant_id));
 			return false;
+#endif
 		}
 		Vector<uint8_t> variant_bytes;
 		variant_bytes.resize(variant_size);
@@ -750,6 +768,14 @@ void ShaderRD::_compile_version_end(Version *p_version, int p_group) {
 			continue; // Disabled.
 		}
 		if (p_version->variants[variant_id].is_null()) {
+#ifdef WEBGPU_ENABLED
+			if (p_version->group_loaded_from_cache[p_group]) {
+				// Baked cache hole: the platform cannot express this variant
+				// and the web runtime cannot compile it. Keep the rest of the
+				// version usable; the variant reads as a null shader.
+				continue;
+			}
+#endif
 			all_valid = false;
 			break;
 		}
