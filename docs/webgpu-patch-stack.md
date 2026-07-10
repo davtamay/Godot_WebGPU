@@ -26,10 +26,10 @@
 
 | 34 | [shared] webxr: Bind WebXR sessions to the WebGPU renderer | When the WebGPU driver booted (signal: the pre-initialized device on Module), the WebXR glue creates an XRGPUBinding instead of the XRWebGLBinding, appends the mandatory 'webgpu' session feature (without it the browser mints a WebGL-based session the binding refuses), and creates the projection layer in the binding's DEFAULT shape (explicit textureType produced broken sub-images on Quest Browser's experimental impl). Layer textures cross to C++ as WGPUTexture handles (emdawnwebgpu importJsTexture, cached in a JS map) and the interface wraps them with RD texture_create_from_extension for the renderer-agnostic render-target override -- the OpenXR/Vulkan idiom. The multiview session requirement is skipped on this path (WGSL has none; GLES3::Config does not even exist here). Two presentation fixes ride along: the canvas returns null from getCurrentTexture() while an immersive session owns the compositor (guard makes it throw into the port's error path; the driver skips the frame silently). Adds modules/webxr to the shared allowlist. QUEST-3-VERIFIED: session starts, layer sub-image = 1680x1760 2-layer rgba8unorm array wrapped cleanly; rendering then stops at the renderer's multiview requirement = exactly the next patch's scope. Loader keeps steering XR exports to WebGL until stereo lands (ENGINE_WEBXR_WEBGPU_SUPPORTED stays false) | ~55 library_godot_webxr.js, ~60 webxr_interface_js.cpp, ~1 godot_webxr.h, ~30 webxr.externs.js, ~8 engine.js | not yet |
 
-(Planned next: 35 per-view XR stereo for the RD mobile renderer (one pass
-per view; Godot's WebXR path currently assumes multiview) + flipping
-ENGINE_WEBXR_WEBGPU_SUPPORTED; Quest Browser ships experimental
-WebXR-WebGPU since April 2026. NOTE: upstream
+| 35 | [shared] xr: Draw XR viewports one pass per view without multiview | WGSL has no multiview, so stereo on the WebGPU backend renders the viewport once per view: XRInterface gains get_draw_pass_count()/set_current_draw_pass() (defaults keep every other interface and platform on the existing single-pass path) and the viewport's XR block loops them; the WebXR interface reports ONE view to the renderer, remaps the active pass onto view 0's transforms/projection (the mono camera path needs no changes), and hands each pass its view's layer slice via texture_create_shared_from_slice. Flips ENGINE_WEBXR_WEBGPU_SUPPORTED: XR-flagged exports now genuinely boot WebGPU on XRGPUBinding browsers | ~8 xr_interface.h, ~12 renderer_viewport.cpp, ~4 engine.js, rest in modules/webxr | not yet |
+
+(Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
+experimental WebXR-WebGPU since April 2026. NOTE: upstream
 already compiles RenderingDevice + renderer_rd unconditionally on all
 platforms including web; the per-platform RD_ENABLED define is the only
 gate, which is why patch 01 is a detect.py-only change.)
@@ -51,7 +51,11 @@ gate, which is why patch 01 is a detect.py-only change.)
   `platform/web/export/export_plugin.cpp/.h` (added in patch 07: shader
   baker registration and the web export option), and
   `editor/export/shader_baker_export_plugin.cpp/.h` (cpp added in patch 15;
-  h added in patch 31 for the variant-veto hook).
+  h added in patch 31 for the variant-veto hook),
+  `modules/webxr/*` (added in patch 34: the WebXR implementation itself),
+  `servers/xr/xr_interface.h` and
+  `servers/rendering/renderer_viewport.cpp` (added in patch 35: the
+  per-view draw-pass hook and its single call site).
 - **Never touched:** `servers/rendering/rendering_device.cpp`,
   `rendering_device_graph.*`, `shader_compiler*`, `modules/glslang`,
   existing drivers, renderer_rd scene/effects code outside the designated
