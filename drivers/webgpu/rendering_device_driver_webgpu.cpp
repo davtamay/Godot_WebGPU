@@ -366,7 +366,12 @@ RenderingDeviceDriver::FramebufferID RenderingDeviceDriverWebGPU::swap_chain_acq
 			r_resize_required = true;
 			return FramebufferID();
 		default:
-			ERR_FAIL_V_MSG(FramebufferID(), "Failed to acquire the current WebGPU surface texture.");
+			// The canvas can legitimately have no current texture, e.g.
+			// while an immersive WebXR session owns the compositor; skip
+			// presenting this frame (the caller tolerates a null
+			// framebuffer without a resize).
+			print_verbose("WebGPU: no current surface texture; skipping presentation this frame.");
+			return FramebufferID();
 	}
 
 	swap_chain->current_texture = surface_texture.texture;
