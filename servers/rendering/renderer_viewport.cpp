@@ -886,11 +886,19 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 		RSG::texture_storage->render_target_set_as_unused(vp->render_target);
 #ifndef XR_DISABLED
 		if (vp->use_xr && xr_interface.is_valid()) {
-			// Inform XR interface we're about to render its viewport,
-			// if this returns false we don't render.
-			// This usually is a result of the player taking off their headset and OpenXR telling us to skip
-			// rendering frames.
-			if (xr_interface->pre_draw_viewport(vp->render_target)) {
+			// Interfaces on backends without multiview split the draw into
+			// one pass per view (see XRInterface::get_draw_pass_count);
+			// the default single pass leaves this loop degenerate.
+			const uint32_t draw_pass_count = xr_interface->get_draw_pass_count();
+			for (uint32_t draw_pass = 0; draw_pass < draw_pass_count; draw_pass++) {
+				xr_interface->set_current_draw_pass(draw_pass);
+				// Inform XR interface we're about to render its viewport,
+				// if this returns false we don't render.
+				// This usually is a result of the player taking off their headset and OpenXR telling us to skip
+				// rendering frames.
+				if (!xr_interface->pre_draw_viewport(vp->render_target)) {
+					continue;
+				}
 				RSG::texture_storage->render_target_set_override(vp->render_target,
 						xr_interface->get_color_texture(),
 						xr_interface->get_depth_texture(),
