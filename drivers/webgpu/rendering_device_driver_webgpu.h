@@ -149,7 +149,11 @@ private:
 		UniformSetInfo *pending_bind_groups[MAX_BIND_GROUPS] = {};
 		LocalVector<uint32_t> pending_dynamic_offsets[MAX_BIND_GROUPS];
 		uint32_t push_constant_offset = 0;
-		bool bind_groups_dirty = false;
+		// Per-set dirty bits plus a push-constant flag: at flush time only
+		// dirty sets (and, when the flag is up, sets whose layout carries the
+		// push-constant ring entry) are re-bound instead of all of them.
+		uint8_t bind_group_dirty_mask = 0;
+		bool push_constant_dirty = false;
 	};
 
 	struct CommandPoolInfo {
