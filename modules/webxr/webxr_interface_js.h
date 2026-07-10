@@ -65,6 +65,12 @@ private:
 
 	Size2 render_targetsize;
 	RBMap<unsigned int, RID> texture_cache;
+#ifdef WEBGPU_ENABLED
+	// Per-view slices of the wrapped layer texture, one per draw pass
+	// (freed before their owner in texture_cache).
+	RBMap<unsigned int, Vector<RID>> texture_slice_cache;
+	uint32_t current_draw_pass = 0;
+#endif
 	struct Touch {
 		bool is_touching = false;
 		Vector2 position;
@@ -130,6 +136,8 @@ public:
 
 	virtual Size2 get_render_target_size() override;
 	virtual uint32_t get_view_count() override;
+	virtual uint32_t get_draw_pass_count() override;
+	virtual void set_current_draw_pass(uint32_t p_pass) override;
 	virtual Transform3D get_camera_transform() override;
 	virtual TypedArray<Projection> get_camera_projections(const StringName &p_tracker_name, double p_aspect, double p_z_near, double p_z_far) override;
 	virtual TypedArray<Transform3D> get_camera_offsets(const StringName &p_tracker_name) override;
