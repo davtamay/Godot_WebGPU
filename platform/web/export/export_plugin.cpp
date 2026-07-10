@@ -157,6 +157,11 @@ void EditorExportPlatformWeb::_fix_html(Vector<uint8_t> &p_html, const Ref<Edito
 		// The loader must pre-initialize the (async-only) WebGPU device
 		// before the engine starts.
 		config["experimentalWebGPU"] = true;
+		if (p_preset->get("webxr/uses_webxr")) {
+			// Immersive sessions decide the driver at boot (a canvas is
+			// locked to its first context type); see initWebGPUDevice.
+			config["requiresWebXR"] = true;
+		}
 	}
 
 	config["godotPoolSize"] = p_preset->get("threads/godot_pool_size");
@@ -385,6 +390,7 @@ void EditorExportPlatformWeb::get_export_options(List<ExportOption> *r_options) 
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "vram_texture_compression/for_desktop"), true)); // S3TC
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "vram_texture_compression/for_mobile"), false)); // ETC or ETC2, depending on renderer
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "shader_baker/enabled"), false)); // Bake shaders (required by the WebGPU driver).
+	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "webxr/uses_webxr"), false)); // Keep a WebXR-capable driver on browsers where WebGPU cannot render immersive sessions.
 
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "html/export_icon"), true));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, "html/custom_html_shell", PROPERTY_HINT_FILE, "*.html"), ""));
