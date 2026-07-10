@@ -128,6 +128,18 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		 */
 		experimentalWebGPU: false,
 		/**
+		 * When enabled together with ``experimentalWebGPU``, the loader keeps
+		 * the WebGL driver on browsers that support immersive WebXR sessions
+		 * but cannot render them through WebGPU, so the project's XR path
+		 * keeps working.
+		 *
+		 * @export
+		 * @memberof EngineConfig
+		 * @type {boolean}
+		 * @default
+		 */
+		requiresWebXR: false,
+		/**
 		 * The progressive web app service worker to install.
 		 *
 		 * @export
