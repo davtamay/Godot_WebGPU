@@ -99,10 +99,35 @@ private:
 		// Constant IDs for WGSL `override` expressions, in reflection order;
 		// pipeline creation keys WGPUConstantEntry by their decimal strings.
 		LocalVector<uint32_t> specialization_constant_ids;
+		// Override ids each module actually declares (Tint drops unused
+		// ones per stage); pipeline constants are filtered per module.
+		LocalVector<HashSet<uint32_t>> module_override_ids;
 		uint32_t push_constant_size = 0;
 		// Created for shaders whose set 0 holds nothing but the reserved
 		// push-constant binding, so draws can still bind the ring buffer.
 		WGPUBindGroup push_constant_bind_group = nullptr;
+		// Sampler bindings (set << 32 | binding) the WGSL statically pairs
+		// with depth textures outside comparison sampling: WebGPU forbids
+		// filtering depth textures, so these slots are declared NonFiltering
+		// and bound with a substitute nearest sampler.
+		HashSet<uint64_t> nonfiltering_samplers;
+		// Texture bindings the shader types as depth (WGSL texture_depth_* or
+		// depth reflection formats); depth textures bound OUTSIDE these slots
+		// get a placeholder float texture (WebGPU validates sample types).
+		HashSet<uint64_t> depth_declared_bindings;
+		// Arrayed uniforms whose WGSL was flattened to a single binding by
+		// the bake-time SPIR-V pass: the layout and bind groups use one
+		// entry at the original binding instead of the fan-out range.
+		HashSet<uint64_t> flattened_array_bindings;
+		// Bindings present in each set's layout (variants can reflect fewer
+		// bindings than the engine binds; extras must be skipped at build).
+		LocalVector<HashSet<uint32_t>> layout_bindings;
+		// Color targets without a matching fragment output must have an empty
+		// write mask (Vulkan tolerates the mismatch, WebGPU validates it).
+		uint32_t fragment_output_mask = 0;
+		// Sampler bindings the WGSL declares as sampler_comparison; binding a
+		// comparison sampler anywhere else needs a plain substitute.
+		HashSet<uint64_t> comparison_declared_bindings;
 	};
 
 	static const uint32_t MAX_BIND_GROUPS = 4;
@@ -139,6 +164,13 @@ private:
 		WGPULoadOp stencil_load_op = WGPULoadOp_Clear;
 		WGPUStoreOp stencil_store_op = WGPUStoreOp_Store;
 		bool is_depth_stencil = false;
+		// MSAA: index of this color attachment's resolve target, mapped to
+		// WGPURenderPassColorAttachment::resolveTarget (Vulkan models it as a
+		// separate attachment reference).
+		int32_t resolve_attachment = -1;
+		// Resolve targets are consumed via resolveTarget, never emitted as
+		// standalone attachments.
+		bool is_resolve_target = false;
 	};
 
 	struct RenderPassInfo {
@@ -158,7 +190,12 @@ private:
 	};
 
 	struct UniformSetInfo {
-		WGPUBindGroup bind_group = nullptr;
+		// Godot shares uniform sets across shader variants whose bind group
+		// layouts can differ structurally (per-variant visibility); bind
+		// groups are built lazily per encountered layout and cached here.
+		LocalVector<BoundUniform> uniforms;
+		uint32_t set_index = 0;
+		HashMap<void *, WGPUBindGroup> layout_groups;
 		// Dynamic buffers in binding order; their offsets are decoded from
 		// the packed mask at bind time.
 		LocalVector<BufferInfo *> dynamic_buffers;
@@ -188,6 +225,13 @@ private:
 	WGPUQueue queue = nullptr;
 	WGPULimits device_limits = {};
 	uint32_t frame_count = 1;
+	WGPUSampler nonfiltering_substitute_sampler = nullptr;
+	HashSet<uint64_t> comparison_samplers;
+	WGPUSampler _get_nonfiltering_sampler();
+	WGPUTexture placeholder_float_texture = nullptr;
+	WGPUTextureView placeholder_float_view = nullptr;
+	WGPUTextureView _get_placeholder_float_view();
+	WGPUBindGroup _uniform_set_build(VectorView<BoundUniform> p_uniforms, const ShaderInfo *p_shader_info, uint32_t p_set_index, UniformSetInfo *p_bookkeeping);
 	LocalVector<BufferInfo *> dynamic_buffers_all;
 
 	// Push-constant ring: values are written into a shadow at 256-aligned
