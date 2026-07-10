@@ -84,7 +84,10 @@ const Engine = (function () {
 			console.warn('This browser supports WebXR but cannot render immersive sessions through WebGPU; keeping the WebGL driver.'); // eslint-disable-line no-console
 			return Promise.resolve();
 		}
-		return navigator['gpu']['requestAdapter']().then(function (adapter) {
+		// XRGPUBinding refuses devices whose adapter was not requested as
+		// XR-compatible; harmless elsewhere (unknown members are ignored).
+		const adapterOptions = config.requiresWebXR ? { 'xrCompatible': true } : {};
+		return navigator['gpu']['requestAdapter'](adapterOptions).then(function (adapter) {
 			if (!adapter) {
 				return null;
 			}
