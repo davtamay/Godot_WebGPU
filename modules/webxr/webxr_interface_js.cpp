@@ -409,18 +409,7 @@ void WebXRInterfaceJS::uninitialize() {
 
 #ifdef WEBGPU_ENABLED
 		if (RenderingDevice::get_singleton() != nullptr) {
-			for (KeyValue<unsigned int, Vector<RID>> &E : texture_slice_cache) {
-				for (const RID &slice : E.value) {
-					RenderingDevice::get_singleton()->free_rid(slice);
-				}
-			}
-			texture_slice_cache.clear();
-			for (KeyValue<unsigned int, RID> &E : texture_cache) {
-				// Frees the RD wrapper only: the layer's textures belong to
-				// the browser, and the JS-side import table is cleared by
-				// godot_webxr_uninitialize().
-				RenderingDevice::get_singleton()->free_rid(E.value);
-			}
+			_free_rd_layer_textures();
 		} else
 #endif
 		{
@@ -591,10 +580,30 @@ Projection WebXRInterfaceJS::get_projection_for_view(uint32_t p_view, double p_a
 bool WebXRInterfaceJS::pre_draw_viewport(RID p_render_target) {
 #ifdef WEBGPU_ENABLED
 	if (RenderingDevice::get_singleton() != nullptr) {
-		// The RD render target consumes the override textures directly;
-		// the FBO-reattach dance below is a GL concept.
-		color_texture = _get_color_texture();
-		depth_texture = _get_depth_texture();
+		// The RD render target consumes the override textures directly (the
+		// FBO-reattach dance below is a GL concept), and one merged call
+		// fetches everything the pass needs: each godot_webxr_* call is a
+		// synchronous worker-to-main-thread crossing, so per-frame calls are
+		// kept to a minimum.
+		unsigned int pass_info[3] = { 0, 0, 0 };
+		if (godot_webxr_get_pass_info(pass_info)) {
+			if (pass_info[0] != layer_generation) {
+				// The layer was recreated (resize / view-count change):
+				// cached wrappers point at the old layer's textures and
+				// would leak for the rest of the session.
+				_free_rd_layer_textures();
+				layer_generation = pass_info[0];
+			}
+			color_texture = pass_info[1] != 0 ? _get_texture(pass_info[1]) : RID();
+			RBMap<unsigned int, Vector<RID>>::Element *slices = texture_slice_cache.find(pass_info[1]);
+			if (slices != nullptr && current_draw_pass < (uint32_t)slices->get().size()) {
+				color_texture = slices->get()[current_draw_pass];
+			}
+			depth_texture = pass_info[2] != 0 ? _get_texture(pass_info[2]) : RID();
+		} else {
+			color_texture = RID();
+			depth_texture = RID();
+		}
 		return true;
 	}
 #endif
@@ -639,6 +648,25 @@ Vector<RenderingServerTypes::BlitToScreen> WebXRInterfaceJS::post_draw_viewport(
 
 	return blit_to_screen;
 }
+
+#ifdef WEBGPU_ENABLED
+void WebXRInterfaceJS::_free_rd_layer_textures() {
+	for (KeyValue<unsigned int, Vector<RID>> &E : texture_slice_cache) {
+		for (const RID &slice : E.value) {
+			RenderingDevice::get_singleton()->free_rid(slice);
+		}
+	}
+	texture_slice_cache.clear();
+	for (KeyValue<unsigned int, RID> &E : texture_cache) {
+		// Frees the RD wrapper only: the layer's textures belong to the
+		// browser (the JS-side import table lives for the session).
+		RenderingDevice::get_singleton()->free_rid(E.value);
+	}
+	texture_cache.clear();
+	color_texture = RID();
+	depth_texture = RID();
+}
+#endif
 
 RID WebXRInterfaceJS::_get_color_texture() {
 	unsigned int texture_id = godot_webxr_get_color_texture();
