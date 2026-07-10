@@ -64,6 +64,8 @@
 
 | 44 | misc: Build tint in CI and publish it as a release asset | On-demand workflow builds the SPIR-V->WGSL translator from the Dawn tag the emdawnwebgpu port pins (Linux + Windows, tint command-line tools only, backends off), smoke-tests it, and uploads permanent release assets (tag tint-<ref>). Removes the hand-built-local-tint bus factor and is the prerequisite for a future CI bake-coverage leg; re-run when the Dawn pin moves | 0 (fork-only files) | n/a (fork-only) |
 
+| 47 | webgpu: Auto-locate the tint binary beside the editor | GODOT_TINT_PATH still wins, but a tint executable next to the editor binary is picked up automatically - drop-in setup for fork users, no environment variable; the missing-tint error now names both options and the release assets. Verified both ways (beside-editor bake clean; absence = one actionable error) | 0 | not yet |
+
 (Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
 experimental WebXR-WebGPU since April 2026. NOTE: upstream
 already compiles RenderingDevice + renderer_rd unconditionally on all
