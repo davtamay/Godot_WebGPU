@@ -66,11 +66,22 @@ const Engine = (function () {
 	 * fallback when WebGPU is unavailable.
 	 * @ignore
 	 */
+	// The engine cannot render immersive WebXR sessions through the WebGPU
+	// backend yet; flip this when the WebXR-WebGPU Binding (XRGPUBinding)
+	// path lands so XR-capable browsers keep the WebGPU driver.
+	const ENGINE_WEBXR_WEBGPU_SUPPORTED = false;
+
 	function initWebGPUDevice(config, rtenv) {
 		if (!config.experimentalWebGPU || !navigator['gpu']) {
 			if (config.experimentalWebGPU) {
 				console.warn('WebGPU is not available in this browser; falling back to WebGL.'); // eslint-disable-line no-console
 			}
+			return Promise.resolve();
+		}
+		if (config.requiresWebXR && navigator['xr'] && !(ENGINE_WEBXR_WEBGPU_SUPPORTED && Features.isWebXRWebGPUAvailable())) {
+			// A canvas is locked to its first context type, so the driver
+			// choice is boot-time only: keep WebGL for the immersive path.
+			console.warn('This browser supports WebXR but cannot render immersive sessions through WebGPU; keeping the WebGL driver.'); // eslint-disable-line no-console
 			return Promise.resolve();
 		}
 		return navigator['gpu']['requestAdapter']().then(function (adapter) {
@@ -329,6 +340,7 @@ const Engine = (function () {
 	// Feature-detection utilities.
 	SafeEngine['isWebGLAvailable'] = Features.isWebGLAvailable;
 	SafeEngine['isWebGPUAvailable'] = Features.isWebGPUAvailable;
+	SafeEngine['isWebXRWebGPUAvailable'] = Features.isWebXRWebGPUAvailable;
 	SafeEngine['isFetchAvailable'] = Features.isFetchAvailable;
 	SafeEngine['isSecureContext'] = Features.isSecureContext;
 	SafeEngine['isCrossOriginIsolated'] = Features.isCrossOriginIsolated;
