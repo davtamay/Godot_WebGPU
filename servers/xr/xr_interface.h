@@ -140,6 +140,12 @@ public:
 	virtual uint32_t get_view_count() = 0; /* returns the view count we need (1 is monoscopic, 2 is stereoscopic but can be more) */
 
 	// These methods are called from the rendering thread.
+	/* When the rendering backend cannot render all views in a single pass
+	   (e.g. it has no multiview), an interface may request that the viewport
+	   be drawn multiple times, once per view; get_view_count() must then
+	   report 1 and the interface serves the active pass's view as view 0. */
+	virtual uint32_t get_draw_pass_count() { return 1; }
+	virtual void set_current_draw_pass(uint32_t p_pass) {}
 	virtual Transform3D get_transform_for_view(uint32_t p_view, const Transform3D &p_cam_transform) = 0; /* get each views transform */
 	virtual Projection get_projection_for_view(uint32_t p_view, double p_aspect, double p_z_near, double p_z_far) = 0; /* get each view projection matrix */
 	virtual RID get_color_texture(); /* obtain color output texture (if applicable) */
