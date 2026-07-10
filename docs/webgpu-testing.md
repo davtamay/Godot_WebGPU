@@ -43,8 +43,15 @@ tests.
 ## Shader baking (patch 07)
 
 Baking WebGPU shaders needs an external Tint binary (interim until Tint is
-vendored; build once from Dawn source pinned to the same release as the
-runtime bindings):
+vendored). The canonical source is the fork's release assets, built by the
+"WebGPU stack - tint builder" workflow from the same Dawn tag the runtime
+bindings pin and verified to produce byte-identical baked WGSL:
+
+    gh release download tint-v20250531.224602 -p 'tint-*'  # pick your platform
+
+Set GODOT_TINT_PATH to the downloaded executable; re-dispatch the workflow
+with a new dawn_ref when the emdawnwebgpu pin moves. To build by hand
+instead (the same recipe the workflow runs):
 
     git clone --depth 1 --branch v20250531.224602 https://github.com/google/dawn.git
     cmake -S dawn -B dawn/out -G Ninja -DCMAKE_BUILD_TYPE=Release \
