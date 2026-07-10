@@ -52,6 +52,7 @@ extern int godot_webxr_is_supported();
 extern void godot_webxr_is_session_supported(const char *p_session_mode, GodotWebXRSupportedCallback p_callback);
 
 extern void godot_webxr_initialize(
+		int p_use_webgpu_binding,
 		const char *p_session_mode,
 		const char *p_required_features,
 		const char *p_optional_features,
