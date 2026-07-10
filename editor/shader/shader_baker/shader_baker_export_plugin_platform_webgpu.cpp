@@ -35,12 +35,24 @@
 #include "drivers/webgpu/rendering_shader_container_webgpu.h"
 
 RenderingShaderContainerFormat *ShaderBakerExportPluginPlatformWebGPU::create_shader_container_format(const Ref<EditorExportPlatform> &p_platform, const Ref<EditorExportPreset> &p_preset) {
-	// Interim external translator until Tint is vendored: the path to a tint
-	// binary comes from the GODOT_TINT_PATH environment variable (see
-	// docs/webgpu-testing.md for how to build one).
-	const String tint_path = OS::get_singleton()->get_environment("GODOT_TINT_PATH");
+	// Interim external translator until Tint is vendored: GODOT_TINT_PATH
+	// wins when set, otherwise a tint executable dropped next to the editor
+	// binary is picked up automatically (see docs/webgpu-testing.md for the
+	// release assets and the build recipe).
+	String tint_path = OS::get_singleton()->get_environment("GODOT_TINT_PATH");
+	if (tint_path.is_empty() || !FileAccess::exists(tint_path)) {
+		const String editor_dir = OS::get_singleton()->get_executable_path().get_base_dir();
+		const char *tint_names[] = { "tint.exe", "tint" };
+		for (const char *name : tint_names) {
+			const String candidate = editor_dir.path_join(name);
+			if (FileAccess::exists(candidate)) {
+				tint_path = candidate;
+				break;
+			}
+		}
+	}
 	ERR_FAIL_COND_V_MSG(tint_path.is_empty() || !FileAccess::exists(tint_path), nullptr,
-			"Baking WebGPU shaders requires the Tint translator; set the GODOT_TINT_PATH environment variable to a tint executable.");
+			"Baking WebGPU shaders requires the Tint translator: set the GODOT_TINT_PATH environment variable to a tint executable, or place one next to the editor binary (prebuilt binaries are on the repository's releases page under the tint-* tag).");
 
 	RenderingShaderContainerFormatWebGPU *format = memnew(RenderingShaderContainerFormatWebGPU);
 	format->set_tint_path(tint_path);
