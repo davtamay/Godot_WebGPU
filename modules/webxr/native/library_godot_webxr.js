@@ -258,8 +258,8 @@ const GodotWebXR = {
 
 	godot_webxr_initialize__deps: ['emscripten_webgl_get_current_context'],
 	godot_webxr_initialize__proxy: 'sync',
-	godot_webxr_initialize__sig: 'viiiiiiiii',
-	godot_webxr_initialize: function (p_session_mode, p_required_features, p_optional_features, p_requested_reference_spaces, p_on_session_started, p_on_session_ended, p_on_session_failed, p_on_input_event, p_on_simple_event) {
+	godot_webxr_initialize__sig: 'viiiiiiiiii',
+	godot_webxr_initialize: function (p_use_webgpu_binding, p_session_mode, p_required_features, p_optional_features, p_requested_reference_spaces, p_on_session_started, p_on_session_ended, p_on_session_failed, p_on_input_event, p_on_simple_event) {
 		GodotWebXR.monkeyPatchRequestAnimationFrame(true);
 
 		const session_mode = GodotRuntime.parseString(p_session_mode);
@@ -268,7 +268,11 @@ const GodotWebXR = {
 
 		// Without the 'webgpu' session feature the browser creates a
 		// WebGL-based session that XRGPUBinding refuses to attach to.
-		if (Module['preinitializedWebGPUDevice'] && Module['GodotWebGPUXR'] && !required_features.includes('webgpu')) {
+		// The engine passes which renderer actually booted: a pre-initialized
+		// device on Module is NOT sufficient (the loader can prepare WebGPU
+		// while a gl_compatibility project still boots GLES3).
+		const use_webgpu_binding = !!(p_use_webgpu_binding && Module['preinitializedWebGPUDevice'] && Module['GodotWebGPUXR']);
+		if (use_webgpu_binding && !required_features.includes('webgpu')) {
 			required_features.push('webgpu');
 		}
 		const requested_reference_space_types = GodotRuntime.parseString(p_requested_reference_spaces).split(',').map((s) => s.trim());
@@ -433,7 +437,7 @@ const GodotWebXR = {
 			// The renderer that booted decides the binding type: only a
 			// WebGPU-driver boot stashes the pre-initialized device and
 			// the WebGPU XR bridge on Module.
-			if (Module['preinitializedWebGPUDevice'] && Module['GodotWebGPUXR']) {
+			if (use_webgpu_binding) {
 				setupWebGPU();
 			} else {
 				setupWebGL();
