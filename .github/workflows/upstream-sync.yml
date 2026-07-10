@@ -7,14 +7,17 @@
 # then builds the candidate. webgpu-stack itself is NEVER pushed by
 # automation: promotion stays a human step because CI cannot run the
 # local-only gates (tint bakes, strict pixel probe on a real GPU, in-headset
-# checks). A conflicted rebase fails the job loudly - the failing patch name
-# is in the log - and pushes nothing.
+# checks). Run misc/webgpu_scripts/promote-candidate.sh to promote.
 #
-# Promote a green candidate locally with:
-#   git fetch origin
-#   git branch backup/stack-<date> webgpu-stack
-#   git reset --hard origin/auto-rebase/<date>   # on webgpu-stack
-#   <run the local verification gates, then push with --force-with-lease>
+# Resilience measures:
+# - A conflicted rebase or failed verification opens/updates the tracking
+#   issue (label: upstream-sync) naming the failing patch; a fresh candidate
+#   updates the same issue with a promotion checklist.
+# - The workflow re-enables itself every run (GitHub disables schedules
+#   after 60 days of repo inactivity).
+# - Old candidates/backup tags are pruned (newest 3 kept).
+# - The Emscripten pin is diffed against upstream's web_builds.yml so pin
+#   drift is flagged before it becomes a mysterious build failure.
 
 name: WebGPU stack - upstream sync
 
@@ -25,17 +28,29 @@ on:
 
 permissions:
   contents: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
 
 jobs:
   rebase:
     name: Rebase stack onto upstream master
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout stack
         uses: actions/checkout@v4
         with:
           ref: webgpu-stack
           fetch-depth: 0
+
+      - name: Keep the schedule alive
+        run: |
+          gh api -X PUT "repos/${{ github.repository }}/actions/workflows/upstream-sync.yml/enable" || true
 
       - name: Fetch upstream
         run: |
@@ -50,14 +65,32 @@ jobs:
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
           echo "Upstream is $COUNT commit(s) ahead of the stack's base."
 
+      - name: Check the Emscripten pin against upstream
+        id: empin
+        run: |
+          UP=$(git show upstream/master:.github/workflows/web_builds.yml | grep -oE "EM_VERSION: *[0-9.]+" | grep -oE "[0-9.]+" | head -1 || true)
+          OURS=$(grep -oE "EM_VERSION: *[0-9.]+" .github/workflows/web-baseline.yml | grep -oE "[0-9.]+" | head -1 || true)
+          echo "upstream=$UP ours=$OURS"
+          if [ -n "$UP" ] && [ -n "$OURS" ] && [ "$UP" != "$OURS" ]; then
+            echo "drift=Emscripten pin drift: upstream web_builds.yml uses $UP, our baseline pins $OURS." >> "$GITHUB_OUTPUT"
+          else
+            echo "drift=" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Rebase
         if: steps.fresh.outputs.count != '0'
+        id: rebase
         run: |
           git config user.name "upstream-sync[bot]"
           git config user.email "upstream-sync[bot]@users.noreply.github.com"
           STAMP=$(date -u +%Y%m%d)
+          echo "stamp=$STAMP" >> "$GITHUB_OUTPUT"
           git tag "backup/auto-$STAMP" HEAD
-          git rebase upstream/master
+          if ! git rebase upstream/master; then
+            echo "::error::Rebase conflicted on: $(git log -1 --format=%s REBASE_HEAD 2>/dev/null || echo '(unknown patch)')"
+            git rebase --abort || true
+            exit 1
+          fi
 
       - name: Verify stack integrity
         if: steps.fresh.outputs.count != '0'
@@ -71,7 +104,47 @@ jobs:
       - name: Push candidate branch and backup tag
         if: steps.fresh.outputs.count != '0'
         run: |
-          STAMP=$(date -u +%Y%m%d)
+          STAMP=${{ steps.rebase.outputs.stamp }}
           git push origin "backup/auto-$STAMP"
           git push --force origin "HEAD:auto-rebase/$STAMP"
           echo "Candidate: auto-rebase/$STAMP (baseline CI builds it next)."
+
+      - name: Prune old candidates and backup tags (keep newest 3)
+        if: steps.fresh.outputs.count != '0'
+        run: |
+          git ls-remote --heads origin "auto-rebase/*" | awk '{print $2}' | sed 's|refs/heads/||' | sort | head -n -3 | while read -r b; do
+            echo "pruning branch $b"; git push origin --delete "$b" || true
+          done
+          git ls-remote --tags origin "backup/auto-*" | awk '{print $2}' | sed 's|refs/tags/||' | grep -v '\^{}' | sort | head -n -3 | while read -r t; do
+            echo "pruning tag $t"; git push origin --delete "$t" || true
+          done
+
+      - name: Report candidate ready
+        if: success() && steps.fresh.outputs.count != '0'
+        run: |
+          STAMP=${{ steps.rebase.outputs.stamp }}
+          COUNT=${{ steps.fresh.outputs.count }}
+          DRIFT="${{ steps.empin.outputs.drift }}"
+          L1="Candidate \`auto-rebase/$STAMP\` is pushed ($COUNT new upstream commits; clean replay, check-stack OK). Baseline CI builds it automatically."
+          L2="Promote locally with \`bash misc/webgpu_scripts/promote-candidate.sh $STAMP\` and run the local gates (tint bake, strict probe, headset spot-check) before force-with-lease pushing."
+          BODY=$(printf '%s\n\n%s\n\n%s' "$L1" "$L2" "$DRIFT")
+          N=$(gh issue list --label upstream-sync --state open --json number --jq length)
+          if [ "$N" = "0" ]; then
+            gh issue create --title "Upstream sync: candidate ready" --label upstream-sync --body "$BODY"
+          else
+            NUM=$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number')
+            gh issue comment "$NUM" --body "$BODY"
+          fi
+
+      - name: Report failure
+        if: failure()
+        run: |
+          L1="The scheduled upstream rebase FAILED (run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}). Either a patch conflicted with new upstream changes or stack verification failed - see the log for the offending patch. The stack itself is untouched; resolve locally (backup tag was pushed if the rebase step ran)."
+          BODY=$(printf '%s\n\n%s' "$L1" "${{ steps.empin.outputs.drift }}")
+          N=$(gh issue list --label upstream-sync --state open --json number --jq length)
+          if [ "$N" = "0" ]; then
+            gh issue create --title "Upstream sync: FAILED - needs manual rebase" --label upstream-sync --body "$BODY"
+          else
+            NUM=$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number')
+            gh issue comment "$NUM" --body "$BODY"
+          fi
