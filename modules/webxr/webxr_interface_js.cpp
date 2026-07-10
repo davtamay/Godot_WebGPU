@@ -362,6 +362,11 @@ bool WebXRInterfaceJS::initialize() {
 		initialized = true;
 
 		godot_webxr_initialize(
+#ifdef WEBGPU_ENABLED
+				RenderingDevice::get_singleton() != nullptr ? 1 : 0,
+#else
+				0,
+#endif
 				session_mode.utf8().get_data(),
 				required_features.utf8().get_data(),
 				optional_features.utf8().get_data(),
