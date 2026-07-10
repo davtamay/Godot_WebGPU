@@ -590,6 +590,33 @@ const GodotWebXR = {
 		return true;
 	},
 
+	godot_webxr_get_frame_matrices__proxy: 'sync',
+	godot_webxr_get_frame_matrices__sig: 'ii',
+	godot_webxr_get_frame_matrices: function (r_data) {
+		// One crossing per frame for every matrix the engine reads: the head
+		// transform (16 floats), then per view its transform and projection
+		// (32 floats per view, up to 2 views). Returns the view count, or 0
+		// without a pose - callers fall back to the per-matrix calls.
+		if (!GodotWebXR.session || !GodotWebXR.pose) {
+			return 0;
+		}
+		const pose = GodotWebXR.pose;
+		const view_count = Math.min(pose.views.length, 2);
+		let offset = r_data;
+		const put = function (matrix) {
+			for (let i = 0; i < 16; i++) {
+				GodotRuntime.setHeapValue(offset + (i * 4), matrix[i], 'float');
+			}
+			offset += 64;
+		};
+		put(pose.transform.matrix);
+		for (let v = 0; v < view_count; v++) {
+			put(pose.views[v].transform.matrix);
+			put(pose.views[v].projectionMatrix);
+		}
+		return view_count;
+	},
+
 	godot_webxr_get_transform_for_view__proxy: 'sync',
 	godot_webxr_get_transform_for_view__sig: 'iii',
 	godot_webxr_get_transform_for_view: function (p_view, r_transform) {
