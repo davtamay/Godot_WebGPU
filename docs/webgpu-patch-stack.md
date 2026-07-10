@@ -24,9 +24,12 @@
 
 | 33 | [shared] web: Choose the boot driver by the project's WebXR needs | New web-export option webxr/uses_webxr (default off) emits requiresWebXR into the exported config; the loader then keeps the WebGL driver on browsers that support WebXR but cannot render immersive sessions through WebGPU (a canvas locks to its first context type, so the choice is boot-time only). Detection is capability-based: Engine.isWebXRWebGPUAvailable() (XRGPUBinding) plus an engine-support constant that stays false until the WebXR-WebGPU rendering path lands. One export renders WebGPU on flat browsers and enters XR through the intact WebGL path elsewhere | ~10 export_plugin.cpp, ~13 engine.js, ~12 config.js, ~14 features.js | not yet |
 
-(Planned next: 34+ WebXR-WebGPU rendering (XRGPUBinding projection layers
-wrapped via texture_create_from_extension; stereo = one pass per view);
-Quest Browser ships experimental support since April 2026. NOTE: upstream
+| 34 | [shared] webxr: Bind WebXR sessions to the WebGPU renderer | When the WebGPU driver booted (signal: the pre-initialized device on Module), the WebXR glue creates an XRGPUBinding instead of the XRWebGLBinding, appends the mandatory 'webgpu' session feature (without it the browser mints a WebGL-based session the binding refuses), and creates the projection layer in the binding's DEFAULT shape (explicit textureType produced broken sub-images on Quest Browser's experimental impl). Layer textures cross to C++ as WGPUTexture handles (emdawnwebgpu importJsTexture, cached in a JS map) and the interface wraps them with RD texture_create_from_extension for the renderer-agnostic render-target override -- the OpenXR/Vulkan idiom. The multiview session requirement is skipped on this path (WGSL has none; GLES3::Config does not even exist here). Two presentation fixes ride along: the canvas returns null from getCurrentTexture() while an immersive session owns the compositor (guard makes it throw into the port's error path; the driver skips the frame silently). Adds modules/webxr to the shared allowlist. QUEST-3-VERIFIED: session starts, layer sub-image = 1680x1760 2-layer rgba8unorm array wrapped cleanly; rendering then stops at the renderer's multiview requirement = exactly the next patch's scope. Loader keeps steering XR exports to WebGL until stereo lands (ENGINE_WEBXR_WEBGPU_SUPPORTED stays false) | ~55 library_godot_webxr.js, ~60 webxr_interface_js.cpp, ~1 godot_webxr.h, ~30 webxr.externs.js, ~8 engine.js | not yet |
+
+(Planned next: 35 per-view XR stereo for the RD mobile renderer (one pass
+per view; Godot's WebXR path currently assumes multiview) + flipping
+ENGINE_WEBXR_WEBGPU_SUPPORTED; Quest Browser ships experimental
+WebXR-WebGPU since April 2026. NOTE: upstream
 already compiles RenderingDevice + renderer_rd unconditionally on all
 platforms including web; the per-platform RD_ENABLED define is the only
 gate, which is why patch 01 is a detect.py-only change.)
