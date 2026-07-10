@@ -289,6 +289,12 @@ const GodotWebXR = {
 		if (optional_features.length > 0) {
 			session_init['optionalFeatures'] = optional_features;
 		}
+		if (use_webgpu_binding && (required_features.includes('depth-sensing') || optional_features.includes('depth-sensing'))) {
+			session_init['depthSensing'] = {
+				usagePreference: ['gpu-optimized'],
+				dataFormatPreference: ['unsigned-short', 'float32'],
+			};
+		}
 
 		navigator.xr.requestSession(session_mode, session_init).then(function (session) {
 			GodotWebXR.session = session;
@@ -479,6 +485,48 @@ const GodotWebXR = {
 		// pause/restart the main loop to activate it on all platforms.
 		GodotWebXR.monkeyPatchRequestAnimationFrame(false);
 		GodotWebXR.pauseResumeMainLoop();
+	},
+
+	godot_webxr_get_depth_sensing_info__proxy: 'sync',
+	godot_webxr_get_depth_sensing_info__sig: 'iii',
+	godot_webxr_get_depth_sensing_info: function (p_view, r_params) {
+		// WebGPU path only: returns an imported WGPUTexture handle for the
+		// view's depth-sensing texture and writes [rawValueToMeters, width,
+		// height, format(0=unorm16,1=float32)] to r_params (4 floats).
+		// On failure (return 0), r_params[0] holds why: 0 = no session,
+		// 1 = WebGL-binding session, 2 = the browser's XRGPUBinding has no
+		// getDepthInformation(), 3 = the session has no depth data.
+		const fail = function (reason) {
+			GodotRuntime.setHeapValue(r_params + 0, reason, 'float');
+			return 0;
+		};
+		if (!GodotWebXR.session || !GodotWebXR.pose) {
+			return fail(0);
+		}
+		if (!GodotWebXR.gpu_binding) {
+			return fail(1);
+		}
+		if (typeof GodotWebXR.gpu_binding.getDepthInformation !== 'function') {
+			return fail(2);
+		}
+		const views = GodotWebXR.pose.views;
+		if (p_view >= views.length) {
+			return fail(3);
+		}
+		let depth = null;
+		try {
+			depth = GodotWebXR.gpu_binding.getDepthInformation(views[p_view]);
+		} catch (e) {
+			return fail(3);
+		}
+		if (!depth || !depth.texture) {
+			return fail(3);
+		}
+		GodotRuntime.setHeapValue(r_params + 0, depth.rawValueToMeters !== undefined ? depth.rawValueToMeters : 1.0, 'float');
+		GodotRuntime.setHeapValue(r_params + 4, depth.texture.width, 'float');
+		GodotRuntime.setHeapValue(r_params + 8, depth.texture.height, 'float');
+		GodotRuntime.setHeapValue(r_params + 12, depth.texture.format === 'r32float' ? 1.0 : 0.0, 'float');
+		return Module['GodotWebGPUXR'].importTexture(depth.texture);
 	},
 
 	godot_webxr_get_color_format__proxy: 'sync',
