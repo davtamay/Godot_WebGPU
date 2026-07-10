@@ -27,6 +27,20 @@ const Features = {
 	},
 
 	/**
+	 * Check whether the browser can render immersive WebXR sessions through
+	 * WebGPU (the WebXR-WebGPU Binding, i.e. XRGPUBinding).
+	 *
+	 * Note that this only checks for the presence of the APIs; session and
+	 * device requests can still fail.
+	 *
+	 * @returns {boolean} If WebXR sessions can use WebGPU layers.
+	 * @function Engine.isWebXRWebGPUAvailable
+	 */
+	isWebXRWebGPUAvailable: function () {
+		return 'gpu' in navigator && 'xr' in navigator && 'XRGPUBinding' in window;
+	},
+
+	/**
 	 * Check whether the Fetch API available and supports streaming responses.
 	 *
 	 * @returns {boolean} If the Fetch API is available and supports streaming responses.
