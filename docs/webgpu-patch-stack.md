@@ -42,6 +42,8 @@
 
 | 42 | misc: Add a scheduled upstream auto-rebase workflow | Weekly (and on-demand) GitHub Action fetches upstream master, replays the stack, and only on a fully clean replay + check-stack pass pushes a dated auto-rebase/ candidate branch (plus a backup tag); the baseline workflow builds candidates automatically. webgpu-stack is never pushed by automation - promotion stays human because CI cannot run the tint bakes, the strict real-GPU pixel probe, or in-headset checks. A conflicted rebase fails loudly naming the patch | 0 (fork-only files) | n/a (fork-only) |
 
+| 43 | misc: Harden the upstream sync for unattended operation | Self-keepalive (GitHub disables schedules after 60 idle days), concurrency guard, failure/candidate-ready GitHub issues (label upstream-sync - conflicts land in email instead of a silent Actions tab), Emscripten-pin drift check against upstream web_builds.yml, pruning of old candidates/backup tags (newest 3), and promote-candidate.sh encoding the human promotion ritual (dirty-tree/branch/stale-candidate refusals, snapshot, reset, printed local-gate checklist; never pushes) | 0 (fork-only files) | n/a (fork-only) |
+
 (Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
 experimental WebXR-WebGPU since April 2026. NOTE: upstream
 already compiles RenderingDevice + renderer_rd unconditionally on all
