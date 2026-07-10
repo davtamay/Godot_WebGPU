@@ -20,8 +20,10 @@
 | 12-30 | (rows pending backfill) | Browser bring-up: engine boot through the driver, full-variant baking, SPIR-V preprocessing, WGSL sanitization, 3D feature set, subpass-free mobile path, baked-cache hole tolerance, VRS/particles/octmap fixes | see git log | not yet |
 | 31 | [shared] webgpu: Skip baked shader groups the target cannot use | Bake-side veto hook (ShaderBakerExportPluginPlatform::skips_variant): the WebGPU plugin skips multiview variants (WGSL cannot express ViewIndex; stereo will be one pass per view) and FP16 variants (driver reports SUPPORTS_HALF_FLOAT=false); they shipped as dead bytes -- the runtime never requests either. Skipped variants become tolerated cache holes (patch 26); bakes also get faster (no glslang/Tint for skipped variants) | ~10 shader_baker_export_plugin.cpp/.h | not yet |
 
-(Planned next: 32 runtime-material cache-miss diagnostic; 33 XR-adaptive
-loader (feature-detect XRGPUBinding; boot webgpu only when usable with the
+| 32 | [shared] webgpu: Report unbaked shader versions with an actionable error | The web runtime cannot compile shaders, so a version missing from the baked cache produced a 3-errors-per-variant cascade; _compile_version_start now reports one actionable error naming the shader and the usual cause (materials constructed in scripts are invisible to the export-time baker; save them as .tres) and leaves the version invalid, which version_get_shader already handles | ~11 shader_rd.cpp | not yet |
+
+(Planned next: 33 XR-adaptive loader
+(feature-detect XRGPUBinding; boot webgpu only when usable with the
 project's XR needs, else the intact WebGL/WebXR path). NOTE: upstream
 already compiles RenderingDevice + renderer_rd unconditionally on all
 platforms including web; the per-platform RD_ENABLED define is the only
