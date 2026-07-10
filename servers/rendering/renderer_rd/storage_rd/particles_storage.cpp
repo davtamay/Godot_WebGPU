@@ -318,6 +318,14 @@ void ParticlesStorage::_particles_free_data(Particles *particles) {
 		particles->unused_emission_storage_buffer = RID();
 	}
 
+#ifdef WEBGPU_ENABLED
+	if (particles->unused_dst_emission_storage_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(particles->unused_dst_emission_storage_buffer);
+		particles->unused_dst_emission_storage_buffer = RID();
+	}
+#endif
+
+
 	if (particles->unused_trail_storage_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(particles->unused_trail_storage_buffer);
 		particles->unused_trail_storage_buffer = RID();
@@ -828,8 +836,18 @@ void ParticlesStorage::_particles_process(Particles *p_particles, double p_delta
 				}
 				u.append_id(sub_emitter->emission_storage_buffer);
 			} else {
+#ifdef WEBGPU_ENABLED
+				// Binding 2 may already hold unused_emission_storage_buffer;
+				// WebGPU rejects bind groups whose writable storage entries
+				// alias, so the destination placeholder is a distinct buffer.
+				if (p_particles->unused_dst_emission_storage_buffer.is_null()) {
+					p_particles->unused_dst_emission_storage_buffer = RD::get_singleton()->storage_buffer_create(sizeof(ParticleEmissionBuffer));
+				}
+				u.append_id(p_particles->unused_dst_emission_storage_buffer);
+#else
 				_particles_ensure_unused_emission_buffer(p_particles);
 				u.append_id(p_particles->unused_emission_storage_buffer);
+#endif
 			}
 			uniforms.push_back(u);
 		}
