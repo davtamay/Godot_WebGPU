@@ -32,6 +32,12 @@
 
 | 37 | [shared] webxr: Expose real-world depth sensing to scripts | WebGPU sessions request gpu-optimized depth sensing when the feature is asked for; get_system_info() surfaces the depth map as an RD texture (webxr_depth_texture_rd + rawValueToMeters + size) plus a webxr_depth_status reason string so occlusion consumers explain fallbacks. Probed only on script demand, never per frame. Quest Browser 148's XRGPUBinding lacks getDepthInformation() (status: unsupported_by_browser) - the suite falls back to static room-mesh occlusion until a browser update ships it. KNOWN GAP: sampling the scene depth buffer (hint_depth_texture) is not yet bindable on the WebGPU driver (depth-aspect views + non-filtering sample type needed) - prerequisite for live-sensor occlusion there | ~48 library_godot_webxr.js, ~60 webxr_interface_js.cpp/.h, ~1 godot_webxr.h | not yet |
 
+| 38 | webgpu: Reflect the probe's fragment output mask | The probe containers never set fragment_output_mask, so the write-mask-zeroing rule (a bring-up patch) made every probe draw rasterize invisibly - markers/validation green, strict pixels silently dead. Declaring color target 0 restores the strict probe as a regression gate | 0 | not yet |
+
+| 39 | webgpu: Remove unused SPIR-V preprocessing passes | Nine never-wired passes from the dwalter integration (~1,700 unreachable lines incl. a duplicate of the container's inline push-constant rewrite) removed; live chain unchanged: flatten_binding_arrays, lower_view_index_to_zero, lower_spec_constant_ops_to_runtime, negate_position_y, freeze_spec_constant_ops | 0 | not yet |
+
+| 40 | webgpu: Keep the per-draw bind path allocation-free | Stereo-frame hot-path fixes: per-draw dynamic-offset heap allocation -> fixed stack array; single dirty flag rebinding ALL sets per push-constant move -> per-set dirty bits + push-constant flag (sets without the ring entry stop rebinding per draw); per-pass color-attachment vector -> stack storage. Verified: strict probe pixel-exact + full-scene boot 0 errors | 0 | not yet |
+
 (Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
 experimental WebXR-WebGPU since April 2026. NOTE: upstream
 already compiles RenderingDevice + renderer_rd unconditionally on all
