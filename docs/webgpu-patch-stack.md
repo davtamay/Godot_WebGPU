@@ -66,6 +66,8 @@
 
 | 47 | webgpu: Auto-locate the tint binary beside the editor | GODOT_TINT_PATH still wins, but a tint executable next to the editor binary is picked up automatically - drop-in setup for fork users, no environment variable; the missing-tint error now names both options and the release assets. Verified both ways (beside-editor bake clean; absence = one actionable error) | 0 | not yet |
 
+| 48 | [shared] webxr: Fetch all frame matrices in one thread crossing | The head transform and every view transform/projection each cost a synchronous worker-to-main crossing per call (~5 per stereo frame); process() now fetches them all in one call and the per-view getters read the cache (old calls kept as fallback for queries before the first frame). Quest-verified: tracking and eye alignment unchanged | ~27 library_godot_webxr.js, ~20 webxr_interface_js.cpp/.h, ~1 godot_webxr.h | not yet |
+
 (Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
 experimental WebXR-WebGPU since April 2026. NOTE: upstream
 already compiles RenderingDevice + renderer_rd unconditionally on all
