@@ -49,7 +49,9 @@ bindings pin and verified to produce byte-identical baked WGSL:
 
     gh release download tint-v20250531.224602 -p 'tint-*'  # pick your platform
 
-Set GODOT_TINT_PATH to the downloaded executable; re-dispatch the workflow
+Set GODOT_TINT_PATH to the downloaded executable - or simply drop it next
+to the editor binary (tint.exe / tint), which the baker finds automatically
+when the variable is unset. Re-dispatch the workflow
 with a new dawn_ref when the emdawnwebgpu pin moves. To build by hand
 instead (the same recipe the workflow runs):
 
