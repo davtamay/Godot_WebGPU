@@ -70,6 +70,8 @@ private:
 	// (freed before their owner in texture_cache).
 	RBMap<unsigned int, Vector<RID>> texture_slice_cache;
 	uint32_t current_draw_pass = 0;
+	uint32_t layer_generation = 0;
+	void _free_rd_layer_textures();
 	RID depth_sensing_texture;
 	float depth_sensing_raw_to_meters = 1.0f;
 	Size2 depth_sensing_size;

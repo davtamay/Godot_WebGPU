@@ -41,6 +41,12 @@ const GodotWebXR = {
 		gpu_binding: null,
 		gpu_color_format: null,
 		layer: null,
+		// Recreating the layer (resize, view-count change) invalidates every
+		// texture wrapped from it; the engine watches this counter to evict.
+		layer_generation: 0,
+		// getViewSubImage() is only valid once per frame per view; several
+		// engine calls need it, so it is computed once per animation frame.
+		frame_subimage: null,
 		space: null,
 		frame: null,
 		pose: null,
@@ -58,9 +64,11 @@ const GodotWebXR = {
 				const onFrame = function (time, frame) {
 					GodotWebXR.frame = frame;
 					GodotWebXR.pose = frame.getViewerPose(GodotWebXR.space);
+					GodotWebXR.frame_subimage = null;
 					callback(time);
 					GodotWebXR.frame = null;
 					GodotWebXR.pose = null;
+					GodotWebXR.frame_subimage = null;
 				};
 				GodotWebXR.session.requestAnimationFrame(onFrame);
 			} else {
@@ -120,11 +128,16 @@ const GodotWebXR = {
 			GodotWebXR.session.updateRenderState({ layers: [layer] });
 
 			GodotWebXR.layer = layer;
+			GodotWebXR.layer_generation++;
+			GodotWebXR.frame_subimage = null;
 			GodotWebXR.view_count = new_view_count;
 			return layer;
 		},
 
 		getSubImage: () => {
+			if (GodotWebXR.frame_subimage) {
+				return GodotWebXR.frame_subimage;
+			}
 			if (!GodotWebXR.pose) {
 				return null;
 			}
@@ -137,7 +150,8 @@ const GodotWebXR = {
 			// when there is only 1 view, it should be safe to only grab the
 			// subimage for the first view.
 			const binding = GodotWebXR.gpu_binding || GodotWebXR.gl_binding;
-			return binding.getViewSubImage(layer, GodotWebXR.pose.views[0]);
+			GodotWebXR.frame_subimage = binding.getViewSubImage(layer, GodotWebXR.pose.views[0]);
+			return GodotWebXR.frame_subimage;
 		},
 
 		getTextureHandle: (texture) => {
@@ -527,6 +541,22 @@ const GodotWebXR = {
 		GodotRuntime.setHeapValue(r_params + 8, depth.texture.height, 'float');
 		GodotRuntime.setHeapValue(r_params + 12, depth.texture.format === 'r32float' ? 1.0 : 0.0, 'float');
 		return Module['GodotWebGPUXR'].importTexture(depth.texture);
+	},
+
+	godot_webxr_get_pass_info__proxy: 'sync',
+	godot_webxr_get_pass_info__sig: 'ii',
+	godot_webxr_get_pass_info: function (r_info) {
+		// One thread crossing for everything a draw pass needs on the
+		// RenderingDevice path: writes [layer_generation, color_handle,
+		// depth_handle] as 3 u32s to r_info. Returns 1 on success.
+		const subimage = GodotWebXR.getSubImage();
+		if (subimage === null) {
+			return 0;
+		}
+		GodotRuntime.setHeapValue(r_info + 0, GodotWebXR.layer_generation, 'i32');
+		GodotRuntime.setHeapValue(r_info + 4, GodotWebXR.getTextureHandle(subimage.colorTexture), 'i32');
+		GodotRuntime.setHeapValue(r_info + 8, subimage.depthStencilTexture ? GodotWebXR.getTextureHandle(subimage.depthStencilTexture) : 0, 'i32');
+		return 1;
 	},
 
 	godot_webxr_get_color_format__proxy: 'sync',
