@@ -434,6 +434,7 @@ void WebXRInterfaceJS::uninitialize() {
 		}
 
 		texture_cache.clear();
+		frame_matrix_view_count = 0;
 #ifdef WEBGPU_ENABLED
 		depth_sensing_texture = RID();
 		depth_sensing_status = 0;
@@ -543,12 +544,14 @@ TypedArray<Projection> WebXRInterfaceJS::get_camera_projections(const StringName
 	// The camera carries every WebXR view even when the renderer draws them
 	// one pass at a time (get_view_count() is then 1): each pass renders its
 	// own entry.
-	for (uint32_t v = 0; v < godot_webxr_get_view_count(); v++) {
+	const uint32_t view_count = frame_matrix_view_count > 0 ? frame_matrix_view_count : godot_webxr_get_view_count();
+	for (uint32_t v = 0; v < view_count; v++) {
 		Projection view;
 
 		float js_matrix[16];
-		bool has_projection = godot_webxr_get_projection_for_view(v, js_matrix);
-		if (!has_projection) {
+		if (v < frame_matrix_view_count) {
+			memcpy(js_matrix, frame_matrices + 16 + v * 32 + 16, sizeof(js_matrix));
+		} else if (!godot_webxr_get_projection_for_view(v, js_matrix)) {
 			return camera_projections;
 		}
 
@@ -585,17 +588,20 @@ TypedArray<Transform3D> WebXRInterfaceJS::get_camera_offsets(const StringName &p
 
 	// Get our head transform
 	float js_matrix[16];
-	bool has_transform = godot_webxr_get_transform_for_view(-1, js_matrix);
-	if (!has_transform) {
+	if (frame_matrix_view_count > 0) {
+		memcpy(js_matrix, frame_matrices, sizeof(js_matrix));
+	} else if (!godot_webxr_get_transform_for_view(-1, js_matrix)) {
 		return camera_offsets;
 	}
 
 	Transform3D inv_head_transform = _js_matrix_to_transform(js_matrix).inverse();
 
-	for (uint32_t v = 0; v < godot_webxr_get_view_count(); v++) {
+	const uint32_t view_count = frame_matrix_view_count > 0 ? frame_matrix_view_count : godot_webxr_get_view_count();
+	for (uint32_t v = 0; v < view_count; v++) {
 		// Get our view transform
-		has_transform = godot_webxr_get_transform_for_view(v, js_matrix);
-		if (!has_transform) {
+		if (v < frame_matrix_view_count) {
+			memcpy(js_matrix, frame_matrices + 16 + v * 32, sizeof(js_matrix));
+		} else if (!godot_webxr_get_transform_for_view(v, js_matrix)) {
 			return camera_offsets;
 		}
 
@@ -619,8 +625,9 @@ Transform3D WebXRInterfaceJS::get_transform_for_view(uint32_t p_view, const Tran
 	ERR_FAIL_COND_V(!initialized, p_cam_transform);
 
 	float js_matrix[16];
-	bool has_transform = godot_webxr_get_transform_for_view(p_view, js_matrix);
-	if (!has_transform) {
+	if (p_view < frame_matrix_view_count) {
+		memcpy(js_matrix, frame_matrices + 16 + p_view * 32, sizeof(js_matrix));
+	} else if (!godot_webxr_get_transform_for_view(p_view, js_matrix)) {
 		return p_cam_transform;
 	}
 
@@ -638,8 +645,9 @@ Projection WebXRInterfaceJS::get_projection_for_view(uint32_t p_view, double p_a
 	ERR_FAIL_COND_V(!initialized, view);
 
 	float js_matrix[16];
-	bool has_projection = godot_webxr_get_projection_for_view(p_view, js_matrix);
-	if (!has_projection) {
+	if (p_view < frame_matrix_view_count) {
+		memcpy(js_matrix, frame_matrices + 16 + p_view * 32 + 16, sizeof(js_matrix));
+	} else if (!godot_webxr_get_projection_for_view(p_view, js_matrix)) {
 		return view;
 	}
 
@@ -908,10 +916,11 @@ RID WebXRInterfaceJS::get_velocity_texture() {
 
 void WebXRInterfaceJS::process() {
 	if (initialized) {
-		// Get the "head" position.
-		float js_matrix[16];
-		if (godot_webxr_get_transform_for_view(-1, js_matrix)) {
-			head_transform = _js_matrix_to_transform(js_matrix);
+		// One crossing fetches the head and every view's matrices for the
+		// frame; the per-view getters below read the cache.
+		frame_matrix_view_count = godot_webxr_get_frame_matrices(frame_matrices);
+		if (frame_matrix_view_count > 0) {
+			head_transform = _js_matrix_to_transform(frame_matrices);
 		}
 		if (head_tracker.is_valid()) {
 			head_tracker->set_pose("default", head_transform, Vector3(), Vector3());

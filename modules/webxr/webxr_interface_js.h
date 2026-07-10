@@ -99,6 +99,13 @@ private:
 	RID color_texture;
 	RID depth_texture;
 
+	// Per-frame matrix cache, refreshed once per process(): every
+	// godot_webxr_* call is a synchronous worker-to-main-thread crossing,
+	// so the head/view transforms and projections arrive in one fetch.
+	// Layout: [0..15] head, then per view [transform 16][projection 16].
+	float frame_matrices[16 + 2 * 32] = {};
+	uint32_t frame_matrix_view_count = 0;
+
 	RID _get_color_texture();
 	RID _get_depth_texture();
 	RID _get_texture(unsigned int p_texture_id);
