@@ -1067,6 +1067,32 @@ function XRCubeLayerInit() {}
 XRCubeLayerInit.prototype.orientation;
 
 /**
+ * @constructor XRGPUBinding
+ *
+ * @param {XRSession} session
+ * @param {Object} device
+ */
+function XRGPUBinding(session, device) {}
+
+/**
+ * @return {string}
+ */
+XRGPUBinding.prototype.getPreferredColorFormat = function () {};
+
+/**
+ * @param {Object} init
+ * @return {XRProjectionLayer}
+ */
+XRGPUBinding.prototype.createProjectionLayer = function (init) {};
+
+/**
+ * @param {XRProjectionLayer} layer
+ * @param {XRView} view
+ * @return {Object}
+ */
+XRGPUBinding.prototype.getViewSubImage = function (layer, view) {};
+
+/**
  * @constructor XRWebGLBinding
  *
  * @param {XRSession} session
