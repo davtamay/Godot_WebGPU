@@ -996,6 +996,109 @@ uint32_t RenderingShaderContainerWebGPU::_format_version() const {
 	return FORMAT_VERSION;
 }
 
+// Newer WGSL reserves words Tint's pinned version still emits as identifiers
+// (e.g. struct members named 'target' or 'type'); rename them at identifier
+// boundaries.
+static bool _rename_reserved_words(String &r_text) {
+	bool changed = false;
+	for (const char *reserved : { "target", "unorm", "snorm", "filter", "type" }) {
+		const String word = reserved;
+		int pos = 0;
+		while ((pos = r_text.find(word, pos)) != -1) {
+			const char32_t before = pos > 0 ? r_text[pos - 1] : ' ';
+			const char32_t after = pos + word.length() < r_text.length() ? r_text[pos + word.length()] : ' ';
+			const bool ident_before = is_ascii_identifier_char(before);
+			const bool ident_after = is_ascii_identifier_char(after);
+			if (!ident_before && !ident_after) {
+				r_text = r_text.substr(0, pos) + word + "_gd" + r_text.substr(pos + word.length());
+				changed = true;
+				pos += word.length() + 3;
+			} else {
+				pos += word.length();
+			}
+		}
+	}
+	return changed;
+}
+
+// Tint's SPIR-V reader taints every load through a buffer variable that has
+// any atomic member access, wrapping plain reads (even of vectors and matrix
+// columns) in atomicLoad calls that cannot type-check (Godot's particles
+// shader trips this: one atomicAdd on particle_count poisons all reads of the
+// emission data array). Unwrap the wrappers whose target member is not
+// actually atomic-typed in the WGSL struct definitions; the result is
+// revalidated by round-tripping through Tint before use.
+static bool _unwrap_reader_atomic_taint(String &r_text) {
+	HashSet<String> atomic_members;
+	{
+		int pos = 0;
+		while ((pos = r_text.find(": atomic<", pos)) != -1) {
+			int name_end = pos;
+			while (name_end > 0 && r_text[name_end - 1] == ' ') {
+				name_end--;
+			}
+			int name_start = name_end;
+			while (name_start > 0 && is_ascii_identifier_char(r_text[name_start - 1])) {
+				name_start--;
+			}
+			if (name_end > name_start) {
+				atomic_members.insert(r_text.substr(name_start, name_end - name_start));
+			}
+			pos += 9;
+		}
+	}
+
+	bool changed = false;
+	const String needle = "atomicLoad(&(";
+	int pos = 0;
+	while ((pos = r_text.find(needle, pos)) != -1) {
+		const int expr_start = pos + needle.length();
+		int depth = 1;
+		int p = expr_start;
+		while (p < r_text.length() && depth > 0) {
+			const char32_t c = r_text[p];
+			if (c == '(') {
+				depth++;
+			} else if (c == ')') {
+				depth--;
+			}
+			p++;
+		}
+		if (depth != 0 || p >= r_text.length() || r_text[p] != ')') {
+			pos = expr_start;
+			continue;
+		}
+		const String expr = r_text.substr(expr_start, p - 1 - expr_start);
+		// Terminal member name: strip trailing index chains like `[3i]`, then
+		// take the identifier suffix.
+		String core = expr;
+		while (core.length() > 0 && core[core.length() - 1] == ']') {
+			int d = 1;
+			int q = core.length() - 2;
+			while (q >= 0 && d > 0) {
+				if (core[q] == ']') {
+					d++;
+				} else if (core[q] == '[') {
+					d--;
+				}
+				q--;
+			}
+			core = core.substr(0, q + 1);
+		}
+		int name_start = core.length();
+		while (name_start > 0 && is_ascii_identifier_char(core[name_start - 1])) {
+			name_start--;
+		}
+		if (atomic_members.has(core.substr(name_start))) {
+			pos = p + 1;
+			continue;
+		}
+		r_text = r_text.substr(0, pos) + "(" + expr + ")" + r_text.substr(p + 1);
+		changed = true;
+	}
+	return changed;
+}
+
 bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p_shader) {
 	// Read-write storage images beyond 32-bit single-channel formats cannot
 	// exist in WebGPU; failing the bake here turns those variants into
@@ -1083,6 +1186,57 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 				print_verbose(vformat("WebGPU bake: shader '%s' stage #%d translated with frozen specialization constants.", String::utf8(shader_name.get_data()), i));
 			}
 		}
+		if ((err != OK || exit_code != 0) && output.find("no matching call to 'atomicLoad") != -1) {
+			// Recover from the reader's atomic-load taint (see
+			// _unwrap_reader_atomic_taint): Tint still emits the WGSL text to
+			// stdout despite the resolver error, so capture it, unwrap the
+			// invalid wrappers, and revalidate the fixed text through Tint.
+			{
+				// The freeze retry overwrote the file; restore the original.
+				Ref<FileAccess> spirv_file = FileAccess::open(spirv_path, FileAccess::WRITE);
+				ERR_FAIL_COND_V(spirv_file.is_null(), false);
+				spirv_file->store_buffer(spirv.ptr(), spirv.size());
+			}
+			String wgsl_text;
+			{
+				List<String> text_args;
+				text_args.push_back(spirv_path);
+				text_args.push_back("--format");
+				text_args.push_back("wgsl");
+				text_args.push_back("--allow-non-uniform-derivatives");
+				int text_exit = -1;
+				OS::get_singleton()->execute(tint_path, text_args, &wgsl_text, &text_exit, false);
+			}
+			if (_unwrap_reader_atomic_taint(wgsl_text)) {
+				// The fixed text must survive Tint's own WGSL parser, which
+				// rejects two things its SPIR-V reader emits: internal stride
+				// annotations (redundant; the marker itself means validation
+				// would compute the same layout) and reserved words used as
+				// identifiers.
+				wgsl_text = wgsl_text.replace("@stride(16) @internal(disable_validation__ignore_stride)", "");
+				_rename_reserved_words(wgsl_text);
+				const String fixed_path = spirv_path + ".fix.wgsl";
+				{
+					Ref<FileAccess> fixed_file = FileAccess::open(fixed_path, FileAccess::WRITE);
+					ERR_FAIL_COND_V(fixed_file.is_null(), false);
+					const CharString fixed_utf8 = wgsl_text.utf8();
+					fixed_file->store_buffer((const uint8_t *)fixed_utf8.get_data(), fixed_utf8.length());
+				}
+				List<String> revalidate_args;
+				revalidate_args.push_back(fixed_path);
+				revalidate_args.push_back("--format");
+				revalidate_args.push_back("wgsl");
+				revalidate_args.push_back("--allow-non-uniform-derivatives");
+				revalidate_args.push_back("-o");
+				revalidate_args.push_back(wgsl_path);
+				output = String();
+				err = OS::get_singleton()->execute(tint_path, revalidate_args, &output, &exit_code, true);
+				DirAccess::remove_absolute(fixed_path);
+				if (err == OK && exit_code == 0) {
+					print_verbose(vformat("WebGPU bake: shader '%s' stage #%d recovered from Tint's atomic-load taint.", String::utf8(shader_name.get_data()), i));
+				}
+			}
+		}
 		if (err != OK || exit_code != 0) {
 			DirAccess::remove_absolute(wgsl_path);
 			// Variants Tint cannot translate (e.g. multiview's ViewIndex,
@@ -1109,25 +1263,16 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 		{
 			String text;
 			text.append_utf8((const char *)wgsl.ptr(), wgsl.size());
-			bool changed = false;
-			for (const char *reserved : { "target", "unorm", "snorm", "filter" }) {
-				const String word = reserved;
-				int pos = 0;
-				while ((pos = text.find(word, pos)) != -1) {
-					const char32_t before = pos > 0 ? text[pos - 1] : ' ';
-					const char32_t after = pos + word.length() < text.length() ? text[pos + word.length()] : ' ';
-					const bool ident_before = is_ascii_identifier_char(before);
-					const bool ident_after = is_ascii_identifier_char(after);
-					if (!ident_before && !ident_after) {
-						text = text.substr(0, pos) + word + "_gd" + text.substr(pos + word.length());
-						changed = true;
-						pos += word.length() + 3;
-					} else {
-						pos += word.length();
-					}
-				}
+			bool directives_changed = false;
+			// Tint stamps its output with a Chromium-internal extension that
+			// browsers only accept behind --enable-unsafe-webgpu; the
+			// standards-track diagnostic filter expresses the same intent
+			// (non-uniform derivatives are deliberate in Godot's shaders).
+			if (text.contains("enable chromium_disable_uniformity_analysis;")) {
+				text = text.replace("enable chromium_disable_uniformity_analysis;", "diagnostic(off, derivative_uniformity);");
+				directives_changed = true;
 			}
-			if (changed) {
+			if (_rename_reserved_words(text) || directives_changed) {
 				CharString utf8 = text.utf8();
 				wgsl.resize(utf8.length());
 				memcpy(wgsl.ptrw(), utf8.get_data(), utf8.length());
