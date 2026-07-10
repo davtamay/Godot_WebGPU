@@ -68,6 +68,9 @@ class ProbeShaderContainer : public RenderingShaderContainerWebGPU {
 public:
 	bool set_from_wgsl_with_storage(const char *p_vertex_wgsl, const char *p_fragment_wgsl) {
 		reflection_data.stage_count = 2;
+		// The fragment stage writes color target 0; without this the driver
+		// zeroes the pipeline write mask and draws land invisibly.
+		reflection_data.fragment_output_mask = 1;
 		reflection_data.set_count = 1;
 		reflection_binding_set_uniforms_count.push_back(1);
 		ReflectionBindingData instance_uniform;
@@ -83,6 +86,7 @@ public:
 
 	bool set_from_wgsl(const char *p_vertex_wgsl, const char *p_fragment_wgsl) {
 		reflection_data.stage_count = 2;
+		reflection_data.fragment_output_mask = 1;
 		reflection_data.push_constant_size = 16; // One vec4 color.
 		reflection_data.push_constant_stages_mask = (1 << RDC::SHADER_STAGE_VERTEX) | (1 << RDC::SHADER_STAGE_FRAGMENT);
 		// An arrayed texture uniform the WGSL never references: it exercises
