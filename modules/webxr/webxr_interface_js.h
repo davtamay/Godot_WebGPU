@@ -70,6 +70,11 @@ private:
 	// (freed before their owner in texture_cache).
 	RBMap<unsigned int, Vector<RID>> texture_slice_cache;
 	uint32_t current_draw_pass = 0;
+	RID depth_sensing_texture;
+	float depth_sensing_raw_to_meters = 1.0f;
+	Size2 depth_sensing_size;
+	int depth_sensing_status = 0;
+	void _update_depth_sensing();
 #endif
 	struct Touch {
 		bool is_touching = false;

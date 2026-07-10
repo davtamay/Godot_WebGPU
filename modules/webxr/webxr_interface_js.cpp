@@ -437,6 +437,10 @@ void WebXRInterfaceJS::uninitialize() {
 		}
 
 		texture_cache.clear();
+#ifdef WEBGPU_ENABLED
+		depth_sensing_texture = RID();
+		depth_sensing_status = 0;
+#endif
 		reference_space_type.clear();
 		enabled_features.clear();
 		environment_blend_mode = XRInterface::XR_ENV_BLEND_MODE_OPAQUE;
@@ -449,6 +453,23 @@ Dictionary WebXRInterfaceJS::get_system_info() {
 
 	// TODO get actual information from WebXR to return here
 	dict[SNAME("XRRuntimeName")] = String("WebXR");
+#ifdef WEBGPU_ENABLED
+	if (initialized) {
+		// Depth sensing is probed on demand (when a script asks), never per
+		// frame — occlusion consumers poll only while actively occluding.
+		_update_depth_sensing();
+	}
+	if (depth_sensing_texture.is_valid()) {
+		// Real-world depth (gpu-optimized depth sensing) as an RD texture;
+		// scripts wrap it with Texture2DRD for occlusion materials.
+		dict[SNAME("webxr_depth_texture_rd")] = depth_sensing_texture;
+		dict[SNAME("webxr_depth_raw_to_meters")] = depth_sensing_raw_to_meters;
+		dict[SNAME("webxr_depth_size")] = depth_sensing_size;
+	}
+	// Why sensor depth is (un)available, so scripts can explain fallbacks.
+	static const char *depth_status_names[] = { "no_session", "webgl_session", "unsupported_by_browser", "no_depth_data" };
+	dict[SNAME("webxr_depth_status")] = depth_sensing_status == -1 ? String("ok") : String(depth_status_names[CLAMP(depth_sensing_status, 0, 3)]);
+#endif
 	dict[SNAME("XRRuntimeVersion")] = String("");
 
 	return dict;
@@ -719,6 +740,45 @@ RID WebXRInterfaceJS::_get_texture(unsigned int p_texture_id) {
 
 	return texture;
 }
+
+#ifdef WEBGPU_ENABLED
+void WebXRInterfaceJS::_update_depth_sensing() {
+	// v1 samples the left eye's depth map for both eyes (a material cannot
+	// swap textures between the per-view draw passes); refine per-eye later.
+	// On GL sessions this only records depth_sensing_status (the sensor
+	// texture path needs the RD renderer and never yields a handle there).
+	float params[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+	unsigned int handle = godot_webxr_get_depth_sensing_info(0, params);
+	if (handle == 0) {
+		depth_sensing_texture = RID();
+		depth_sensing_status = (int)params[0];
+		return;
+	}
+	depth_sensing_status = -1; // Available.
+	depth_sensing_raw_to_meters = params[0];
+	depth_sensing_size = Size2(params[1], params[2]);
+
+	RBMap<unsigned int, RID>::Element *cache = texture_cache.find(handle);
+	if (cache != nullptr) {
+		depth_sensing_texture = cache->get();
+		return;
+	}
+	RenderingDevice *rendering_device = RenderingDevice::get_singleton();
+	RID texture = rendering_device->texture_create_from_extension(
+			RenderingDevice::TEXTURE_TYPE_2D,
+			params[3] > 0.5f ? RenderingDevice::DATA_FORMAT_R32_SFLOAT : RenderingDevice::DATA_FORMAT_R16_UNORM,
+			RenderingDevice::TEXTURE_SAMPLES_1,
+			RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT,
+			(uint64_t)handle,
+			(uint64_t)params[1],
+			(uint64_t)params[2],
+			1,
+			1,
+			1);
+	texture_cache.insert(handle, texture);
+	depth_sensing_texture = texture;
+}
+#endif
 
 RID WebXRInterfaceJS::get_color_texture() {
 	return color_texture;
