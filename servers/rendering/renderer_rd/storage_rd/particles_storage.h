@@ -255,6 +255,11 @@ private:
 		RID emission_storage_buffer;
 
 		RID unused_emission_storage_buffer;
+#ifdef WEBGPU_ENABLED
+		// WebGPU forbids two writable storage bindings aliasing one buffer;
+		// the unused destination emission slot gets its own scratch buffer.
+		RID unused_dst_emission_storage_buffer;
+#endif
 		RID unused_trail_storage_buffer;
 
 		HashSet<RID> collisions;
