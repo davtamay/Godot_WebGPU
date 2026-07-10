@@ -66,10 +66,10 @@ const Engine = (function () {
 	 * fallback when WebGPU is unavailable.
 	 * @ignore
 	 */
-	// The engine cannot render immersive WebXR sessions through the WebGPU
-	// backend yet; flip this when the WebXR-WebGPU Binding (XRGPUBinding)
-	// path lands so XR-capable browsers keep the WebGPU driver.
-	const ENGINE_WEBXR_WEBGPU_SUPPORTED = false;
+	// The engine renders immersive WebXR sessions through the WebGPU backend
+	// on browsers with the WebXR-WebGPU Binding (XRGPUBinding); others keep
+	// the WebGL driver so the project's XR path works everywhere.
+	const ENGINE_WEBXR_WEBGPU_SUPPORTED = true;
 
 	function initWebGPUDevice(config, rtenv) {
 		if (!config.experimentalWebGPU || !navigator['gpu']) {
