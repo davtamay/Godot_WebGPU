@@ -37,6 +37,9 @@
 #include "core/input/input.h"
 #include "core/os/os.h"
 #include "drivers/gles3/storage/texture_storage.h"
+#ifdef WEBGPU_ENABLED
+#include "servers/rendering/rendering_device.h"
+#endif
 #include "scene/main/scene_tree.h"
 #include "scene/main/window.h"
 #include "scene/scene_string_names.h"
@@ -303,6 +306,17 @@ bool WebXRInterfaceJS::initialize() {
 			return false;
 		}
 
+		// Disable WebXR Layers if multiview isn't supported. A RenderingDevice
+		// (WebGPU) boot has no GLES3::Config and always uses projection layers.
+		bool multiview_missing = false;
+#ifdef WEBGPU_ENABLED
+		if (RenderingDevice::get_singleton() == nullptr) {
+			multiview_missing = !GLES3::Config::get_singleton()->multiview_supported;
+		}
+#else
+		multiview_missing = !GLES3::Config::get_singleton()->multiview_supported;
+#endif
+
 		if (requested_reference_space_types.is_empty()) {
 			emit_signal("session_failed", "No reference spaces were requested.");
 			return false;
@@ -335,8 +349,7 @@ bool WebXRInterfaceJS::initialize() {
 				required_features.utf8().get_data(),
 				optional_features.utf8().get_data(),
 				requested_reference_space_types.utf8().get_data(),
-				// Disable WebXR Layers if multiview isn't supported.
-				disable_webxr_layers || !GLES3::Config::get_singleton()->multiview_supported,
+				disable_webxr_layers || multiview_missing,
 				&_emwebxr_on_session_started,
 				&_emwebxr_on_session_ended,
 				&_emwebxr_on_session_failed,
@@ -373,14 +386,26 @@ void WebXRInterfaceJS::uninitialize() {
 
 		godot_webxr_uninitialize();
 
-		GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
-		if (texture_storage != nullptr) {
+#ifdef WEBGPU_ENABLED
+		if (RenderingDevice::get_singleton() != nullptr) {
 			for (KeyValue<unsigned int, RID> &E : texture_cache) {
-				// Forcibly mark as not part of a render target so we can free it.
-				GLES3::Texture *texture = texture_storage->get_texture(E.value);
-				texture->is_render_target = false;
+				// Frees the RD wrapper only: the layer's textures belong to
+				// the browser, and the JS-side import table is cleared by
+				// godot_webxr_uninitialize().
+				RenderingDevice::get_singleton()->free_rid(E.value);
+			}
+		} else
+#endif
+		{
+			GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
+			if (texture_storage != nullptr) {
+				for (KeyValue<unsigned int, RID> &E : texture_cache) {
+					// Forcibly mark as not part of a render target so we can free it.
+					GLES3::Texture *texture = texture_storage->get_texture(E.value);
+					texture->is_render_target = false;
 
-				texture_storage->texture_free(E.value);
+					texture_storage->texture_free(E.value);
+				}
 			}
 		}
 
@@ -586,6 +611,15 @@ Projection WebXRInterfaceJS::get_projection_for_view(uint32_t p_view, double p_a
 #endif
 
 bool WebXRInterfaceJS::pre_draw_viewport(RID p_render_target) {
+#ifdef WEBGPU_ENABLED
+	if (RenderingDevice::get_singleton() != nullptr) {
+		// The RD render target consumes the override textures directly;
+		// the FBO-reattach dance below is a GL concept.
+		color_texture = _get_color_texture();
+		depth_texture = _get_depth_texture();
+		return true;
+	}
+#endif
 	GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
 	if (texture_storage == nullptr) {
 		return false;
@@ -613,6 +647,11 @@ bool WebXRInterfaceJS::pre_draw_viewport(RID p_render_target) {
 Vector<RenderingServerTypes::BlitToScreen> WebXRInterfaceJS::post_draw_viewport(RID p_render_target, const Rect2 &p_screen_rect) {
 	Vector<RenderingServerTypes::BlitToScreen> blit_to_screen;
 
+#ifdef WEBGPU_ENABLED
+	if (RenderingDevice::get_singleton() != nullptr) {
+		return blit_to_screen;
+	}
+#endif
 	GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
 	if (texture_storage == nullptr) {
 		return blit_to_screen;
@@ -647,19 +686,58 @@ RID WebXRInterfaceJS::_get_depth_texture() {
 	return _get_texture(texture_id);
 }
 
+#ifdef WEBGPU_ENABLED
+static RenderingDevice::DataFormat _webxr_color_format_to_rd() {
+	char *format_str = godot_webxr_get_color_format();
+	String format = String::utf8(format_str);
+	free(format_str);
+
+	if (format == "bgra8unorm") {
+		return RenderingDevice::DATA_FORMAT_B8G8R8A8_UNORM;
+	} else if (format == "bgra8unorm-srgb") {
+		return RenderingDevice::DATA_FORMAT_B8G8R8A8_SRGB;
+	} else if (format == "rgba8unorm-srgb") {
+		return RenderingDevice::DATA_FORMAT_R8G8B8A8_SRGB;
+	}
+	return RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM;
+}
+#endif
+
 RID WebXRInterfaceJS::_get_texture(unsigned int p_texture_id) {
 	RBMap<unsigned int, RID>::Element *cache = texture_cache.find(p_texture_id);
 	if (cache != nullptr) {
 		return cache->get();
 	}
 
+	uint32_t view_count = godot_webxr_get_view_count();
+	Size2 texture_size = get_render_target_size();
+
+#ifdef WEBGPU_ENABLED
+	RenderingDevice *rendering_device = RenderingDevice::get_singleton();
+	if (rendering_device != nullptr) {
+		// p_texture_id is a WGPUTexture handle imported from the layer's
+		// opaque texture on the JS side (see library_godot_webxr.js).
+		RID texture = rendering_device->texture_create_from_extension(
+				view_count == 1 ? RenderingDevice::TEXTURE_TYPE_2D : RenderingDevice::TEXTURE_TYPE_2D_ARRAY,
+				_webxr_color_format_to_rd(),
+				RenderingDevice::TEXTURE_SAMPLES_1,
+				RenderingDevice::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT,
+				(uint64_t)p_texture_id,
+				(uint64_t)texture_size.width,
+				(uint64_t)texture_size.height,
+				1,
+				view_count,
+				1);
+
+		texture_cache.insert(p_texture_id, texture);
+		return texture;
+	}
+#endif
+
 	GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
 	if (texture_storage == nullptr) {
 		return RID();
 	}
-
-	uint32_t view_count = godot_webxr_get_view_count();
-	Size2 texture_size = get_render_target_size();
 
 	RID texture = texture_storage->texture_create_from_native_handle(
 			view_count == 1 ? RSE::TEXTURE_TYPE_2D : RSE::TEXTURE_TYPE_LAYERED,
