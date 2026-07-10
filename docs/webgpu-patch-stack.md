@@ -17,13 +17,15 @@
 | 10 | webgpu: Fan arrayed uniforms out to one binding per element | The mobile renderer builds uniform sets with all 16 lightmap ids whether or not lightmaps exist, and WGSL has no binding arrays: bind group layouts + bind groups expand arrayed texture/sampler/image uniforms to consecutive bindings in a reserved range (ARRAY_BINDING_BASE 512 + binding*16 + element; Godot's dense binding numbering makes the sized-binding-arrays proposal's binding+i convention collide with neighbors). Modules that dead-eliminated the declaration still work: WebGPU allows layouts to declare bindings the shader does not use. Probe set 0 gains an unreferenced 4-texture array the harness hard-gates via a marker; the SPIR-V switch-codegen for genuinely dynamic indexing stays deferred until lightmap variants are exercised | 0 | not yet |
 | 11 | webgpu: Support dynamic buffers with per-frame slices | The mobile renderer's render-pass uniform set uses UNIFORM_BUFFER_DYNAMIC + STORAGE_BUFFER_DYNAMIC unconditionally, so boot needs them: BUFFER_USAGE_DYNAMIC_PERSISTENT buffers allocate one alignment-padded slice per frame in flight (persistently mapped via the CPU shadow, flushed with wgpuQueueWriteBuffer), layouts mark the entries hasDynamicOffset, and binds decode the Vulkan-convention packed frame indices into offsets ordered before the push-constant ring's (binding order). Probe: the triangle's color is now multiplied by a tint read from the ADVANCED slice of a dynamic uniform buffer - selecting the wrong slice blacks the triangle out and fails the strict pixel check | 0 | not yet |
 
-(Planned next: 08 command recording;
-08.5 texture/sampler-array flattening (WGSL has no binding arrays);
-09 renderer fallbacks. Old roadmap 04 was split into 04+05 for smaller,
-independently green patches. NOTE: upstream already compiles
-RenderingDevice + renderer_rd unconditionally on all platforms including
-web; the per-platform RD_ENABLED define is the only gate, which is why
-patch 01 is a detect.py-only change.)
+| 12-30 | (rows pending backfill) | Browser bring-up: engine boot through the driver, full-variant baking, SPIR-V preprocessing, WGSL sanitization, 3D feature set, subpass-free mobile path, baked-cache hole tolerance, VRS/particles/octmap fixes | see git log | not yet |
+| 31 | [shared] webgpu: Skip baked shader groups the target cannot use | Bake-side veto hook (ShaderBakerExportPluginPlatform::skips_variant): the WebGPU plugin skips multiview variants (WGSL cannot express ViewIndex; stereo will be one pass per view) and FP16 variants (driver reports SUPPORTS_HALF_FLOAT=false); they shipped as dead bytes -- the runtime never requests either. Skipped variants become tolerated cache holes (patch 26); bakes also get faster (no glslang/Tint for skipped variants) | ~10 shader_baker_export_plugin.cpp/.h | not yet |
+
+(Planned next: 32 runtime-material cache-miss diagnostic; 33 XR-adaptive
+loader (feature-detect XRGPUBinding; boot webgpu only when usable with the
+project's XR needs, else the intact WebGL/WebXR path). NOTE: upstream
+already compiles RenderingDevice + renderer_rd unconditionally on all
+platforms including web; the per-platform RD_ENABLED define is the only
+gate, which is why patch 01 is a detect.py-only change.)
 
 ## Rules
 
@@ -38,9 +40,11 @@ patch 01 is a detect.py-only change.)
   `servers/rendering_server.cpp`, `platform/web/js/engine/*`,
   `platform/web/display_server_web.cpp/.h` (added in patch 04: driver
   registration has no other home), `editor/editor_node.cpp`,
-  `editor/shader/shader_baker/SCsub`, and
+  `editor/shader/shader_baker/SCsub`,
   `platform/web/export/export_plugin.cpp/.h` (added in patch 07: shader
-  baker registration and the web export option).
+  baker registration and the web export option), and
+  `editor/export/shader_baker_export_plugin.cpp/.h` (cpp added in patch 15;
+  h added in patch 31 for the variant-veto hook).
 - **Never touched:** `servers/rendering/rendering_device.cpp`,
   `rendering_device_graph.*`, `shader_compiler*`, `modules/glslang`,
   existing drivers, renderer_rd scene/effects code outside the designated

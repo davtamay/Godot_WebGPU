@@ -50,3 +50,19 @@ RenderingShaderContainerFormat *ShaderBakerExportPluginPlatformWebGPU::create_sh
 bool ShaderBakerExportPluginPlatformWebGPU::matches_driver(const String &p_driver) {
 	return p_driver == "webgpu";
 }
+
+bool ShaderBakerExportPluginPlatformWebGPU::skips_variant(const Vector<String> &p_stage_sources) const {
+	// The WebGPU runtime can never select these variant groups, so baking
+	// them only inflates the exported cache (the load path tolerates the
+	// resulting holes):
+	// - Multiview: WGSL has no ViewIndex/multiview; stereo will use the
+	//   regular variants with one pass per view.
+	// - FP16: the driver reports SUPPORTS_HALF_FLOAT = false because the
+	//   loader does not request the shader-f16 device feature.
+	for (const String &source : p_stage_sources) {
+		if (source.contains("#define USE_MULTIVIEW") || source.contains("#define EXPLICIT_FP16")) {
+			return true;
+		}
+	}
+	return false;
+}
