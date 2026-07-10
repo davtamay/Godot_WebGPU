@@ -630,7 +630,16 @@ TextureStorage::TextureStorage() {
 		rt_sdf.shader_version = rt_sdf.shader.version_create();
 
 		for (int i = 0; i < RenderTargetSDF::SHADER_MAX; i++) {
+#ifdef WEBGPU_ENABLED
+			// Baked caches may hold no data for variants the platform cannot
+			// express; those variants read as null shaders.
+			RID variant_shader = rt_sdf.shader.version_get_shader(rt_sdf.shader_version, i);
+			if (variant_shader.is_valid()) {
+				rt_sdf.pipelines[i] = RD::get_singleton()->compute_pipeline_create(variant_shader);
+			}
+#else
 			rt_sdf.pipelines[i] = RD::get_singleton()->compute_pipeline_create(rt_sdf.shader.version_get_shader(rt_sdf.shader_version, i));
+#endif
 		}
 	}
 
