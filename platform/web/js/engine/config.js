@@ -117,6 +117,17 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		 */
 		experimentalWebGPU: false,
 		/**
+		 * When enabled together with ``experimentalWebGPU``, the loader keeps
+		 * the WebGL driver on browsers that support immersive WebXR sessions
+		 * but cannot render them through WebGPU, so the project's XR path
+		 * keeps working.
+		 *
+		 * @memberof EngineConfig
+		 * @type {boolean}
+		 * @default
+		 */
+		requiresWebXR: false,
+		/**
 		 * The progressive web app service worker to install.
 		 * @memberof EngineConfig
 		 * @default
@@ -297,6 +308,7 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		this.persistentPaths = parse('persistentPaths', this.persistentPaths);
 		this.experimentalVK = parse('experimentalVK', this.experimentalVK);
 		this.experimentalWebGPU = parse('experimentalWebGPU', this.experimentalWebGPU);
+		this.requiresWebXR = parse('requiresWebXR', this.requiresWebXR);
 		this.focusCanvas = parse('focusCanvas', this.focusCanvas);
 		this.serviceWorker = parse('serviceWorker', this.serviceWorker);
 		this.gdextensionLibs = parse('gdextensionLibs', this.gdextensionLibs);
