@@ -38,4 +38,5 @@ class ShaderBakerExportPluginPlatformWebGPU : public ShaderBakerExportPluginPlat
 public:
 	virtual RenderingShaderContainerFormat *create_shader_container_format(const Ref<EditorExportPlatform> &p_platform, const Ref<EditorExportPreset> &p_preset) override;
 	virtual bool matches_driver(const String &p_driver) override;
+	virtual bool skips_variant(const Vector<String> &p_stage_sources) const override;
 };
