@@ -174,7 +174,8 @@ bool RenderingDeviceDriverWebGPU::command_buffer_begin(CommandBufferID p_cmd_buf
 	cb_info->encoder = wgpuDeviceCreateCommandEncoder(device, nullptr);
 	ERR_FAIL_NULL_V(cb_info->encoder, false);
 	cb_info->current_shader = nullptr;
-	cb_info->bind_groups_dirty = false;
+	cb_info->bind_group_dirty_mask = 0;
+	cb_info->push_constant_dirty = false;
 	cb_info->push_constant_offset = 0;
 	for (uint32_t i = 0; i < MAX_BIND_GROUPS; i++) {
 		cb_info->pending_bind_groups[i] = nullptr;
@@ -235,7 +236,10 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 	_end_compute_pass(cb_info);
 	ERR_FAIL_COND(framebuffer->views.size() < pass->attachments.size());
 
-	LocalVector<WGPURenderPassColorAttachment> color_attachments;
+	// WebGPU allows at most 8 color attachments; fixed stack storage keeps
+	// this per-pass path allocation-free.
+	WGPURenderPassColorAttachment color_attachments[8];
+	uint32_t color_attachment_count = 0;
 	WGPURenderPassDepthStencilAttachment depth_attachment = WGPU_RENDER_PASS_DEPTH_STENCIL_ATTACHMENT_INIT;
 	bool has_depth = false;
 	for (uint32_t i = 0; i < pass->attachments.size(); i++) {
@@ -275,13 +279,14 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 				const Color &color = p_clear_values[i].color;
 				color_attachment.clearValue = { color.r, color.g, color.b, color.a };
 			}
-			color_attachments.push_back(color_attachment);
+			ERR_FAIL_COND(color_attachment_count >= 8);
+			color_attachments[color_attachment_count++] = color_attachment;
 		}
 	}
 
 	WGPURenderPassDescriptor pass_desc = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
-	pass_desc.colorAttachmentCount = color_attachments.size();
-	pass_desc.colorAttachments = color_attachments.ptr();
+	pass_desc.colorAttachmentCount = color_attachment_count;
+	pass_desc.colorAttachments = color_attachments;
 	if (has_depth) {
 		pass_desc.depthStencilAttachment = &depth_attachment;
 	}
@@ -289,7 +294,7 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 	cb_info->render_pass_encoder = wgpuCommandEncoderBeginRenderPass(cb_info->encoder, &pass_desc);
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
 	cb_info->current_shader = nullptr;
-	cb_info->bind_groups_dirty = false;
+	cb_info->bind_group_dirty_mask = 0;
 	for (uint32_t i = 0; i < MAX_BIND_GROUPS; i++) {
 		cb_info->pending_bind_groups[i] = nullptr;
 		cb_info->pending_dynamic_offsets[i].clear();
@@ -2599,16 +2604,22 @@ void RenderingDeviceDriverWebGPU::command_bind_push_constants(CommandBufferID p_
 	memcpy(push_constant_shadow + push_constant_used, p_data.ptr(), data_size);
 	cb_info->push_constant_offset = push_constant_used;
 	push_constant_used += PUSH_CONSTANT_SLOT_SIZE;
-	cb_info->bind_groups_dirty = true;
+	cb_info->push_constant_dirty = true;
 }
 
 void RenderingDeviceDriverWebGPU::_flush_bind_groups(CommandBufferInfo *p_cb_info) {
-	if (!p_cb_info->bind_groups_dirty || p_cb_info->current_shader == nullptr) {
+	if (p_cb_info->current_shader == nullptr || (p_cb_info->bind_group_dirty_mask == 0 && !p_cb_info->push_constant_dirty)) {
 		return;
 	}
 	const ShaderInfo *shader = p_cb_info->current_shader;
 	for (uint32_t i = 0; i < shader->bind_group_layouts.size() && i < MAX_BIND_GROUPS; i++) {
 		UniformSetInfo *set = p_cb_info->pending_bind_groups[i];
+		// Skip clean sets: a moved push-constant offset only re-binds sets
+		// whose layout actually carries the ring entry.
+		const bool wants_push_constant = set != nullptr ? set->has_push_constant_offset : true;
+		if ((p_cb_info->bind_group_dirty_mask & (1u << i)) == 0 && !(p_cb_info->push_constant_dirty && wants_push_constant)) {
+			continue;
+		}
 		WGPUBindGroup bind_group = nullptr;
 		if (set != nullptr) {
 			WGPUBindGroup *cached = set->layout_groups.getptr((void *)shader->bind_group_layouts[i]);
@@ -2628,22 +2639,26 @@ void RenderingDeviceDriverWebGPU::_flush_bind_groups(CommandBufferInfo *p_cb_inf
 		}
 		// WebGPU wants dynamic offsets ordered by binding number: dynamic
 		// buffers sit at their (low) shader bindings, the push-constant ring
-		// entry at the reserved high binding, so it goes last.
-		LocalVector<uint32_t> offsets;
+		// entry at the reserved high binding, so it goes last. Fixed stack
+		// storage: a set carries at most 8 dynamic buffers (4-bit frame
+		// indices packed into the caller's 32-bit mask) plus the ring entry.
+		uint32_t offsets[9];
+		uint32_t offset_count = 0;
 		for (const uint32_t offset : p_cb_info->pending_dynamic_offsets[i]) {
-			offsets.push_back(offset);
+			DEV_ASSERT(offset_count < 8);
+			offsets[offset_count++] = offset;
 		}
-		const bool wants_push_constant = set != nullptr ? set->has_push_constant_offset : true;
 		if (wants_push_constant) {
-			offsets.push_back(p_cb_info->push_constant_offset);
+			offsets[offset_count++] = p_cb_info->push_constant_offset;
 		}
 		if (p_cb_info->render_pass_encoder != nullptr) {
-			wgpuRenderPassEncoderSetBindGroup(p_cb_info->render_pass_encoder, i, bind_group, offsets.size(), offsets.is_empty() ? nullptr : offsets.ptr());
+			wgpuRenderPassEncoderSetBindGroup(p_cb_info->render_pass_encoder, i, bind_group, offset_count, offset_count == 0 ? nullptr : offsets);
 		} else if (p_cb_info->compute_pass_encoder != nullptr) {
-			wgpuComputePassEncoderSetBindGroup(p_cb_info->compute_pass_encoder, i, bind_group, offsets.size(), offsets.is_empty() ? nullptr : offsets.ptr());
+			wgpuComputePassEncoderSetBindGroup(p_cb_info->compute_pass_encoder, i, bind_group, offset_count, offset_count == 0 ? nullptr : offsets);
 		}
 	}
-	p_cb_info->bind_groups_dirty = false;
+	p_cb_info->bind_group_dirty_mask = 0;
+	p_cb_info->push_constant_dirty = false;
 }
 
 void RenderingDeviceDriverWebGPU::_end_compute_pass(CommandBufferInfo *p_cb_info) {
@@ -2652,7 +2667,7 @@ void RenderingDeviceDriverWebGPU::_end_compute_pass(CommandBufferInfo *p_cb_info
 		wgpuComputePassEncoderRelease(p_cb_info->compute_pass_encoder);
 		p_cb_info->compute_pass_encoder = nullptr;
 		p_cb_info->current_shader = nullptr;
-		p_cb_info->bind_groups_dirty = false;
+		p_cb_info->bind_group_dirty_mask = 0;
 	}
 }
 
@@ -2662,7 +2677,7 @@ void RenderingDeviceDriverWebGPU::command_bind_render_pipeline(CommandBufferID p
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
 	wgpuRenderPassEncoderSetPipeline(cb_info->render_pass_encoder, pipeline->render_pipeline);
 	cb_info->current_shader = pipeline->shader;
-	cb_info->bind_groups_dirty = true;
+	cb_info->bind_group_dirty_mask = (1u << MAX_BIND_GROUPS) - 1;
 }
 
 void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBufferID p_cmd_buffer, VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count, uint32_t p_dynamic_offsets) {
@@ -2673,6 +2688,7 @@ void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBuffer
 		ERR_FAIL_COND(set_index >= MAX_BIND_GROUPS);
 		UniformSetInfo *uniform_set = (UniformSetInfo *)p_uniform_sets[i].id;
 		cb_info->pending_bind_groups[set_index] = uniform_set;
+		cb_info->bind_group_dirty_mask |= uint8_t(1u << set_index);
 		cb_info->pending_dynamic_offsets[set_index].clear();
 		for (const BufferInfo *dynamic_buffer : uniform_set->dynamic_buffers) {
 			const uint32_t frame_idx = (p_dynamic_offsets >> shift) & 0xFu;
@@ -2680,7 +2696,6 @@ void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBuffer
 			cb_info->pending_dynamic_offsets[set_index].push_back(uint32_t(frame_idx * dynamic_buffer->slice_stride));
 		}
 	}
-	cb_info->bind_groups_dirty = true;
 }
 
 void RenderingDeviceDriverWebGPU::command_render_draw(CommandBufferID p_cmd_buffer, uint32_t p_vertex_count, uint32_t p_instance_count, uint32_t p_base_vertex, uint32_t p_first_instance) {
@@ -2977,7 +2992,7 @@ void RenderingDeviceDriverWebGPU::command_bind_compute_pipeline(CommandBufferID 
 	}
 	wgpuComputePassEncoderSetPipeline(cb_info->compute_pass_encoder, pipeline->compute_pipeline);
 	cb_info->current_shader = pipeline->shader;
-	cb_info->bind_groups_dirty = true;
+	cb_info->bind_group_dirty_mask = (1u << MAX_BIND_GROUPS) - 1;
 }
 
 void RenderingDeviceDriverWebGPU::command_bind_compute_uniform_sets(CommandBufferID p_cmd_buffer, VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count, uint32_t p_dynamic_offsets) {
