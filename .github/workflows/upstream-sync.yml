@@ -1,0 +1,77 @@
+# Fork-local workflow for the WebGPU patch stack; not intended for upstream.
+#
+# Weekly upstream auto-rebase: fetches godotengine/godot master, replays the
+# patch stack onto it, and - only when every patch applies cleanly and
+# check-stack passes - pushes the result to a dated auto-rebase/ candidate
+# branch (plus a backup tag of the pre-rebase head). The baseline workflow
+# then builds the candidate. webgpu-stack itself is NEVER pushed by
+# automation: promotion stays a human step because CI cannot run the
+# local-only gates (tint bakes, strict pixel probe on a real GPU, in-headset
+# checks). A conflicted rebase fails the job loudly - the failing patch name
+# is in the log - and pushes nothing.
+#
+# Promote a green candidate locally with:
+#   git fetch origin
+#   git branch backup/stack-<date> webgpu-stack
+#   git reset --hard origin/auto-rebase/<date>   # on webgpu-stack
+#   <run the local verification gates, then push with --force-with-lease>
+
+name: WebGPU stack - upstream sync
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  rebase:
+    name: Rebase stack onto upstream master
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout stack
+        uses: actions/checkout@v4
+        with:
+          ref: webgpu-stack
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/godotengine/godot.git
+          git fetch upstream master
+
+      - name: Count new upstream commits
+        id: fresh
+        run: |
+          BASE=$(git merge-base HEAD upstream/master)
+          COUNT=$(git rev-list --count "$BASE"..upstream/master)
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Upstream is $COUNT commit(s) ahead of the stack's base."
+
+      - name: Rebase
+        if: steps.fresh.outputs.count != '0'
+        run: |
+          git config user.name "upstream-sync[bot]"
+          git config user.email "upstream-sync[bot]@users.noreply.github.com"
+          STAMP=$(date -u +%Y%m%d)
+          git tag "backup/auto-$STAMP" HEAD
+          git rebase upstream/master
+
+      - name: Verify stack integrity
+        if: steps.fresh.outputs.count != '0'
+        run: |
+          PATCHES=$(git log --oneline upstream/master..HEAD | wc -l)
+          STRAYS=$(git log --format=%s upstream/master..HEAD | grep -cv "^\[wgpu " || true)
+          echo "Patches: $PATCHES, non-[wgpu] subjects: $STRAYS"
+          test "$STRAYS" = "0"
+          bash misc/webgpu_scripts/check-stack.sh
+
+      - name: Push candidate branch and backup tag
+        if: steps.fresh.outputs.count != '0'
+        run: |
+          STAMP=$(date -u +%Y%m%d)
+          git push origin "backup/auto-$STAMP"
+          git push --force origin "HEAD:auto-rebase/$STAMP"
+          echo "Candidate: auto-rebase/$STAMP (baseline CI builds it next)."
