@@ -41,6 +41,7 @@
 
 #ifndef XR_DISABLED
 #include "servers/xr/xr_interface.h"
+#include "servers/xr/xr_server.h"
 #endif
 
 //#define DEBUG_CULL_TIME
@@ -2783,7 +2784,25 @@ void RendererSceneCull::render_camera(const Ref<RenderSceneBuffers> &p_render_bu
 		is_orthogonal |= projection.is_orthogonal();
 	}
 
-	if (camera->projections.size() == 1) {
+	// A backend without multiview draws the XR viewport once per view (see
+	// XRInterface::get_draw_pass_count): each pass renders one entry of the
+	// camera's per-view set as a single-view camera.
+	uint32_t xr_draw_pass = 0;
+	bool xr_per_view_pass = false;
+#ifndef XR_DISABLED
+	if (camera->type == Camera::MULTIVIEW_PROJECTION && camera->projections.size() > 1 && XRServer::get_singleton() != nullptr) {
+		Ref<XRInterface> xr_interface = XRServer::get_singleton()->get_primary_interface();
+		if (xr_interface.is_valid() && xr_interface->get_draw_pass_count() > 1) {
+			xr_per_view_pass = true;
+			xr_draw_pass = xr_interface->get_current_draw_pass();
+		}
+	}
+#endif
+
+	if (xr_per_view_pass) {
+		ERR_FAIL_UNSIGNED_INDEX_MSG(xr_draw_pass, camera->projections.size(), "XR draw pass has no matching camera projection.");
+		camera_data.set_camera(transform * camera->offsets[xr_draw_pass], camera->projections[xr_draw_pass], is_orthogonal, vaspect, jitter, taa_frame_count, camera->visible_layers);
+	} else if (camera->projections.size() == 1) {
 		camera_data.set_camera(transform * camera->offsets[0], camera->projections[0], is_orthogonal, vaspect, jitter, taa_frame_count, camera->visible_layers);
 	} else if (camera->projections.size() == 2) {
 		camera_data.set_multiview_camera(transform, camera->offsets, camera->projections, is_orthogonal, vaspect, camera->visible_layers);

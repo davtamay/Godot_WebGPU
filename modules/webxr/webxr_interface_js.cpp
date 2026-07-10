@@ -281,7 +281,38 @@ uint32_t WebXRInterfaceJS::get_capabilities() const {
 }
 
 uint32_t WebXRInterfaceJS::get_view_count() {
+#ifdef WEBGPU_ENABLED
+	if (RenderingDevice::get_singleton() != nullptr) {
+		// No multiview on WebGPU: the renderer sees a single view and the
+		// viewport is drawn once per WebXR view instead (the active draw
+		// pass selects which view the "view 0" data comes from).
+		return 1;
+	}
+#endif
 	return godot_webxr_get_view_count();
+}
+
+uint32_t WebXRInterfaceJS::get_draw_pass_count() {
+#ifdef WEBGPU_ENABLED
+	if (RenderingDevice::get_singleton() != nullptr) {
+		return godot_webxr_get_view_count();
+	}
+#endif
+	return 1;
+}
+
+uint32_t WebXRInterfaceJS::get_current_draw_pass() {
+#ifdef WEBGPU_ENABLED
+	return current_draw_pass;
+#else
+	return 0;
+#endif
+}
+
+void WebXRInterfaceJS::set_current_draw_pass(uint32_t p_pass) {
+#ifdef WEBGPU_ENABLED
+	current_draw_pass = p_pass;
+#endif
 }
 
 bool WebXRInterfaceJS::is_initialized() const {
@@ -381,6 +412,12 @@ void WebXRInterfaceJS::uninitialize() {
 
 #ifdef WEBGPU_ENABLED
 		if (RenderingDevice::get_singleton() != nullptr) {
+			for (KeyValue<unsigned int, Vector<RID>> &E : texture_slice_cache) {
+				for (const RID &slice : E.value) {
+					RenderingDevice::get_singleton()->free_rid(slice);
+				}
+			}
+			texture_slice_cache.clear();
 			for (KeyValue<unsigned int, RID> &E : texture_cache) {
 				// Frees the RD wrapper only: the layer's textures belong to
 				// the browser, and the JS-side import table is cleared by
@@ -488,7 +525,10 @@ TypedArray<Projection> WebXRInterfaceJS::get_camera_projections(const StringName
 	ERR_FAIL_NULL_V(xr_server, camera_projections);
 	ERR_FAIL_COND_V(!initialized, camera_projections);
 
-	for (uint32_t v = 0; v < get_view_count(); v++) {
+	// The camera carries every WebXR view even when the renderer draws them
+	// one pass at a time (get_view_count() is then 1): each pass renders its
+	// own entry.
+	for (uint32_t v = 0; v < godot_webxr_get_view_count(); v++) {
 		Projection view;
 
 		float js_matrix[16];
@@ -537,7 +577,7 @@ TypedArray<Transform3D> WebXRInterfaceJS::get_camera_offsets(const StringName &p
 
 	Transform3D inv_head_transform = _js_matrix_to_transform(js_matrix).inverse();
 
-	for (uint32_t v = 0; v < get_view_count(); v++) {
+	for (uint32_t v = 0; v < godot_webxr_get_view_count(); v++) {
 		// Get our view transform
 		has_transform = godot_webxr_get_transform_for_view(v, js_matrix);
 		if (!has_transform) {
@@ -661,7 +701,14 @@ RID WebXRInterfaceJS::_get_color_texture() {
 		return RID();
 	}
 
-	return _get_texture(texture_id);
+	RID texture = _get_texture(texture_id);
+#ifdef WEBGPU_ENABLED
+	RBMap<unsigned int, Vector<RID>>::Element *slices = texture_slice_cache.find(texture_id);
+	if (slices != nullptr && current_draw_pass < (uint32_t)slices->get().size()) {
+		return slices->get()[current_draw_pass];
+	}
+#endif
+	return texture;
 }
 
 RID WebXRInterfaceJS::_get_depth_texture() {
@@ -717,6 +764,15 @@ RID WebXRInterfaceJS::_get_texture(unsigned int p_texture_id) {
 				1);
 
 		texture_cache.insert(p_texture_id, texture);
+
+		if (view_count > 1) {
+			// One pass per view: each pass renders into its view's layer.
+			Vector<RID> slices;
+			for (uint32_t v = 0; v < view_count; v++) {
+				slices.push_back(rendering_device->texture_create_shared_from_slice(RenderingDevice::TextureView(), texture, v, 0));
+			}
+			texture_slice_cache.insert(p_texture_id, slices);
+		}
 		return texture;
 	}
 #endif
