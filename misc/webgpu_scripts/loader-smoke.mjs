@@ -37,16 +37,23 @@ if (!wrappedJs || !wasm) {
 	process.exit(1);
 }
 
-function testPage(webgpu) {
+function testPage(webgpu, requiresXR = false) {
+	// The xr scenario needs navigator.xr present to exercise the adaptive
+	// branch deterministically; shim it when the test browser lacks WebXR.
+	const xrShim = requiresXR ? `
+if (!('xr' in navigator)) {
+	Object.defineProperty(navigator, 'xr', { value: {}, configurable: true });
+}` : '';
 	return `<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>loader-smoke</title></head>
 <body>
 <canvas id="canvas"></canvas>
+<script>${xrShim}</script>
 <script src="/godot.js"></script>
 <script>
 window.__smoke = { done: false, error: null };
-const engine = new Engine({ 'experimentalWebGPU': ${webgpu} });
+const engine = new Engine({ 'experimentalWebGPU': ${webgpu}, 'requiresWebXR': ${requiresXR} });
 engine.init('godot').then(function () {
 	window.__smoke.done = true;
 }).catch(function (e) {
@@ -122,6 +129,7 @@ const routes = {
 	[`/${wasm}`]: { file: path.join(binDir, wasm), type: 'application/wasm' },
 	'/on.html': { body: testPage(true), type: 'text/html' },
 	'/off.html': { body: testPage(false), type: 'text/html' },
+	'/xr.html': { body: testPage(true, true), type: 'text/html' },
 	'/probe.html': { body: probePage, type: 'text/html' },
 };
 
@@ -179,6 +187,7 @@ async function runScenario(browser, base, scenario) {
 		} catch (e) { return false; }
 	})()`);
 	const fallbacks = consoleMessages.filter((m) => m.includes('falling back to WebGL'));
+	const xrFallbacks = consoleMessages.filter((m) => m.includes('keeping the WebGL driver'));
 	if (scenario === 'on' && !canGetDevice && fallbacks.length === 0) {
 		fail('[on] WebGPU unavailable but no WebGL-fallback warning was logged');
 	}
@@ -188,8 +197,28 @@ async function runScenario(browser, base, scenario) {
 	if (scenario === 'off' && fallbacks.length > 0) {
 		fail(`[off] unexpected WebGPU log with experimentalWebGPU disabled: ${fallbacks[0]}`);
 	}
+	if (scenario !== 'xr' && xrFallbacks.length > 0) {
+		fail(`[${scenario}] unexpected WebXR driver fallback: ${xrFallbacks[0]}`);
+	}
+	if (scenario === 'xr') {
+		const hasGPU = await page.evaluate(`'gpu' in navigator`);
+		// With navigator.gpu present the XR-adaptive branch must keep WebGL
+		// exactly once (the engine cannot render immersive sessions through
+		// WebGPU yet); without it the plain unavailability warning fires
+		// first and the XR branch is never reached.
+		if (hasGPU && xrFallbacks.length !== 1) {
+			fail(`[xr] expected exactly one WebXR driver-fallback warning, got ${xrFallbacks.length}`);
+		}
+		if (!hasGPU && fallbacks.length === 0) {
+			fail('[xr] WebGPU unavailable but no fallback warning was logged');
+		}
+		const xrAvailable = await page.evaluate('Engine.isWebXRWebGPUAvailable()');
+		if (typeof xrAvailable !== 'boolean') {
+			fail(`[xr] Engine.isWebXRWebGPUAvailable() returned ${typeof xrAvailable}, expected boolean`);
+		}
+	}
 
-	console.log(`loader-smoke: [${scenario}] init OK, isWebGPUAvailable=${isAvailable}, canGetDevice=${canGetDevice}, fallbackWarnings=${fallbacks.length}, pageErrors=0`);
+	console.log(`loader-smoke: [${scenario}] init OK, isWebGPUAvailable=${isAvailable}, canGetDevice=${canGetDevice}, fallbackWarnings=${fallbacks.length}, xrFallbacks=${xrFallbacks.length}, pageErrors=0`);
 	await page.close();
 }
 
@@ -366,6 +395,7 @@ try {
 	} else {
 		await runScenario(browser, base, 'off');
 		await runScenario(browser, base, 'on');
+		await runScenario(browser, base, 'xr');
 	}
 } finally {
 	await browser.close();
