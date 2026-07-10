@@ -20,3 +20,4 @@ if env["metal"]:
 env.add_source_files(env.editor_sources, "shader_baker_export_plugin_platform_webgpu.cpp")
 if not (env["platform"] == "web" and env.get("webgpu")):
     env.add_source_files(env.editor_sources, "#drivers/webgpu/rendering_shader_container_webgpu.cpp")
+    env.add_source_files(env.editor_sources, "#drivers/webgpu/spirv_preprocess.cpp")
