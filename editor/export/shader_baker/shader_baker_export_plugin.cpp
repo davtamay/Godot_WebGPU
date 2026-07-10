@@ -38,6 +38,7 @@
 #include "editor/editor_node.h"
 #include "scene/3d/label_3d.h"
 #include "scene/3d/sprite_3d.h"
+#include "servers/rendering/renderer_rd/effects/copy_effects.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/rendering_shader_container.h"
@@ -148,6 +149,33 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	}
 
 	ShaderRD::shaders_embedded_set_unlock();
+
+	// Effect shaders chosen by host-GPU capability probes can diverge from the
+	// target device: without RGB10A2 storage-image support the mobile renderer
+	// takes the raster octmap path (sky radiance), whose ShaderRD classes are
+	// never instantiated when the editor's GPU supports the compute path. Bake
+	// them explicitly; a missing shader cannot be compiled at runtime on
+	// platforms without a shader compiler. Variant lists must match the ones
+	// in CopyEffects exactly (they determine the cache path hash).
+	if (RendererRD::CopyEffects::get_singleton() != nullptr && !RendererRD::CopyEffects::get_singleton()->get_raster_effects().has_flag(RendererRD::CopyEffects::RASTER_EFFECT_OCTMAP)) {
+		OctmapDownsamplerRasterShaderRD octmap_downsampler_raster;
+		octmap_downsampler_raster.initialize({ "" });
+		RID octmap_downsampler_version = octmap_downsampler_raster.version_create();
+		_customize_shader_version(&octmap_downsampler_raster, octmap_downsampler_version);
+		octmap_downsampler_raster.version_free(octmap_downsampler_version);
+
+		OctmapFilterRasterShaderRD octmap_filter_raster;
+		octmap_filter_raster.initialize({ "\n#define USE_LOW_QUALITY\n", "\n#define USE_HIGH_QUALITY\n" });
+		RID octmap_filter_version = octmap_filter_raster.version_create();
+		_customize_shader_version(&octmap_filter_raster, octmap_filter_version);
+		octmap_filter_raster.version_free(octmap_filter_version);
+
+		OctmapRoughnessRasterShaderRD octmap_roughness_raster;
+		octmap_roughness_raster.initialize({ "" });
+		RID octmap_roughness_version = octmap_roughness_raster.version_create();
+		_customize_shader_version(&octmap_roughness_raster, octmap_roughness_version);
+		octmap_roughness_raster.version_free(octmap_roughness_version);
+	}
 
 	// Include all shaders created by embedded materials.
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
