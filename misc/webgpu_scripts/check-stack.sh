@@ -6,7 +6,7 @@ set -euo pipefail
 # Files any patch may add/edit freely.
 ALLOWED='^(drivers/webgpu/|platform/web/rendering_context_driver_webgpu|platform/web/js/libs/library_godot_webgpu\.js|misc/webgpu_scripts/|docs/webgpu-|\.github/workflows/web-baseline\.yml|editor/shader/shader_baker/shader_baker_export_plugin_platform_webgpu)'
 # Shared upstream files: edits allowed ONLY in commits tagged [shared].
-SHARED_OK='^(platform/web/detect\.py|platform/web/SCsub|drivers/SCsub|main/main\.cpp|servers/rendering_server\.cpp|platform/web/js/engine/|platform/web/display_server_web\.(cpp|h)|editor/editor_node\.cpp|editor/export/shader_baker_export_plugin\.cpp|servers/rendering/renderer_rd/shader_rd\.cpp|editor/shader/shader_baker/SCsub|platform/web/export/export_plugin\.(cpp|h)|servers/rendering/renderer_rd/effects/(tone_mapper|copy_effects)\.cpp|servers/rendering/renderer_rd/forward_mobile/render_forward_mobile\.cpp|servers/rendering/renderer_rd/storage_rd/(particles_storage\.(cpp|h)|texture_storage\.cpp))'
+SHARED_OK='^(platform/web/detect\.py|platform/web/SCsub|drivers/SCsub|main/main\.cpp|servers/rendering_server\.cpp|platform/web/js/engine/|platform/web/display_server_web\.(cpp|h)|editor/editor_node\.cpp|editor/export/shader_baker_export_plugin\.(cpp|h)|servers/rendering/renderer_rd/shader_rd\.cpp|editor/shader/shader_baker/SCsub|platform/web/export/export_plugin\.(cpp|h)|servers/rendering/renderer_rd/effects/(tone_mapper|copy_effects)\.cpp|servers/rendering/renderer_rd/forward_mobile/render_forward_mobile\.cpp|servers/rendering/renderer_rd/storage_rd/(particles_storage\.(cpp|h)|texture_storage\.cpp))'
 
 fail=0
 for c in $(git rev-list --reverse upstream/master..HEAD); do
