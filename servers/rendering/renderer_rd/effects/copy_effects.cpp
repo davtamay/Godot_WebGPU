@@ -108,7 +108,16 @@ CopyEffects::CopyEffects(BitField<RasterEffects> p_raster_effects) {
 
 		for (int i = 0; i < COPY_MODE_MAX; i++) {
 			if (copy.shader.is_variant_enabled(i)) {
+#ifdef WEBGPU_ENABLED
+				// Baked caches may hold no data for variants the platform
+				// cannot express; those variants read as null shaders.
+				RID variant_shader = copy.shader.version_get_shader(copy.shader_version, i);
+				if (variant_shader.is_valid()) {
+					copy.pipelines[i].create_compute_pipeline(variant_shader);
+				}
+#else
 				copy.pipelines[i].create_compute_pipeline(copy.shader.version_get_shader(copy.shader_version, i));
+#endif
 			}
 		}
 	}
