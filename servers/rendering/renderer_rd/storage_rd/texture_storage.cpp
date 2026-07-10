@@ -602,6 +602,13 @@ TextureStorage::TextureStorage() {
 		tformat.width = 4;
 		tformat.height = 4;
 		tformat.usage_bits = RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT | (vrs_supported ? RD::TEXTURE_USAGE_VRS_ATTACHMENT_BIT : 0);
+#ifdef WEBGPU_ENABLED
+		if (!RD::get_singleton()->texture_is_format_supported_for_usage(tformat.format, tformat.usage_bits)) {
+			// WebGPU cannot express this format as a storage image; the
+			// default VRS texture is only sampled anyway.
+			tformat.usage_bits &= ~RD::TEXTURE_USAGE_STORAGE_BIT;
+		}
+#endif
 		tformat.texture_type = RD::TEXTURE_TYPE_2D;
 
 		uint32_t pixel_size = RD::get_image_format_pixel_size(tformat.format);
