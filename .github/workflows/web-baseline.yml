@@ -11,6 +11,7 @@ on:
     branches:
       - webgpu-stack
       - webgpu-dev
+      - "auto-rebase/**"
   pull_request:
     branches:
       - webgpu-stack
