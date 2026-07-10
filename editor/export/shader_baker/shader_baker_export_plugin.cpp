@@ -67,6 +67,7 @@ bool ShaderBakerExportPlugin::_initialize_container_format(const Ref<EditorExpor
 		if (platform->matches_driver(shader_container_driver)) {
 			shader_container_format = platform->create_shader_container_format(p_platform, p_preset);
 			ERR_FAIL_NULL_V_MSG(shader_container_format, false, "Unable to create shader container format for the export platform.");
+			shader_container_platform = platform;
 			return true;
 		}
 	}
@@ -79,6 +80,7 @@ void ShaderBakerExportPlugin::_cleanup_container_format() {
 		memdelete(shader_container_format);
 		shader_container_format = nullptr;
 	}
+	shader_container_platform.unref();
 }
 
 bool ShaderBakerExportPlugin::_initialize_cache_directory() {
@@ -443,6 +445,12 @@ void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID 
 		work_item.stage_sources = p_shader->version_build_variant_stage_sources(p_version, i);
 		work_item.dynamic_buffers = p_shader->get_dynamic_buffers();
 		work_item.variant = i;
+
+		if (shader_container_platform.is_valid() && shader_container_platform->skips_variant(work_item.stage_sources)) {
+			// The target can never select this variant; leave it as a
+			// tolerated hole in the baked cache instead of compiling it.
+			continue;
+		}
 
 		WorkerThreadPool::TaskID task_id = WorkerThreadPool::get_singleton()->add_template_task(this, &ShaderBakerExportPlugin::_process_work_item, work_item);
 		group_items[group].variant_tasks.push_back(task_id);
