@@ -28,21 +28,80 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-/* global WebGPU */ // Provided by the emdawnwebgpu port at link time.
+/* global WebGPU, GodotWebGPUXR */ // WebGPU: emdawnwebgpu port; GodotWebGPUXR: emitted from the $-object below at link time.
 
 const GodotWebGPU = {
+	/**
+	 * WebXR bridge, exposed on Module so the renderer-agnostic WebXR glue
+	 * (modules/webxr/native/library_godot_webxr.js, which must also link in
+	 * builds without the emdawnwebgpu port) can reach the WebGPU bindings
+	 * without a static dependency on them.
+	 */
+	$GodotWebGPUXR__deps: ['$WebGPU'],
+	$GodotWebGPUXR__postset: 'Module["GodotWebGPUXR"] = GodotWebGPUXR;',
+	$GodotWebGPUXR: {
+		imported_textures: null,
+
+		createBinding: function (session) {
+			const device = Module['preinitializedWebGPUDevice'];
+			if (!device || !('XRGPUBinding' in window)) {
+				return null;
+			}
+			return new window['XRGPUBinding'](session, device);
+		},
+
+		/**
+		 * Maps a GPUTexture to a stable WGPUTexture handle; XR layers cycle
+		 * through a small set of opaque textures, so each is imported once.
+		 */
+		importTexture: function (texture) {
+			if (!GodotWebGPUXR.imported_textures) {
+				GodotWebGPUXR.imported_textures = new Map();
+			}
+			let handle = GodotWebGPUXR.imported_textures.get(texture);
+			if (handle === undefined) {
+				handle = WebGPU.importJsTexture(texture);
+				GodotWebGPUXR.imported_textures.set(texture, handle);
+			}
+			return handle;
+		},
+
+		clear: function () {
+			// The C++ side owns the handles' release; drop the JS map so a
+			// new session starts from a clean import table.
+			GodotWebGPUXR.imported_textures = null;
+		},
+	},
+
 	/**
 	 * Imports the GPUDevice acquired by the loader before start-up (see
 	 * js/engine/engine.js) into the emdawnwebgpu bindings.
 	 *
 	 * @returns {number} A WGPUDevice handle, or 0 if no device was stashed.
 	 */
-	godot_js_webgpu_device_import__deps: ['$WebGPU'],
+	godot_js_webgpu_device_import__deps: ['$WebGPU', '$GodotWebGPUXR'],
 	godot_js_webgpu_device_import__sig: 'p',
 	godot_js_webgpu_device_import: function () {
 		const device = Module['preinitializedWebGPUDevice'];
 		if (!device) {
 			return 0;
+		}
+		// While an immersive WebXR session owns the compositor, the canvas
+		// returns null from getCurrentTexture() WITHOUT throwing; the
+		// emdawnwebgpu glue would wrap that null as a successful acquire and
+		// crash at the first view creation. Turn it into the exception its
+		// error path already handles (the driver skips the frame).
+		const context_class = window['GPUCanvasContext'];
+		if (context_class && !context_class.prototype['__godot_null_guard']) {
+			const orig = context_class.prototype['getCurrentTexture'];
+			context_class.prototype['getCurrentTexture'] = function () {
+				const texture = orig.apply(this, arguments);
+				if (!texture) {
+					throw new Error('The canvas has no current texture (suspended during an XR session).');
+				}
+				return texture;
+			};
+			context_class.prototype['__godot_null_guard'] = true;
 		}
 		return WebGPU.importJsDevice(device);
 	},
