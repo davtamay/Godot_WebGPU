@@ -72,6 +72,8 @@
 
 | 50 | [shared] webxr: Keep hand trackers honest across input-source churn | THE long-standing frozen-hands fix, diagnosed with raw-boundary telemetry on Quest 3 and Galaxy XR. Three compounding defects: (1) inputsourceschange processed additions before removals, so a source replaced within one event (browsers re-add hands in different modes constantly) had its stale removal wipe the slot its replacement just claimed - the hand went permanently silent; (2) removeInputSource cleared slots by index without checking identity; (3) when a hand input source vanished, its XRHandTracker kept the last joints flagged as live tracking data forever - consumers rendered a frozen hand. Hands now vanish cleanly on tracking loss and return automatically on re-acquisition, no hide-your-hands ritual. Verified on both headsets | modules/webxr | not yet |
 
+| 52 | [shared] webxr: Send the depthSensing init dict on every session | The depth-sensing feature is only granted when the usagePreference/dataFormatPreference dict accompanies it; the glue attached it only on WebGPU-bound sessions, so WebGL sessions requested the feature bare and browsers silently dropped it. Android XR grants depth to WebGL sessions (verified by hard probe on a Galaxy XR); usagePreference now also lists cpu-optimized. Unlocks the planned WebGL sensor-occlusion path | ~6 library_godot_webxr.js | not yet |
+
 (Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
 experimental WebXR-WebGPU since April 2026. NOTE: upstream
 already compiles RenderingDevice + renderer_rd unconditionally on all
