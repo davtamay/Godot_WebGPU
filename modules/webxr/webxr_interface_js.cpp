@@ -282,10 +282,11 @@ uint32_t WebXRInterfaceJS::get_capabilities() const {
 
 uint32_t WebXRInterfaceJS::get_view_count() {
 #ifdef WEBGPU_ENABLED
-	if (RenderingDevice::get_singleton() != nullptr) {
-		// No multiview on WebGPU: the renderer sees a single view and the
-		// viewport is drawn once per WebXR view instead (the active draw
-		// pass selects which view the "view 0" data comes from).
+	if (RenderingDevice::get_singleton() != nullptr || gl_per_view_passes) {
+		// No multiview available (WebGPU, or a WebGL context without the
+		// extension): the renderer sees a single view and the viewport is
+		// drawn once per WebXR view instead (the active draw pass selects
+		// which view the "view 0" data comes from).
 		return 1;
 	}
 #endif
@@ -294,11 +295,24 @@ uint32_t WebXRInterfaceJS::get_view_count() {
 
 uint32_t WebXRInterfaceJS::get_draw_pass_count() {
 #ifdef WEBGPU_ENABLED
-	if (RenderingDevice::get_singleton() != nullptr) {
+	if (RenderingDevice::get_singleton() != nullptr || gl_per_view_passes) {
 		return godot_webxr_get_view_count();
 	}
 #endif
 	return 1;
+}
+
+void WebXRInterfaceJS::_update_pass_mode() {
+#ifdef WEBGPU_ENABLED
+	if (RenderingDevice::get_singleton() != nullptr) {
+		return;
+	}
+	const bool was_active = gl_per_view_passes;
+	gl_per_view_passes = godot_webxr_get_view_count() > 1 && !godot_webxr_uses_multiview();
+	if (gl_per_view_passes && !was_active) {
+		print_line("WebXR: WebGL multiview is unavailable on this browser; rendering one pass per view.");
+	}
+#endif
 }
 
 void WebXRInterfaceJS::set_current_draw_pass(uint32_t p_pass) {
@@ -428,6 +442,12 @@ void WebXRInterfaceJS::uninitialize() {
 		texture_cache.clear();
 		frame_matrix_view_count = 0;
 #ifdef WEBGPU_ENABLED
+		gl_per_view_passes = false;
+		if (gl_blit_fbos[0] != 0 && GLES3::TextureStorage::get_singleton() != nullptr) {
+			glDeleteFramebuffers(2, gl_blit_fbos);
+			gl_blit_fbos[0] = 0;
+			gl_blit_fbos[1] = 0;
+		}
 		depth_sensing_texture = RID();
 		depth_sensing_status = 0;
 #endif
@@ -528,7 +548,7 @@ Transform3D WebXRInterfaceJS::get_transform_for_view(uint32_t p_view, const Tran
 	ERR_FAIL_COND_V(!initialized, p_cam_transform);
 
 #ifdef WEBGPU_ENABLED
-	if (RenderingDevice::get_singleton() != nullptr) {
+	if (RenderingDevice::get_singleton() != nullptr || gl_per_view_passes) {
 		// Per-view draw passes: view 0 of the active pass is the pass's view.
 		p_view += current_draw_pass;
 	}
@@ -550,7 +570,7 @@ Transform3D WebXRInterfaceJS::get_transform_for_view(uint32_t p_view, const Tran
 
 Projection WebXRInterfaceJS::get_projection_for_view(uint32_t p_view, double p_aspect, double p_z_near, double p_z_far) {
 #ifdef WEBGPU_ENABLED
-	if (RenderingDevice::get_singleton() != nullptr) {
+	if (RenderingDevice::get_singleton() != nullptr || gl_per_view_passes) {
 		// Per-view draw passes: view 0 of the active pass is the pass's view.
 		p_view += current_draw_pass;
 	}
@@ -610,6 +630,15 @@ bool WebXRInterfaceJS::pre_draw_viewport(RID p_render_target) {
 		return true;
 	}
 #endif
+#ifdef WEBGPU_ENABLED
+	if (gl_per_view_passes) {
+		// Non-multiview stereo: the viewport renders into its own target and
+		// post_draw blits it into this pass's eye viewport - no override.
+		color_texture = RID();
+		depth_texture = RID();
+		return true;
+	}
+#endif
 	GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
 	if (texture_storage == nullptr) {
 		return false;
@@ -647,10 +676,53 @@ Vector<RenderingServerTypes::BlitToScreen> WebXRInterfaceJS::post_draw_viewport(
 		return blit_to_screen;
 	}
 
+#ifdef WEBGPU_ENABLED
+	if (gl_per_view_passes) {
+		_gl_blit_pass_to_layer(p_render_target);
+		return blit_to_screen;
+	}
+#endif
 	texture_storage->render_target_set_reattach_textures(p_render_target, false);
 
 	return blit_to_screen;
 }
+
+#ifdef WEBGPU_ENABLED
+void WebXRInterfaceJS::_gl_blit_pass_to_layer(RID p_render_target) {
+	GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
+	if (texture_storage == nullptr) {
+		return;
+	}
+	int rect[4] = { 0, 0, 0, 0 };
+	const unsigned int layer_texture = godot_webxr_get_gl_pass_info((int)current_draw_pass, rect);
+	if (layer_texture == 0 || rect[2] <= 0 || rect[3] <= 0) {
+		// The layer is not part of the active render state yet; skip the
+		// frame (it becomes active on the next animation frame).
+		return;
+	}
+	GLES3::Texture *rt_texture = texture_storage->get_texture(texture_storage->render_target_get_texture(p_render_target));
+	if (rt_texture == nullptr) {
+		return;
+	}
+
+	GLint prev_read_fbo = 0;
+	GLint prev_draw_fbo = 0;
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prev_read_fbo);
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prev_draw_fbo);
+	if (gl_blit_fbos[0] == 0) {
+		glGenFramebuffers(2, gl_blit_fbos);
+	}
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, gl_blit_fbos[0]);
+	glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt_texture->tex_id, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gl_blit_fbos[1]);
+	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, layer_texture, 0);
+	// WebXR layer textures are bottom-left origin while the render target
+	// content is top-left: flip vertically during the blit.
+	glBlitFramebuffer(0, rt_texture->height, rt_texture->width, 0, rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3], GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, prev_read_fbo);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prev_draw_fbo);
+}
+#endif
 
 #ifdef WEBGPU_ENABLED
 void WebXRInterfaceJS::_free_rd_layer_textures() {
@@ -830,6 +902,9 @@ RID WebXRInterfaceJS::get_velocity_texture() {
 
 void WebXRInterfaceJS::process() {
 	if (initialized) {
+		// Evaluated per frame: the view count is only known once a pose
+		// exists, which is after the session-started callback.
+		_update_pass_mode();
 		// One crossing fetches the head and every view's matrices for the
 		// frame; the per-view getters below read the cache.
 		frame_matrix_view_count = godot_webxr_get_frame_matrices(frame_matrices);
