@@ -132,11 +132,19 @@ const GodotWebXR = {
 			} else if (GodotWebXR.session && GodotWebXR.gl_binding && GodotWebXR.gl_binding.createProjectionLayer) {
 				const gl = GodotWebXR.gl;
 
-				layer = GodotWebXR.gl_binding.createProjectionLayer({
-					textureType: (new_view_count > 1 && GodotWebXR.usesMultiview()) ? 'texture-array' : 'texture',
+				const layer_multiview = new_view_count > 1 && GodotWebXR.usesMultiview();
+				const layer_init = {
+					textureType: layer_multiview ? 'texture-array' : 'texture',
 					colorFormat: gl.RGBA8,
-					depthFormat: gl.DEPTH_COMPONENT24,
-				});
+				};
+				if (layer_multiview || new_view_count <= 1) {
+					// Only paths that render directly into the layer write its
+					// depth. The per-view blit path copies color only: an
+					// unwritten (zero-filled) depth buffer wastes memory and
+					// hands the compositor spec-undefined reprojection input.
+					layer_init.depthFormat = gl.DEPTH_COMPONENT24;
+				}
+				layer = GodotWebXR.gl_binding.createProjectionLayer(layer_init);
 			} else {
 				return null;
 			}
