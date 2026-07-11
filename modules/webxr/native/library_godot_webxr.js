@@ -47,6 +47,11 @@ const GodotWebXR = {
 		// getViewSubImage() is only valid once per frame per view; several
 		// engine calls need it, so it is computed once per animation frame.
 		frame_subimage: null,
+		frame_view_subimages: [null, null],
+		// Whether the WebGL context can do single-pass stereo (OVR_multiview2
+		// or OCULUS_multiview). Android XR's browser has neither: stereo then
+		// renders one pass per view into a shared side-by-side layer texture.
+		gl_multiview: null,
 		space: null,
 		frame: null,
 		pose: null,
@@ -65,10 +70,12 @@ const GodotWebXR = {
 					GodotWebXR.frame = frame;
 					GodotWebXR.pose = frame.getViewerPose(GodotWebXR.space);
 					GodotWebXR.frame_subimage = null;
+					GodotWebXR.frame_view_subimages = [null, null];
 					callback(time);
 					GodotWebXR.frame = null;
 					GodotWebXR.pose = null;
 					GodotWebXR.frame_subimage = null;
+					GodotWebXR.frame_view_subimages = [null, null];
 				};
 				GodotWebXR.session.requestAnimationFrame(onFrame);
 			} else {
@@ -97,6 +104,14 @@ const GodotWebXR = {
 			}, 0);
 		},
 
+		usesMultiview: () => {
+			if (GodotWebXR.gl_multiview === null) {
+				const gl = GodotWebXR.gl;
+				GodotWebXR.gl_multiview = !!(gl && (gl.getExtension('OVR_multiview2') || gl.getExtension('OCULUS_multiview')));
+			}
+			return GodotWebXR.gl_multiview;
+		},
+
 		getLayer: () => {
 			const new_view_count = (GodotWebXR.pose) ? GodotWebXR.pose.views.length : 1;
 			let layer = GodotWebXR.layer;
@@ -118,7 +133,7 @@ const GodotWebXR = {
 				const gl = GodotWebXR.gl;
 
 				layer = GodotWebXR.gl_binding.createProjectionLayer({
-					textureType: new_view_count > 1 ? 'texture-array' : 'texture',
+					textureType: (new_view_count > 1 && GodotWebXR.usesMultiview()) ? 'texture-array' : 'texture',
 					colorFormat: gl.RGBA8,
 					depthFormat: gl.DEPTH_COMPONENT24,
 				});
@@ -130,6 +145,7 @@ const GodotWebXR = {
 			GodotWebXR.layer = layer;
 			GodotWebXR.layer_generation++;
 			GodotWebXR.frame_subimage = null;
+			GodotWebXR.frame_view_subimages = [null, null];
 			GodotWebXR.view_count = new_view_count;
 			return layer;
 		},
@@ -143,6 +159,15 @@ const GodotWebXR = {
 			}
 			const layer = GodotWebXR.getLayer();
 			if (layer === null) {
+				return null;
+			}
+
+			// A layer handed to updateRenderState() only joins the ACTIVE
+			// render state on the next animation frame; querying sub-images
+			// before that throws on strict implementations (Android XR),
+			// while others tolerate it. Present nothing until it is active.
+			const active_layers = GodotWebXR.session.renderState.layers;
+			if (!active_layers || active_layers.indexOf(layer) < 0) {
 				return null;
 			}
 
@@ -557,6 +582,49 @@ const GodotWebXR = {
 		GodotRuntime.setHeapValue(r_info + 4, GodotWebXR.getTextureHandle(subimage.colorTexture), 'i32');
 		GodotRuntime.setHeapValue(r_info + 8, subimage.depthStencilTexture ? GodotWebXR.getTextureHandle(subimage.depthStencilTexture) : 0, 'i32');
 		return 1;
+	},
+
+	godot_webxr_uses_multiview__proxy: 'sync',
+	godot_webxr_uses_multiview__sig: 'i',
+	godot_webxr_uses_multiview: function () {
+		return GodotWebXR.usesMultiview() ? 1 : 0;
+	},
+
+	godot_webxr_get_gl_pass_info__proxy: 'sync',
+	godot_webxr_get_gl_pass_info__sig: 'iii',
+	godot_webxr_get_gl_pass_info: function (p_view, r_rect) {
+		// Non-multiview GL stereo: returns the layer color texture's GL id
+		// and writes the view's viewport [x, y, w, h] to r_rect (4 i32s).
+		// Returns 0 while the layer is not yet in the active render state.
+		if (!GodotWebXR.session || !GodotWebXR.pose || !GodotWebXR.gl_binding) {
+			return 0;
+		}
+		const views = GodotWebXR.pose.views;
+		if (p_view >= views.length) {
+			return 0;
+		}
+		const layer = GodotWebXR.getLayer();
+		if (layer === null) {
+			return 0;
+		}
+		const active_layers = GodotWebXR.session.renderState.layers;
+		if (!active_layers || active_layers.indexOf(layer) < 0) {
+			return 0;
+		}
+		let subimage = GodotWebXR.frame_view_subimages[p_view];
+		if (!subimage) {
+			subimage = GodotWebXR.gl_binding.getViewSubImage(layer, views[p_view]);
+			GodotWebXR.frame_view_subimages[p_view] = subimage;
+		}
+		if (!subimage || !subimage.colorTexture) {
+			return 0;
+		}
+		const vp = subimage.viewport;
+		GodotRuntime.setHeapValue(r_rect + 0, vp.x, 'i32');
+		GodotRuntime.setHeapValue(r_rect + 4, vp.y, 'i32');
+		GodotRuntime.setHeapValue(r_rect + 8, vp.width, 'i32');
+		GodotRuntime.setHeapValue(r_rect + 12, vp.height, 'i32');
+		return GodotWebXR.getTextureId(subimage.colorTexture);
 	},
 
 	godot_webxr_get_color_format__proxy: 'sync',
