@@ -241,7 +241,9 @@ const GodotWebXR = {
 		removeInputSource: (input_source) => {
 			if (input_source.name !== undefined) {
 				const name = input_source.name;
-				if (name >= 0 && name < 16) {
+				// Only clear the slot if it still holds THIS source: a
+				// replacement may already occupy it.
+				if (name >= 0 && name < 16 && GodotWebXR.input_sources[name] === input_source) {
 					GodotWebXR.input_sources[name] = null;
 				}
 
@@ -343,8 +345,12 @@ const GodotWebXR = {
 			});
 
 			session.addEventListener('inputsourceschange', function (evt) {
-				evt.added.forEach(GodotWebXR.addInputSource);
+				// Removals first: when the browser replaces a source in a
+				// single event (e.g. re-adding a hand in a different mode),
+				// processing the add first lets the stale removal wipe the
+				// slot the replacement just claimed.
 				evt.removed.forEach(GodotWebXR.removeInputSource);
+				evt.added.forEach(GodotWebXR.addInputSource);
 			});
 
 			['selectstart', 'selectend', 'squeezestart', 'squeezeend'].forEach((input_event, index) => {
