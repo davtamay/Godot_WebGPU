@@ -68,6 +68,8 @@
 
 | 48 | [shared] webxr: Fetch all frame matrices in one thread crossing | The head transform and every view transform/projection each cost a synchronous worker-to-main crossing per call (~5 per stereo frame); process() now fetches them all in one call and the per-view getters read the cache (old calls kept as fallback for queries before the first frame). Quest-verified: tracking and eye alignment unchanged | ~27 library_godot_webxr.js, ~20 webxr_interface_js.cpp/.h, ~1 godot_webxr.h | not yet |
 
+| 49 | [shared] webxr: Render GL stereo one pass per view without multiview | Android XR browsers ship WebGL without OVR_multiview2/OCULUS_multiview, and Godot GL stereo hard-required it (shader compile crash on Galaxy XR). Detected at layer creation: without it the projection layer is a shared side-by-side texture and the patch-35 draw-pass machinery renders each eye into its own render target, then blits it (Y-flipped; layer textures are bottom-left origin) into the eye viewport - the Unity-WebXR-export approach. Sub-images are only queried once the layer joins the ACTIVE render state (strict per-spec on Android XR; a layer set via updateRenderState only activates next frame). Quest keeps its multiview fast path. Galaxy-XR-verified: stereo, tracking, interaction | modules/webxr | not yet |
+
 (Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
 experimental WebXR-WebGPU since April 2026. NOTE: upstream
 already compiles RenderingDevice + renderer_rd unconditionally on all
