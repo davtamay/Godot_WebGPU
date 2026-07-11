@@ -963,6 +963,16 @@ void WebXRInterfaceJS::_update_input_source(int p_input_source_id) {
 			xr_server->remove_tracker(input_source.tracker);
 			input_source.tracker.unref();
 		}
+#ifdef WEBGPU_ENABLED
+		if (p_input_source_id < 2 && hand_trackers[p_input_source_id].is_valid() && hand_trackers[p_input_source_id]->get_has_tracking_data()) {
+			// The browser dropped this hand's input source (it does so while
+			// the hand tracker re-acquires, e.g. at session start): without
+			// this, the tracker's last joints keep posing as live tracking
+			// data and consumers render a frozen hand.
+			hand_trackers[p_input_source_id]->set_has_tracking_data(false);
+			hand_trackers[p_input_source_id]->invalidate_pose("default");
+		}
+#endif
 		return;
 	}
 
