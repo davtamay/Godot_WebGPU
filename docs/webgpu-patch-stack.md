@@ -70,6 +70,8 @@
 
 | 49 | [shared] webxr: Query layer sub-images only once the layer is active | A layer handed to updateRenderState() joins the ACTIVE render state on the next animation frame. Android XR throws when a sub-image is queried before that, where other browsers tolerate it, so getSubImage() returns nothing until the layer is active. Originally this patch also rendered GL stereo one pass per view on browsers without WebGL multiview (Android XR); upstream godotengine/godot#120558 (GLES3 multiview emulation) and the no-Layers fallback replaced that part in September 2026 | modules/webxr | not yet |
 
+| 50 | [shared] webxr: Keep hand trackers honest across input-source churn | THE long-standing frozen-hands fix, diagnosed with raw-boundary telemetry on Quest 3 and Galaxy XR. Three compounding defects: (1) inputsourceschange processed additions before removals, so a source replaced within one event (browsers re-add hands in different modes constantly) had its stale removal wipe the slot its replacement just claimed - the hand went permanently silent; (2) removeInputSource cleared slots by index without checking identity; (3) when a hand input source vanished, its XRHandTracker kept the last joints flagged as live tracking data forever - consumers rendered a frozen hand. Hands now vanish cleanly on tracking loss and return automatically on re-acquisition, no hide-your-hands ritual. Verified on both headsets | modules/webxr | not yet |
+
 (Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
 experimental WebXR-WebGPU since April 2026. NOTE: upstream
 already compiles RenderingDevice + renderer_rd unconditionally on all
