@@ -71,6 +71,8 @@ extern bool godot_webxr_get_projection_for_view(int p_view, float *r_transform);
 extern unsigned int godot_webxr_get_depth_sensing_info(int p_view, float *r_params);
 extern int godot_webxr_get_pass_info(unsigned int *r_info);
 extern int godot_webxr_get_frame_matrices(float *r_data);
+extern int godot_webxr_uses_multiview();
+extern unsigned int godot_webxr_get_gl_pass_info(int p_view, int *r_rect);
 extern char *godot_webxr_get_color_format();
 extern unsigned int godot_webxr_get_color_texture();
 extern unsigned int godot_webxr_get_depth_texture();
