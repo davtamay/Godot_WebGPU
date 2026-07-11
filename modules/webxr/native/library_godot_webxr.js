@@ -113,7 +113,10 @@ const GodotWebXR = {
 		},
 
 		getLayer: () => {
-			const new_view_count = (GodotWebXR.pose) ? GodotWebXR.pose.views.length : 1;
+			// XPERIMENT (strip or productize): immersive sessions are stereo;
+			// defaulting the pre-pose count to 2 makes the eagerly created
+			// layer the final one (no recreation + updateRenderState churn).
+			const new_view_count = (GodotWebXR.pose) ? GodotWebXR.pose.views.length : 2;
 			let layer = GodotWebXR.layer;
 
 			// If the view count hasn't changed since creating this layer, then
@@ -338,13 +341,21 @@ const GodotWebXR = {
 		if (optional_features.length > 0) {
 			session_init['optionalFeatures'] = optional_features;
 		}
-		if (use_webgpu_binding && (required_features.includes('depth-sensing') || optional_features.includes('depth-sensing'))) {
+		if (required_features.includes('depth-sensing') || optional_features.includes('depth-sensing')) {
+			// The depth-sensing feature is only granted when this init dict
+			// accompanies it; without it browsers silently drop the feature
+			// (Android XR grants depth to WebGL sessions too).
 			session_init['depthSensing'] = {
-				usagePreference: ['gpu-optimized'],
+				usagePreference: ['gpu-optimized', 'cpu-optimized'],
 				dataFormatPreference: ['unsigned-short', 'float32'],
 			};
 		}
 
+		// XPERIMENT (strip or productize): move the session request out of the
+		// engine's requestAnimationFrame task into a timer task, matching how
+		// DOM-button-driven apps (Unity, the samples) request sessions.
+		// Transient user activation survives a zero-delay timer.
+		setTimeout(function () {
 		navigator.xr.requestSession(session_mode, session_init).then(function (session) {
 			GodotWebXR.session = session;
 
@@ -506,6 +517,7 @@ const GodotWebXR = {
 			onfailed(c_str);
 			GodotRuntime.free(c_str);
 		});
+		}, 0);
 	},
 
 	godot_webxr_uninitialize__proxy: 'sync',
