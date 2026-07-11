@@ -72,6 +72,11 @@ private:
 	uint32_t current_draw_pass = 0;
 	uint32_t layer_generation = 0;
 	void _free_rd_layer_textures();
+	// Browsers without WebGL multiview (Android XR) render stereo one pass
+	// per view into a shared side-by-side layer texture, Unity-export style.
+	bool gl_per_view_passes = false;
+	uint32_t gl_blit_fbos[2] = {};
+	void _gl_blit_pass_to_layer(RID p_render_target);
 	RID depth_sensing_texture;
 	float depth_sensing_raw_to_meters = 1.0f;
 	Size2 depth_sensing_size;
@@ -166,6 +171,7 @@ public:
 	void _on_input_event(int p_event_type, int p_input_source_id);
 
 	// Internal setters used by callbacks from Emscripten.
+	void _update_pass_mode();
 	inline void _set_reference_space_type(const String &p_reference_space_type) { reference_space_type = p_reference_space_type; }
 	inline void _set_enabled_features(const String &p_enabled_features) { enabled_features = p_enabled_features; }
 	void _set_environment_blend_mode(const String &p_blend_mode_string);
