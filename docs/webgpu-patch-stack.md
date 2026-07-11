@@ -72,6 +72,8 @@
 
 | 50 | [shared] webxr: Keep hand trackers honest across input-source churn | THE long-standing frozen-hands fix, diagnosed with raw-boundary telemetry on Quest 3 and Galaxy XR. Three compounding defects: (1) inputsourceschange processed additions before removals, so a source replaced within one event (browsers re-add hands in different modes constantly) had its stale removal wipe the slot its replacement just claimed - the hand went permanently silent; (2) removeInputSource cleared slots by index without checking identity; (3) when a hand input source vanished, its XRHandTracker kept the last joints flagged as live tracking data forever - consumers rendered a frozen hand. Hands now vanish cleanly on tracking loss and return automatically on re-acquisition, no hide-your-hands ritual. Verified on both headsets | modules/webxr | not yet |
 
+| 51 | [shared] webxr: Omit the layer depth buffer on the per-view blit path | The blit path copies color only, so the projection layers depth buffer stayed zero-filled for the whole session - ~20-24 MB of GPU memory per stereo session wasted and spec-undefined input for any depth-using compositor reprojection. Paths that render directly into the layer (multiview, mono) keep their depth. Future quality item: blit real depth for depth-assisted reprojection | modules/webxr | not yet |
+
 (Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
 experimental WebXR-WebGPU since April 2026. NOTE: upstream
 already compiles RenderingDevice + renderer_rd unconditionally on all
