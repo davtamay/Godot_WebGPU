@@ -346,7 +346,13 @@ const GodotWebXR = {
 			// accompanies it; without it browsers silently drop the feature
 			// (Android XR grants depth to WebGL sessions too).
 			session_init['depthSensing'] = {
-				usagePreference: ['gpu-optimized', 'cpu-optimized'],
+				// Browsers honor the preference order. WebGL sessions prefer
+				// CPU depth: the GL render path does not consume the GPU
+				// texture, while cpu-optimized enables
+				// XRFrame.getDepthInformation() for script-side consumers.
+				// WebGPU sessions keep gpu-optimized first for the upcoming
+				// XRGPUBinding sensor-occlusion path.
+				usagePreference: use_webgpu_binding ? ['gpu-optimized', 'cpu-optimized'] : ['cpu-optimized', 'gpu-optimized'],
 				dataFormatPreference: ['unsigned-short', 'float32'],
 			};
 		}
@@ -565,7 +571,12 @@ const GodotWebXR = {
 			GodotRuntime.setHeapValue(r_params + 0, reason, 'float');
 			return 0;
 		};
-		if (!GodotWebXR.session || !GodotWebXR.pose) {
+		// Capability checks come BEFORE the pose check: UI clicks can reach
+		// this outside the XR frame callback (pose is null there), and the
+		// binding/API checks don't need a pose - without this order a
+		// mid-session click misreports "no session" instead of the real
+		// capability verdict.
+		if (!GodotWebXR.session) {
 			return fail(0);
 		}
 		if (!GodotWebXR.gpu_binding) {
@@ -573,6 +584,12 @@ const GodotWebXR = {
 		}
 		if (typeof GodotWebXR.gpu_binding.getDepthInformation !== 'function') {
 			return fail(2);
+		}
+		if (!GodotWebXR.pose) {
+			// Supported, but no pose this instant (outside the frame
+			// callback). Per-frame data can't be fetched here; callers
+			// polling from _process land inside the frame and succeed.
+			return fail(3);
 		}
 		const views = GodotWebXR.pose.views;
 		if (p_view >= views.length) {
