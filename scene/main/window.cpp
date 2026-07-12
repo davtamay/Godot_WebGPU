@@ -1307,6 +1307,24 @@ void Window::_update_window_size() {
 	_update_viewport_size();
 }
 
+#ifndef XR_DISABLED
+void Window::set_use_xr(bool p_use_xr) {
+	const bool was_using_xr = is_using_xr();
+	Viewport::set_use_xr(p_use_xr);
+
+	// While use_xr is set, the XR server sizes this viewport to the headset's
+	// per-eye render size and _update_viewport_size() early-returns. On
+	// teardown nothing re-derives the size from the window, so on platforms
+	// where the window does not resize afterward (e.g. the web canvas) the
+	// root viewport stays stuck at the eye size: 2D lays out cropped, and
+	// input and 3D picking map through the stale size. Re-derive it now that
+	// XR no longer manages the viewport.
+	if (was_using_xr && !p_use_xr) {
+		_update_viewport_size();
+	}
+}
+#endif // XR_DISABLED
+
 void Window::_update_viewport_size() {
 	//update the viewport part
 
