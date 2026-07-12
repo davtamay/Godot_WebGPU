@@ -703,6 +703,7 @@ RenderingDeviceDriver::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint6
 	BufferInfo *buffer = memnew(BufferInfo);
 	buffer->buffer = wgpu_buffer;
 	buffer->size = alloc_size;
+	buffer->creation_epoch = xr_import_epoch;
 	if (dynamic) {
 		buffer->dynamic = true;
 		buffer->slice_size = p_size;
@@ -956,6 +957,10 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 
 RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create_from_extension(uint64_t p_native_texture, TextureType p_type, DataFormat p_format, uint32_t p_array_layers, bool p_depth_stencil, uint32_t p_mipmaps) {
 	WEBGPU_MAIN_THREAD_GUARD(texture_create_from_extension(p_native_texture, p_type, p_format, p_array_layers, p_depth_stencil, p_mipmaps));
+	// External imports only happen for XR layer textures; entering a session
+	// moves buffer creation into the epoch whose encoded copies are broken
+	// on Galaxy XR's Chrome (see command_copy_buffer).
+	xr_import_epoch++;
 	WGPUTexture wgpu_texture = (WGPUTexture)p_native_texture;
 	ERR_FAIL_NULL_V(wgpu_texture, TextureID());
 	WGPUTextureView wgpu_view = wgpuTextureCreateView(wgpu_texture, nullptr);
@@ -1238,14 +1243,67 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer(CommandBufferID p_cmd_buff
 	// reached the GPU buffer. Queue writes execute before this command
 	// buffer's submission, which restores the intended ordering.
 	{
+		// When the source is an engine staging buffer (persistently mapped,
+		// bytes live in our CPU shadow), write the bytes straight into the
+		// destination region instead of staging-write + encoded copy: queue
+		// writes execute before this command buffer's submission, so the
+		// ordering is identical - and on Galaxy XR's Chrome, encoded
+		// buffer-to-buffer copies into session-created buffers never land
+		// while direct queue writes do.
 		BufferInfo *src_sync = (BufferInfo *)p_src_buffer.id;
-		if (src_sync->shadow != nullptr && !src_sync->dynamic) {
+		BufferInfo *dst = (BufferInfo *)p_dst_buffer.id;
+		// Destinations created before any XR layer import (creation_epoch 0)
+		// must NOT take the direct-write shortcut: queue writes jump ahead
+		// of the frame's encoded commands, so a destination region updated
+		// several times per frame with draws between (the canvas state UBO,
+		// boot-created) would serve its LAST value to ALL of the frame's
+		// draws. Those get the staging shadow flushed (queue write into the
+		// staging ring is safe - regions are never reused within a frame)
+		// and fall through to the ordered encoded copy, which works fine
+		// for boot-created destinations on Galaxy XR too.
+		if (src_sync->shadow != nullptr && !src_sync->dynamic && dst->creation_epoch == 0) {
 			for (uint32_t i = 0; i < p_regions.size(); i++) {
 				const BufferCopyRegion &region = p_regions[i];
-				const uint64_t write_offset = region.src_offset & ~3ull;
-				const uint64_t write_size = MIN((((region.src_offset + region.size + 3ull) & ~3ull) - write_offset), src_sync->size - write_offset);
-				wgpuQueueWriteBuffer(queue, src_sync->buffer, write_offset, src_sync->shadow + write_offset, write_size);
+				const uint64_t sync_offset = region.src_offset & ~3ull;
+				const uint64_t sync_size = MIN((((region.src_offset + region.size + 3ull) & ~3ull) - sync_offset), src_sync->size - sync_offset) & ~3ull;
+				wgpuQueueWriteBuffer(queue, src_sync->buffer, sync_offset, src_sync->shadow + sync_offset, sync_size);
 			}
+		} else if (src_sync->shadow != nullptr && !src_sync->dynamic) {
+			bool all_direct = true;
+			for (uint32_t i = 0; i < p_regions.size(); i++) {
+				const BufferCopyRegion &region = p_regions[i];
+				const uint64_t dst_offset = region.dst_offset & ~3ull;
+				const uint64_t lead = region.dst_offset - dst_offset;
+				const uint64_t src_offset = region.src_offset - lead;
+				const uint64_t write_size = (region.size + lead + 3ull) & ~3ull;
+				// writeBuffer requires 4-byte-aligned size AND no overflow
+				// past the buffer end; fall back to the staging copy when
+				// the padded write would not fit.
+				if (dst_offset + write_size > dst->size) {
+					all_direct = false;
+					const uint64_t sync_offset = region.src_offset & ~3ull;
+					const uint64_t sync_size = MIN((((region.src_offset + region.size + 3ull) & ~3ull) - sync_offset), src_sync->size - sync_offset) & ~3ull;
+					wgpuQueueWriteBuffer(queue, src_sync->buffer, sync_offset, src_sync->shadow + sync_offset, sync_size);
+					continue;
+				}
+				wgpuQueueWriteBuffer(queue, dst->buffer, dst_offset, src_sync->shadow + src_offset, write_size);
+			}
+			if (all_direct) {
+				return;
+			}
+			// Mixed case: encode copies only for the regions that fell back.
+			CommandBufferInfo *cb_fallback = (CommandBufferInfo *)p_cmd_buffer.id;
+			_end_compute_pass(cb_fallback);
+			ERR_FAIL_NULL(cb_fallback->encoder);
+			for (uint32_t i = 0; i < p_regions.size(); i++) {
+				const BufferCopyRegion &region = p_regions[i];
+				const uint64_t dst_offset = region.dst_offset & ~3ull;
+				const uint64_t write_size = (region.size + (region.dst_offset - dst_offset) + 3ull) & ~3ull;
+				if (dst_offset + write_size > dst->size) {
+					wgpuCommandEncoderCopyBufferToBuffer(cb_fallback->encoder, src_sync->buffer, region.src_offset, dst->buffer, region.dst_offset, region.size);
+				}
+			}
+			return;
 		}
 	}
 	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
