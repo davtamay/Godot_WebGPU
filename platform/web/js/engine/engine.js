@@ -80,9 +80,35 @@ const Engine = (function () {
 		}
 		if (config.requiresWebXR && navigator['xr'] && !(ENGINE_WEBXR_WEBGPU_SUPPORTED && Features.isWebXRWebGPUAvailable())) {
 			// A canvas is locked to its first context type, so the driver
-			// choice is boot-time only: keep WebGL for the immersive path.
-			console.warn('This browser supports WebXR but cannot render immersive sessions through WebGPU; keeping the WebGL driver.'); // eslint-disable-line no-console
-			return Promise.resolve();
+			// choice is boot-time only. Some browsers expose the experimental
+			// XRGPUBinding a moment after page start; give it a short grace
+			// before keeping WebGL for the immersive path, and name what was
+			// missing so fallbacks are attributable.
+			if (!ENGINE_WEBXR_WEBGPU_SUPPORTED || !navigator['gpu']) {
+				console.warn('This browser supports WebXR but cannot render immersive sessions through WebGPU; keeping the WebGL driver.'); // eslint-disable-line no-console
+				return Promise.resolve();
+			}
+			return new Promise(function (resolve) {
+				const deadline = Date.now() + 600;
+				function poll() {
+					if (Features.isWebXRWebGPUAvailable()) {
+						resolve(true);
+						return;
+					}
+					if (Date.now() > deadline) {
+						resolve(false);
+						return;
+					}
+					setTimeout(poll, 50);
+				}
+				poll();
+			}).then(function (available) {
+				if (!available) {
+					console.warn('This browser supports WebXR but cannot render immersive sessions through WebGPU; keeping the WebGL driver (gpu:' + ('gpu' in navigator) + ' xr:' + ('xr' in navigator) + ' XRGPUBinding:' + ('XRGPUBinding' in window) + ').'); // eslint-disable-line no-console
+					return Promise.resolve();
+				}
+				return initWebGPUDevice(config, rtenv);
+			});
 		}
 		// XRGPUBinding refuses devices whose adapter was not requested as
 		// XR-compatible; harmless elsewhere (unknown members are ignored).
