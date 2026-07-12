@@ -366,6 +366,10 @@ public:
 	virtual void set_visible(bool p_visible);
 	bool is_visible() const;
 
+#ifndef XR_DISABLED
+	virtual void set_use_xr(bool p_use_xr) override;
+#endif // XR_DISABLED
+
 	void update_mouse_cursor_state() override;
 
 	void show();
