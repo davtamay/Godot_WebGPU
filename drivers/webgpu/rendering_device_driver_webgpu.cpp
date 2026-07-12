@@ -2599,8 +2599,16 @@ void RenderingDeviceDriverWebGPU::command_bind_push_constants(CommandBufferID p_
 	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	const uint32_t data_size = p_data.size() * sizeof(uint32_t);
 	ERR_FAIL_COND(data_size > PUSH_CONSTANT_SLOT_SIZE);
-	// Wrapping mid-frame would corrupt earlier draws; fail loudly instead.
-	ERR_FAIL_COND_MSG(push_constant_used + PUSH_CONSTANT_SLOT_SIZE > push_constant_capacity, "Push constant ring buffer exhausted for this frame.");
+	// Wrapping mid-frame would corrupt earlier draws; drop the draw's
+	// constants instead, reporting once per frame (a big scene can overflow
+	// by hundreds of draws - per-draw spam would bury the console).
+	if (unlikely(push_constant_used + PUSH_CONSTANT_SLOT_SIZE > push_constant_capacity)) {
+		if (!push_constant_overflow_reported) {
+			push_constant_overflow_reported = true;
+			ERR_PRINT(vformat("Push constant ring buffer exhausted for this frame (%d slots); draws beyond the ring are dropped.", push_constant_capacity / PUSH_CONSTANT_SLOT_SIZE));
+		}
+		return;
+	}
 	memcpy(push_constant_shadow + push_constant_used, p_data.ptr(), data_size);
 	cb_info->push_constant_offset = push_constant_used;
 	push_constant_used += PUSH_CONSTANT_SLOT_SIZE;
@@ -3055,6 +3063,7 @@ void RenderingDeviceDriverWebGPU::begin_segment(uint32_t p_frame_index, uint32_t
 	// Safe to recycle every frame: wgpuQueueWriteBuffer copies the data at
 	// call time, so previously submitted frames keep the values they saw.
 	push_constant_used = 0;
+	push_constant_overflow_reported = false;
 }
 
 void RenderingDeviceDriverWebGPU::end_segment() {
