@@ -886,7 +886,7 @@ public:
 	bool is_using_own_world_3d() const;
 
 #ifndef XR_DISABLED
-	void set_use_xr(bool p_use_xr);
+	virtual void set_use_xr(bool p_use_xr);
 	bool is_using_xr() const;
 
 #ifndef DISABLE_DEPRECATED
