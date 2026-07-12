@@ -132,7 +132,10 @@ private:
 
 	static const uint32_t MAX_BIND_GROUPS = 4;
 	static const uint32_t PUSH_CONSTANT_SLOT_SIZE = 256; // Matches the dynamic offset alignment limit.
-	static const uint32_t PUSH_CONSTANT_RING_SIZE = 256 * 1024;
+	// One slot per push-constant-carrying draw, so this bounds the frame's
+	// draw count (headset room scans alone stream 500+ mesh patches, each a
+	// draw per eye). 1 MiB = 4096 slots.
+	static const uint32_t PUSH_CONSTANT_RING_SIZE = 1024 * 1024;
 
 	struct UniformSetInfo;
 
@@ -245,6 +248,7 @@ private:
 	uint8_t *push_constant_shadow = nullptr;
 	uint32_t push_constant_capacity = 0;
 	uint32_t push_constant_used = 0;
+	bool push_constant_overflow_reported = false;
 
 	void _flush_bind_groups(CommandBufferInfo *p_cb_info);
 	void _end_compute_pass(CommandBufferInfo *p_cb_info);
