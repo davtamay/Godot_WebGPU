@@ -68,6 +68,13 @@ private:
 		// before any subsequently submitted command buffer, matching the
 		// engine's staging semantics). Downloads are not supported yet.
 		uint8_t *shadow = nullptr;
+		// xr_import_epoch at creation time. Only buffers created while XR
+		// layer textures have been imported (epoch > 0, the class whose
+		// encoded copies never land on Galaxy XR's Chrome) take the
+		// direct-write upload shortcut; earlier buffers keep ordered
+		// encoded copies, which buffers updated several times per frame
+		// with draws in between (the canvas state UBO) depend on.
+		uint32_t creation_epoch = 0;
 	};
 
 	struct TextureInfo {
@@ -240,6 +247,11 @@ private:
 	WGPUTextureView _get_placeholder_float_view();
 	WGPUBindGroup _uniform_set_build(VectorView<BoundUniform> p_uniforms, const ShaderInfo *p_shader_info, uint32_t p_set_index, UniformSetInfo *p_bookkeeping);
 	LocalVector<BufferInfo *> dynamic_buffers_all;
+	// Bumped whenever an external (XR layer) texture is imported; stamps
+	// BufferInfo::creation_epoch so uploads can tell in-session buffers
+	// (which need the direct-write workaround) from boot-time ones (which
+	// need ordered encoded copies).
+	uint32_t xr_import_epoch = 0;
 
 	// Push-constant ring: values are written into a shadow at 256-aligned
 	// offsets and flushed with one wgpuQueueWriteBuffer before submission;
