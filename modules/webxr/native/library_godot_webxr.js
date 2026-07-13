@@ -353,7 +353,19 @@ const GodotWebXR = {
 				// WebGPU sessions keep gpu-optimized first for the upcoming
 				// XRGPUBinding sensor-occlusion path.
 				usagePreference: use_webgpu_binding ? ['gpu-optimized', 'cpu-optimized'] : ['cpu-optimized', 'gpu-optimized'],
-				dataFormatPreference: ['unsigned-short', 'float32'],
+				// luminance-alpha FIRST: it is the spec's guaranteed format
+				// (16-bit value packed L+A, storing millimeters) with a
+				// DOCUMENTED decode - raw = L + A*256, meters = raw *
+				// rawValueToMeters. unsigned-short's GPU encoding is
+				// undocumented and resisted every linearization we tried.
+				dataFormatPreference: ['luminance-alpha', 'float32', 'unsigned-short'],
+				// Prefer RAW depth: consumers use depth live (occlusion,
+				// per-frame view), where temporal 'smooth' fusion blends
+				// moving objects (a hand) into the background and erases
+				// exactly what dynamic occlusion needs. Smooth only helped a
+				// persistent accumulated scan, which is no longer the default.
+				// UAs predating depthTypeRequest ignore it (backward-safe).
+				depthTypeRequest: ['raw', 'smooth'],
 			};
 		}
 
