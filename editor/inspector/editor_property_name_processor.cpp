@@ -203,6 +203,8 @@ EditorPropertyNameProcessor::EditorPropertyNameProcessor() {
 	capitalize_string_remaps["gltf"] = "glTF";
 	capitalize_string_remaps["gridmap"] = "GridMap";
 	capitalize_string_remaps["gpu"] = "GPU";
+	capitalize_string_remaps["webgpu"] = "WebGPU";
+	capitalize_string_remaps["webxr"] = "WebXR";
 	capitalize_string_remaps["gui"] = "GUI";
 	capitalize_string_remaps["guid"] = "GUID";
 	capitalize_string_remaps["hdr"] = "HDR";
