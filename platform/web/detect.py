@@ -265,9 +265,11 @@ def configure(env: "SConsEnvironment"):
         env.Append(LINKFLAGS=["--use-port=emdawnwebgpu"])
 
     if env["use_rendering_device"]:
-        if not env["threads"]:
-            print_error('"use_rendering_device=yes" requires "threads=yes" on the web platform.')
-            sys.exit(255)
+        # RenderingDevice (and the WebGPU driver) runs with or without threads.
+        # Threaded builds get a render thread + WorkerThreadPool and need
+        # SharedArrayBuffer (COOP/COEP); single-threaded builds render on the main
+        # thread and host anywhere with no special headers. The "thread_support"
+        # export option picks which template to ship.
         env.AppendUnique(CPPDEFINES=["RD_ENABLED"])
 
     if env["javascript_eval"]:
