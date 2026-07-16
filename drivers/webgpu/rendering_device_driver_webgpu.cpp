@@ -683,7 +683,13 @@ RenderingDeviceDriver::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint6
 	}
 
 	const bool dynamic = p_usage.has_flag(BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT);
-	uint64_t alloc_size = p_size;
+	// Round up to 4 bytes: wgpuQueueWriteBuffer only accepts 4-byte-aligned
+	// sizes, so the direct-write upload path pads odd-sized writes. The padding
+	// must FIT inside the buffer, or the write falls back to an encoded copy -
+	// which never lands in session-created buffers under XR. Exactly-sized odd
+	// allocations (16-bit index buffers with an odd index count, e.g. glTF
+	// models loaded mid-session) rendered invisible without this.
+	uint64_t alloc_size = (p_size + 3ull) & ~3ull;
 	uint64_t slice_stride = 0;
 	if (dynamic) {
 		// One slice per frame in flight; dynamic offsets must be multiples of
@@ -715,7 +721,9 @@ RenderingDeviceDriver::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint6
 		return BufferID(buffer);
 	}
 	if (p_allocation_type == MEMORY_ALLOCATION_TYPE_CPU) {
-		buffer->shadow = (uint8_t *)memalloc(p_size);
+		// Padded like the GPU buffer so aligned tail writes read valid bytes.
+		buffer->shadow = (uint8_t *)memalloc(alloc_size);
+		memset(buffer->shadow + p_size, 0, alloc_size - p_size);
 	}
 	return BufferID(buffer);
 }
