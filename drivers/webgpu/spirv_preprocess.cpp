@@ -32,6 +32,7 @@
 
 #include "core/templates/hash_map.h"
 #include "core/templates/hash_set.h"
+#include "core/templates/local_vector.h"
 #include "core/templates/vector.h"
 
 #include <cfloat>
@@ -1525,6 +1526,726 @@ Vector<uint8_t> lower_spec_constant_ops_to_runtime(const Vector<uint8_t> &p_byte
 	// Update the id bound.
 	uint8_t *out_ptr = out.ptrw();
 	memcpy(out_ptr + 12, &id_bound, 4);
+	return out;
+}
+
+// ---- fan_out_binding_arrays ----
+//
+// Tint rejects arrays of handle types, and the flatten_binding_arrays
+// fallback collapses them to their first element -- only correct for shaders
+// that never index past zero. This pass performs the real lowering, emitting
+// the per-element binding layout the driver already fans out for arrayed
+// uniforms (ARRAY_BINDING_BASE / ARRAY_BINDING_STRIDE):
+//
+//   element binding = p_binding_base + original_binding * p_binding_stride + i
+//
+// Constant-index accesses substitute the element variable everywhere the
+// chain result was used (loads, helper-call arguments). Dynamic-index
+// accesses lower to a structured OpSwitch that clones the consuming
+// instructions per element and merges the produced value with OpPhi -- the
+// lowering the WebGPU sized-binding-arrays proposal endorses. Supported
+// dynamic consumer shapes:
+//
+//   chain -> OpLoad -> image op                      (sampled-image arrays)
+//   chain -> OpLoad -> OpSampledImage -> image op    (texture + separate sampler)
+//   chain -> OpFunctionCall                          (texture passed to a helper)
+//
+// Arrays with any unsupported use are left untouched for the truncation
+// fallback, keeping today's behavior as the worst case.
+
+static constexpr uint16_t FAN_OP_NAME = 5;
+static constexpr uint16_t FAN_OP_FUNCTION_CALL = 57;
+static constexpr uint16_t FAN_OP_SAMPLED_IMAGE = 86;
+static constexpr uint16_t FAN_OP_PHI = 245;
+static constexpr uint16_t FAN_OP_SELECTION_MERGE = 247;
+static constexpr uint16_t FAN_OP_LABEL = 248;
+static constexpr uint16_t FAN_OP_BRANCH = 249;
+static constexpr uint16_t FAN_OP_SWITCH = 251;
+static constexpr uint32_t FAN_DECO_BINDING = 33;
+static constexpr uint32_t FAN_DECO_DESCRIPTOR_SET = 34;
+static constexpr uint32_t FAN_SC_UNIFORM_CONSTANT = 0;
+
+// Image instructions that consume a handle and produce a plain value we can
+// merge with OpPhi: OpImageSample* / *Dref* / Fetch / Gather (87-97),
+// OpImageRead (98), and the query ops (101-107). OpImageWrite (99, no
+// result) and OpImage (100, produces another handle) are excluded.
+static inline bool fan_is_value_image_op(uint16_t p_op) {
+	return (p_op >= 87 && p_op <= 98) || (p_op >= 101 && p_op <= 107);
+}
+
+Vector<uint8_t> fan_out_binding_arrays(const Vector<uint8_t> &p_bytes, uint32_t p_binding_base, uint32_t p_binding_stride, uint32_t p_max_binding) {
+	const uint8_t *data = p_bytes.ptr();
+	const int64_t len = p_bytes.size();
+	const uint32_t total_words = (uint32_t)(len / 4);
+	if (total_words < 5) {
+		return p_bytes;
+	}
+	// Header: magic, version, generator, id bound, schema. The pass only
+	// understands SPIR-V <= 1.3 entry-point interface rules (UniformConstant
+	// globals need not be listed); the container downgrades to 1.3 before
+	// this chain runs, so anything newer just passes through.
+	if (read_word(data, len, 0) != 0x07230203u || read_word(data, len, 1) > 0x00010300u) {
+		return p_bytes;
+	}
+	uint32_t next_id = read_word(data, len, 3);
+
+	// ---- Sweep 1: index instructions, types, constants, variables. ----
+	struct Instr {
+		uint32_t pos;
+		uint32_t wc;
+		uint16_t op;
+		int32_t block; // Block ordinal inside the function section, -1 outside.
+	};
+	LocalVector<Instr> instrs;
+	HashSet<uint32_t> handle_types;
+	HashSet<uint32_t> int_types32;
+	HashMap<uint32_t, uint32_t> int_const; // id -> 32-bit value
+	struct ArrayInfo {
+		uint32_t elem = 0;
+		uint32_t length_id = 0;
+		uint32_t instr_idx = 0;
+	};
+	HashMap<uint32_t, ArrayInfo> handle_arrays; // array type id -> info
+	struct PtrInfo {
+		uint32_t sc = 0;
+		uint32_t base = 0;
+		uint32_t instr_idx = 0;
+	};
+	HashMap<uint32_t, PtrInfo> ptr_types;
+	HashMap<uint64_t, uint32_t> ptr_lookup; // (sc<<32)|base -> ptr id
+	struct VarInfo {
+		uint32_t ptr_type = 0;
+		uint32_t sc = 0;
+		uint32_t instr_idx = 0;
+		uint32_t set = UINT32_MAX;
+		uint32_t binding = UINT32_MAX;
+		uint32_t binding_deco_idx = UINT32_MAX;
+	};
+	HashMap<uint32_t, VarInfo> vars;
+	HashMap<uint32_t, LocalVector<uint32_t>> id_meta_instrs; // target id -> OpName/OpDecorate instr indices
+	uint32_t first_function_instr = UINT32_MAX;
+	int32_t block_ord = -1;
+	{
+		uint32_t pos = 5;
+		while (pos < total_words) {
+			uint32_t w0 = read_word(data, len, pos);
+			uint32_t wc = w0 >> 16;
+			uint16_t op = (uint16_t)(w0 & 0xFFFF);
+			if (wc == 0 || pos + wc > total_words) {
+				return p_bytes; // Malformed.
+			}
+			if (op == FAN_OP_LABEL) {
+				block_ord++;
+			}
+			const uint32_t instr_idx = instrs.size();
+			instrs.push_back({ pos, wc, op, block_ord });
+			switch (op) {
+				case OP_TYPE_IMAGE:
+				case OP_TYPE_SAMPLER:
+				case OP_TYPE_SAMPLED_IMAGE: {
+					handle_types.insert(read_word(data, len, pos + 1));
+				} break;
+				case OP_TYPE_INT: {
+					if (wc >= 4 && read_word(data, len, pos + 2) == 32) {
+						int_types32.insert(read_word(data, len, pos + 1));
+					}
+				} break;
+				case OP_CONSTANT: {
+					if (wc >= 4 && int_types32.has(read_word(data, len, pos + 1))) {
+						int_const.insert(read_word(data, len, pos + 2), read_word(data, len, pos + 3));
+					}
+				} break;
+				case OP_TYPE_ARRAY: {
+					if (wc >= 4 && handle_types.has(read_word(data, len, pos + 2))) {
+						handle_arrays.insert(read_word(data, len, pos + 1), { read_word(data, len, pos + 2), read_word(data, len, pos + 3), instr_idx });
+					}
+				} break;
+				case OP_TYPE_POINTER: {
+					if (wc >= 4) {
+						uint32_t id = read_word(data, len, pos + 1);
+						uint32_t sc = read_word(data, len, pos + 2);
+						uint32_t base = read_word(data, len, pos + 3);
+						ptr_types.insert(id, { sc, base, instr_idx });
+						uint64_t key = ((uint64_t)sc << 32) | base;
+						if (!ptr_lookup.has(key)) {
+							ptr_lookup.insert(key, id);
+						}
+					}
+				} break;
+				case OP_VARIABLE: {
+					if (wc >= 4) {
+						vars.insert(read_word(data, len, pos + 2), { read_word(data, len, pos + 1), read_word(data, len, pos + 3), instr_idx, UINT32_MAX, UINT32_MAX, UINT32_MAX });
+					}
+				} break;
+				case OP_DECORATE: {
+					if (wc >= 3) {
+						id_meta_instrs[read_word(data, len, pos + 1)].push_back(instr_idx);
+					}
+				} break;
+				case FAN_OP_NAME: {
+					if (wc >= 2) {
+						id_meta_instrs[read_word(data, len, pos + 1)].push_back(instr_idx);
+					}
+				} break;
+				case OP_FUNCTION: {
+					if (first_function_instr == UINT32_MAX) {
+						first_function_instr = instr_idx;
+					}
+				} break;
+				default:
+					break;
+			}
+			pos += wc;
+		}
+	}
+	if (handle_arrays.is_empty() || first_function_instr == UINT32_MAX) {
+		return p_bytes;
+	}
+	// Fill set/binding decorations on variables.
+	for (uint32_t i = 0; i < instrs.size(); i++) {
+		const Instr &ins = instrs[i];
+		if (ins.op != OP_DECORATE || ins.wc < 4) {
+			continue;
+		}
+		uint32_t target = read_word(data, len, ins.pos + 1);
+		VarInfo *vi = vars.getptr(target);
+		if (!vi) {
+			continue;
+		}
+		uint32_t deco = read_word(data, len, ins.pos + 2);
+		if (deco == FAN_DECO_DESCRIPTOR_SET) {
+			vi->set = read_word(data, len, ins.pos + 3);
+		} else if (deco == FAN_DECO_BINDING) {
+			vi->binding = read_word(data, len, ins.pos + 3);
+			vi->binding_deco_idx = i;
+		}
+	}
+
+	// ---- Sweep 2: candidate variables and their access chains. ----
+	struct ChainInfo {
+		uint32_t instr_idx = 0;
+		uint32_t result = 0;
+		uint32_t result_type = 0;
+		uint32_t index_id = 0;
+	};
+	struct CandidateVar {
+		uint32_t var_id = 0;
+		const VarInfo *info = nullptr;
+		const ArrayInfo *arr = nullptr;
+		uint32_t length = 0;
+		LocalVector<ChainInfo> chains;
+		bool bailed = false;
+	};
+	LocalVector<CandidateVar> candidates;
+	HashMap<uint32_t, uint32_t> var_to_candidate; // var id -> candidates index
+	for (const KeyValue<uint32_t, VarInfo> &kv : vars) {
+		const VarInfo &vi = kv.value;
+		if (vi.sc != FAN_SC_UNIFORM_CONSTANT || vi.set == UINT32_MAX || vi.binding == UINT32_MAX || vi.binding_deco_idx == UINT32_MAX) {
+			continue;
+		}
+		const PtrInfo *pt = ptr_types.getptr(vi.ptr_type);
+		if (!pt) {
+			continue;
+		}
+		const ArrayInfo *arr = handle_arrays.getptr(pt->base);
+		if (!arr) {
+			continue;
+		}
+		const uint32_t *len_val = int_const.getptr(arr->length_id);
+		if (!len_val || *len_val == 0 || *len_val > p_binding_stride) {
+			continue;
+		}
+		if (p_binding_base + vi.binding * p_binding_stride + (*len_val - 1) >= p_max_binding) {
+			continue;
+		}
+		CandidateVar cand;
+		cand.var_id = kv.key;
+		cand.info = &kv.value;
+		cand.arr = arr;
+		cand.length = *len_val;
+		var_to_candidate.insert(kv.key, candidates.size());
+		candidates.push_back(cand);
+	}
+	if (candidates.is_empty()) {
+		return p_bytes;
+	}
+	for (uint32_t i = first_function_instr; i < instrs.size(); i++) {
+		const Instr &ins = instrs[i];
+		if ((ins.op != OP_ACCESS_CHAIN && ins.op != OP_IN_BOUNDS_ACCESS_CHAIN) || ins.wc < 5) {
+			continue;
+		}
+		uint32_t base = read_word(data, len, ins.pos + 3);
+		const uint32_t *cand_idx = var_to_candidate.getptr(base);
+		if (!cand_idx) {
+			continue;
+		}
+		if (ins.wc != 5) {
+			candidates[*cand_idx].bailed = true; // Multi-index chain: not a plain element access.
+			continue;
+		}
+		candidates[*cand_idx].chains.push_back({ i, read_word(data, len, ins.pos + 2), read_word(data, len, ins.pos + 1), read_word(data, len, ins.pos + 4) });
+	}
+
+	// Conservative use counting inside the function section: every word of
+	// every instruction except the leading opcode word and the instruction's
+	// own result slot. The slot heuristic also skips OpStore's value operand,
+	// which is safe for the pointer/handle ids audited here -- logical
+	// addressing forbids storing either. Literal collisions only ever inflate
+	// the count, which bails (safe direction). Debug/annotation instructions
+	// live before the function section, so decorations do not inflate counts.
+	HashMap<uint32_t, uint32_t> use_count;
+	auto count_uses_of = [&](uint32_t p_id) -> uint32_t {
+		const uint32_t *cached = use_count.getptr(p_id);
+		if (cached) {
+			return *cached;
+		}
+		uint32_t count = 0;
+		for (uint32_t i = first_function_instr; i < instrs.size(); i++) {
+			const Instr &ins = instrs[i];
+			for (uint32_t w = 1; w < ins.wc; w++) {
+				const bool is_result_slot = (w == 2 && ins.wc >= 3) || (w == 1 && ins.op == FAN_OP_LABEL);
+				if (!is_result_slot && read_word(data, len, ins.pos + w) == p_id) {
+					count++;
+				}
+			}
+		}
+		use_count.insert(p_id, count);
+		return count;
+	};
+	// Find the single consumer instruction of an id, scanning operand words
+	// only (word 3 onward covers every consumer shape we accept).
+	auto find_consumers = [&](uint32_t p_id, LocalVector<uint32_t> &r_instr_indices) {
+		for (uint32_t i = first_function_instr; i < instrs.size(); i++) {
+			const Instr &ins = instrs[i];
+			for (uint32_t w = 1; w < ins.wc; w++) {
+				if (read_word(data, len, ins.pos + w) == p_id) {
+					// Skip the instruction's own result slot.
+					bool is_result_slot = (w == 2 && ins.wc >= 3) || (w == 1 && ins.op == FAN_OP_LABEL);
+					if (!is_result_slot) {
+						r_instr_indices.push_back(i);
+					}
+					break;
+				}
+			}
+		}
+	};
+
+	// ---- Plan rewrites. ----
+	HashSet<uint32_t> skip_instr; // instr indices dropped from the output
+	HashMap<uint32_t, LocalVector<uint32_t>> emit_before; // instr idx -> words
+	HashMap<uint32_t, LocalVector<uint32_t>> emit_after; // instr idx -> words
+	HashMap<uint32_t, HashMap<uint32_t, uint32_t>> operand_patch; // instr idx -> word offset -> value
+	HashSet<uint32_t> removed_value_ids; // strip their names/decorations
+
+	struct DynamicSite {
+		uint32_t idx_id = 0;
+		uint32_t clone_instrs[3] = { UINT32_MAX, UINT32_MAX, UINT32_MAX }; // in order
+		uint32_t clone_count = 0;
+		uint32_t var_operand_instr = 0; // which clone consumes the element variable
+		uint32_t var_operand_word = 0; // ... at which word offset
+		uint32_t term_type = 0;
+		uint32_t term_result = 0;
+	};
+
+	uint32_t fanned_count = 0;
+	HashMap<uint32_t, uint32_t> synth_ptr_def; // synthesized elem ptr id -> emit anchor instr idx
+	for (CandidateVar &cand : candidates) {
+		if (cand.bailed) {
+			continue;
+		}
+		const uint32_t N = cand.length;
+		// Validate every chain first; any failure bails the whole variable.
+		LocalVector<DynamicSite> dynamic_sites;
+		LocalVector<uint32_t> dynamic_chain_instrs;
+		LocalVector<uint32_t> const_chain_instrs;
+		LocalVector<uint32_t> const_chain_elements;
+		LocalVector<uint32_t> const_chain_results;
+		// Exact operand patches for constant chains: (instr idx, word offset).
+		LocalVector<uint32_t> const_patch_instrs;
+		LocalVector<uint32_t> const_patch_words;
+		LocalVector<uint32_t> const_patch_elements;
+		bool ok = true;
+		for (const ChainInfo &chain : cand.chains) {
+			const uint32_t *const_val = int_const.getptr(chain.index_id);
+			if (const_val) {
+				// Substitute the element variable at every consumer. Only
+				// loads and helper-call arguments are recognized; anything
+				// else (or a literal collision inside an unexpected opcode)
+				// bails the variable to the truncation fallback.
+				const uint32_t element = MIN(*const_val, N - 1);
+				LocalVector<uint32_t> consumers;
+				find_consumers(chain.result, consumers);
+				if (consumers.is_empty() || count_uses_of(chain.result) != consumers.size()) {
+					ok = false;
+					break;
+				}
+				for (uint32_t ci : consumers) {
+					const Instr &consumer = instrs[ci];
+					if (consumer.op == OP_LOAD && read_word(data, len, consumer.pos + 3) == chain.result) {
+						const_patch_instrs.push_back(ci);
+						const_patch_words.push_back(3);
+						const_patch_elements.push_back(element);
+					} else if (consumer.op == FAN_OP_FUNCTION_CALL) {
+						uint32_t hits = 0;
+						for (uint32_t w = 4; w < consumer.wc; w++) {
+							if (read_word(data, len, consumer.pos + w) == chain.result) {
+								const_patch_instrs.push_back(ci);
+								const_patch_words.push_back(w);
+								const_patch_elements.push_back(element);
+								hits++;
+							}
+						}
+						if (hits == 0) {
+							ok = false;
+							break;
+						}
+					} else {
+						ok = false;
+						break;
+					}
+				}
+				if (!ok) {
+					break;
+				}
+				const_chain_instrs.push_back(chain.instr_idx);
+				const_chain_elements.push_back(element);
+				const_chain_results.push_back(chain.result);
+				continue;
+			}
+			// Dynamic index: consumers must match a supported shape, and
+			// every use of the chain result must be accounted for.
+			LocalVector<uint32_t> consumers;
+			find_consumers(chain.result, consumers);
+			if (consumers.is_empty() || count_uses_of(chain.result) != consumers.size()) {
+				ok = false;
+				break;
+			}
+			for (uint32_t ci : consumers) {
+				const Instr &consumer = instrs[ci];
+				DynamicSite site;
+				site.idx_id = chain.index_id;
+				if (consumer.op == FAN_OP_FUNCTION_CALL) {
+					// chain -> helper call. Clone the call per element.
+					uint32_t arg_word = 0;
+					uint32_t arg_hits = 0;
+					for (uint32_t w = 4; w < consumer.wc; w++) {
+						if (read_word(data, len, consumer.pos + w) == chain.result) {
+							arg_word = w;
+							arg_hits++;
+						}
+					}
+					uint32_t result_type = read_word(data, len, consumer.pos + 1);
+					if (arg_hits != 1 || consumer.block != instrs[chain.instr_idx].block || count_uses_of(chain.result) != consumers.size()) {
+						ok = false;
+						break;
+					}
+					site.clone_instrs[0] = ci;
+					site.clone_count = 1;
+					site.var_operand_instr = 0;
+					site.var_operand_word = arg_word;
+					site.term_type = result_type;
+					site.term_result = read_word(data, len, consumer.pos + 2);
+					dynamic_sites.push_back(site);
+				} else if (consumer.op == OP_LOAD) {
+					uint32_t load_result = read_word(data, len, consumer.pos + 2);
+					LocalVector<uint32_t> load_consumers;
+					find_consumers(load_result, load_consumers);
+					if (load_consumers.size() != 1 || count_uses_of(load_result) != 1) {
+						ok = false;
+						break;
+					}
+					const Instr &lc = instrs[load_consumers[0]];
+					site.clone_instrs[0] = ci;
+					site.var_operand_instr = 0;
+					site.var_operand_word = 3;
+					if (fan_is_value_image_op(lc.op)) {
+						site.clone_instrs[1] = load_consumers[0];
+						site.clone_count = 2;
+						site.term_type = read_word(data, len, lc.pos + 1);
+						site.term_result = read_word(data, len, lc.pos + 2);
+					} else if (lc.op == FAN_OP_SAMPLED_IMAGE) {
+						uint32_t si_result = read_word(data, len, lc.pos + 2);
+						LocalVector<uint32_t> si_consumers;
+						find_consumers(si_result, si_consumers);
+						if (si_consumers.size() != 1 || count_uses_of(si_result) != 1 || !fan_is_value_image_op(instrs[si_consumers[0]].op)) {
+							ok = false;
+							break;
+						}
+						const Instr &term = instrs[si_consumers[0]];
+						site.clone_instrs[1] = load_consumers[0];
+						site.clone_instrs[2] = si_consumers[0];
+						site.clone_count = 3;
+						site.term_type = read_word(data, len, term.pos + 1);
+						site.term_result = read_word(data, len, term.pos + 2);
+						if (term.block != consumer.block) {
+							ok = false;
+							break;
+						}
+					} else {
+						ok = false;
+						break;
+					}
+					// All pieces must share a block for the split to preserve dominance.
+					if (instrs[site.clone_instrs[site.clone_count - 1]].block != instrs[chain.instr_idx].block || consumer.block != instrs[chain.instr_idx].block) {
+						ok = false;
+						break;
+					}
+					dynamic_sites.push_back(site);
+				} else {
+					ok = false;
+					break;
+				}
+			}
+			if (!ok) {
+				break;
+			}
+			dynamic_chain_instrs.push_back(chain.instr_idx);
+		}
+		if (!ok || (dynamic_sites.is_empty() && const_chain_instrs.is_empty())) {
+			continue; // Leave for the truncation fallback.
+		}
+
+		// Element variables. Constant-only arrays materialize just the
+		// referenced elements; any dynamic access needs all of them.
+		LocalVector<uint32_t> element_vars;
+		element_vars.resize(N);
+		LocalVector<bool> element_used;
+		element_used.resize(N);
+		for (uint32_t i = 0; i < N; i++) {
+			element_vars[i] = 0;
+			element_used[i] = !dynamic_sites.is_empty();
+		}
+		for (uint32_t k : const_chain_elements) {
+			element_used[k] = true;
+		}
+		// Pointer type to the element under UniformConstant. An existing
+		// pointer type may be defined later in the global section than the
+		// array variable; the new variables must then be emitted after the
+		// pointer type's definition, not after the variable they replace.
+		uint32_t elem_ptr = 0;
+		uint32_t elem_ptr_def_idx = 0;
+		{
+			uint64_t key = ((uint64_t)FAN_SC_UNIFORM_CONSTANT << 32) | cand.arr->elem;
+			const uint32_t *existing = ptr_lookup.getptr(key);
+			if (existing) {
+				elem_ptr = *existing;
+				const PtrInfo *pi = ptr_types.getptr(elem_ptr);
+				if (pi) {
+					elem_ptr_def_idx = pi->instr_idx;
+				} else {
+					const uint32_t *synth = synth_ptr_def.getptr(elem_ptr);
+					elem_ptr_def_idx = synth ? *synth : 0;
+				}
+			} else {
+				elem_ptr = next_id++;
+				elem_ptr_def_idx = ptr_types[cand.info->ptr_type].instr_idx;
+				ptr_lookup.insert(key, elem_ptr);
+				synth_ptr_def.insert(elem_ptr, elem_ptr_def_idx);
+				LocalVector<uint32_t> &words = emit_after[elem_ptr_def_idx];
+				words.push_back((4u << 16) | OP_TYPE_POINTER);
+				words.push_back(elem_ptr);
+				words.push_back(FAN_SC_UNIFORM_CONSTANT);
+				words.push_back(cand.arr->elem);
+			}
+		}
+		{
+			LocalVector<uint32_t> &var_words = emit_after[MAX(cand.info->instr_idx, elem_ptr_def_idx)];
+			LocalVector<uint32_t> &deco_words = emit_after[cand.info->binding_deco_idx];
+			for (uint32_t i = 0; i < N; i++) {
+				if (!element_used[i]) {
+					continue;
+				}
+				element_vars[i] = next_id++;
+				var_words.push_back((4u << 16) | OP_VARIABLE);
+				var_words.push_back(elem_ptr);
+				var_words.push_back(element_vars[i]);
+				var_words.push_back(FAN_SC_UNIFORM_CONSTANT);
+				deco_words.push_back((4u << 16) | OP_DECORATE);
+				deco_words.push_back(element_vars[i]);
+				deco_words.push_back(FAN_DECO_DESCRIPTOR_SET);
+				deco_words.push_back(cand.info->set);
+				deco_words.push_back((4u << 16) | OP_DECORATE);
+				deco_words.push_back(element_vars[i]);
+				deco_words.push_back(FAN_DECO_BINDING);
+				deco_words.push_back(p_binding_base + cand.info->binding * p_binding_stride + i);
+			}
+		}
+		// Constant chains: drop the chain, point each consumer's operand at
+		// the element variable directly.
+		for (uint32_t c = 0; c < const_chain_instrs.size(); c++) {
+			skip_instr.insert(const_chain_instrs[c]);
+			removed_value_ids.insert(const_chain_results[c]);
+		}
+		for (uint32_t p = 0; p < const_patch_instrs.size(); p++) {
+			operand_patch[const_patch_instrs[p]].insert(const_patch_words[p], element_vars[const_patch_elements[p]]);
+		}
+		// Dynamic chains and their switch constructs.
+		for (uint32_t ci : dynamic_chain_instrs) {
+			skip_instr.insert(ci);
+		}
+		for (const ChainInfo &chain : cand.chains) {
+			if (int_const.has(chain.index_id)) {
+				continue;
+			}
+			removed_value_ids.insert(chain.result);
+		}
+		for (const DynamicSite &site : dynamic_sites) {
+			const uint32_t term_instr = site.clone_instrs[site.clone_count - 1];
+			for (uint32_t c = 0; c < site.clone_count; c++) {
+				skip_instr.insert(site.clone_instrs[c]);
+				uint32_t result = read_word(data, len, instrs[site.clone_instrs[c]].pos + 2);
+				if (result != site.term_result) {
+					removed_value_ids.insert(result);
+				}
+			}
+			LocalVector<uint32_t> &out = emit_before[term_instr];
+			const uint32_t merge_label = next_id++;
+			const uint32_t default_label = next_id++;
+			LocalVector<uint32_t> case_labels;
+			LocalVector<uint32_t> case_values; // Phi operand per case
+			case_labels.resize(N);
+			for (uint32_t i = 0; i < N; i++) {
+				case_labels[i] = next_id++;
+			}
+			out.push_back((3u << 16) | FAN_OP_SELECTION_MERGE);
+			out.push_back(merge_label);
+			out.push_back(0); // No selection control.
+			out.push_back(((3u + 2u * N) << 16) | FAN_OP_SWITCH);
+			out.push_back(site.idx_id);
+			out.push_back(default_label);
+			for (uint32_t i = 0; i < N; i++) {
+				out.push_back(i);
+				out.push_back(case_labels[i]);
+			}
+			auto emit_case = [&](uint32_t p_label, uint32_t p_element, uint32_t &r_value) {
+				out.push_back((2u << 16) | FAN_OP_LABEL);
+				out.push_back(p_label);
+				uint32_t prev_result = 0;
+				uint32_t new_result = 0;
+				for (uint32_t c = 0; c < site.clone_count; c++) {
+					const Instr &src = instrs[site.clone_instrs[c]];
+					uint32_t old_result = read_word(data, len, src.pos + 2);
+					new_result = next_id++;
+					for (uint32_t w = 0; w < src.wc; w++) {
+						uint32_t word = read_word(data, len, src.pos + w);
+						if (w == 2) {
+							word = new_result;
+						} else if (w >= 3) {
+							if (c == site.var_operand_instr && w == site.var_operand_word) {
+								word = element_vars[p_element];
+							} else if (c > 0 && word == prev_result) {
+								word = r_value; // Reuse the previous clone's result id.
+							}
+						}
+						out.push_back(word);
+					}
+					prev_result = old_result;
+					r_value = new_result;
+				}
+				out.push_back((2u << 16) | FAN_OP_BRANCH);
+				out.push_back(merge_label);
+			};
+			for (uint32_t i = 0; i < N; i++) {
+				uint32_t value = 0;
+				emit_case(case_labels[i], i, value);
+				case_values.push_back(value);
+			}
+			uint32_t default_value = 0;
+			emit_case(default_label, 0, default_value);
+			out.push_back((2u << 16) | FAN_OP_LABEL);
+			out.push_back(merge_label);
+			out.push_back(((3u + 2u * (N + 1)) << 16) | FAN_OP_PHI);
+			out.push_back(site.term_type);
+			out.push_back(site.term_result); // Downstream uses keep working untouched.
+			for (uint32_t i = 0; i < N; i++) {
+				out.push_back(case_values[i]);
+				out.push_back(case_labels[i]);
+			}
+			out.push_back(default_value);
+			out.push_back(default_label);
+		}
+		// Remove the original variable and its metadata.
+		skip_instr.insert(cand.info->instr_idx);
+		removed_value_ids.insert(cand.var_id);
+		fanned_count++;
+	}
+	if (fanned_count == 0) {
+		return p_bytes;
+	}
+	// Metadata cleanup for every removed id.
+	for (const uint32_t removed : removed_value_ids) {
+		const LocalVector<uint32_t> *meta = id_meta_instrs.getptr(removed);
+		if (meta) {
+			for (uint32_t idx : *meta) {
+				skip_instr.insert(idx);
+			}
+		}
+	}
+	// Type GC: remove array types (and their pointer types) once no variable
+	// uses them anymore -- Tint rejects even an unused handle-array type.
+	for (const KeyValue<uint32_t, ArrayInfo> &arr : handle_arrays) {
+		bool still_used = false;
+		for (const KeyValue<uint32_t, VarInfo> &kv : vars) {
+			if (removed_value_ids.has(kv.key)) {
+				continue;
+			}
+			const PtrInfo *pt = ptr_types.getptr(kv.value.ptr_type);
+			if (pt && pt->base == arr.key) {
+				still_used = true;
+				break;
+			}
+		}
+		if (still_used) {
+			continue;
+		}
+		skip_instr.insert(arr.value.instr_idx);
+		const LocalVector<uint32_t> *meta = id_meta_instrs.getptr(arr.key);
+		if (meta) {
+			for (uint32_t idx : *meta) {
+				skip_instr.insert(idx);
+			}
+		}
+		for (const KeyValue<uint32_t, PtrInfo> &pt : ptr_types) {
+			if (pt.value.base == arr.key) {
+				skip_instr.insert(pt.value.instr_idx);
+			}
+		}
+	}
+
+	// ---- Rebuild. ----
+	Vector<uint8_t> out;
+	out.resize(0);
+	for (uint32_t w = 0; w < 5; w++) {
+		push_word(out, w == 3 ? next_id : read_word(data, len, w));
+	}
+	for (uint32_t i = 0; i < instrs.size(); i++) {
+		const Instr &ins = instrs[i];
+		const LocalVector<uint32_t> *before = emit_before.getptr(i);
+		if (before) {
+			for (uint32_t word : *before) {
+				push_word(out, word);
+			}
+		}
+		if (!skip_instr.has(i)) {
+			const HashMap<uint32_t, uint32_t> *patches = operand_patch.getptr(i);
+			for (uint32_t w = 0; w < ins.wc; w++) {
+				uint32_t word = read_word(data, len, ins.pos + w);
+				if (patches) {
+					const uint32_t *p = patches->getptr(w);
+					if (p) {
+						word = *p;
+					}
+				}
+				push_word(out, word);
+			}
+		}
+		const LocalVector<uint32_t> *after = emit_after.getptr(i);
+		if (after) {
+			for (uint32_t word : *after) {
+				push_word(out, word);
+			}
+		}
+	}
 	return out;
 }
 
