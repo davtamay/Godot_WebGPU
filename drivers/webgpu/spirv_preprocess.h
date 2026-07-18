@@ -60,6 +60,15 @@ Vector<uint8_t> lower_view_index_to_zero(const Vector<uint8_t> &p_bytes);
 // Rewrites pointer types, removes access chains, and updates loads.
 Vector<uint8_t> flatten_binding_arrays(const Vector<uint8_t> &p_bytes);
 
+// Fan arrays of handle types out into one standalone variable per element at
+// binding p_binding_base + original_binding * p_binding_stride + element,
+// matching the layout the WebGPU driver builds for arrayed uniforms.
+// Constant indices rewrite to the element variable directly; dynamic indices
+// lower to a structured OpSwitch cloning the consuming instructions per
+// element. Arrays whose uses do not match a supported shape are left intact
+// for the flatten_binding_arrays fallback.
+Vector<uint8_t> fan_out_binding_arrays(const Vector<uint8_t> &p_bytes, uint32_t p_binding_base, uint32_t p_binding_stride, uint32_t p_max_binding);
+
 // Convert OpSpecConstantOp expressions into regular instructions cloned into
 // each using function, keeping plain OpSpecConstant as live WGSL overrides.
 Vector<uint8_t> lower_spec_constant_ops_to_runtime(const Vector<uint8_t> &p_bytes);
