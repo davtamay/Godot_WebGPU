@@ -1120,11 +1120,14 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 	for (uint32_t i = 0; i < spirv_stages.size(); i++) {
 		Vector<uint8_t> spirv = spirv_stages[i].spirv_data();
 		ERR_FAIL_COND_V_MSG(!_transform_spirv(spirv), false, "Malformed SPIR-V module.");
-		// Passes adapted from dwalter/godotwebgpu (MIT): Tint rejects arrays
-		// of handle types, so collapse them to their first element (correct
-		// for variants that never index them; proper per-element fan-out is
-		// tracked separately), and mark never-written storage buffers
-		// read-only so Tint emits var<storage, read>.
+		// Tint rejects arrays of handle types. Fan them out into one binding
+		// per element at the layout the driver builds for arrayed uniforms
+		// (constant indices resolve directly; dynamic indices lower to a
+		// structured OpSwitch), then let the dwalter/godotwebgpu (MIT)
+		// truncation pass collapse anything the fan-out could not prove to
+		// its first element. The same pass family also marks never-written
+		// storage buffers read-only so Tint emits var<storage, read>.
+		spirv = spirv_preprocess::fan_out_binding_arrays(spirv, ARRAY_BINDING_BASE, ARRAY_BINDING_STRIDE, MAX_FANNED_BINDING);
 		spirv = spirv_preprocess::flatten_binding_arrays(spirv);
 		// Tint rejects the ViewIndex builtin (no WebGPU multiview): lower it
 		// to constant zero so every variant translates; view 0 is correct
