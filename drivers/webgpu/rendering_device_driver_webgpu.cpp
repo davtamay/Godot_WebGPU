@@ -1323,11 +1323,14 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer(CommandBufferID p_cmd_buff
 	}
 }
 
-static WGPUTexelCopyTextureInfo _texel_copy_texture_info(WGPUTexture p_texture, uint32_t p_mipmap, const Vector3i &p_offset) {
+static WGPUTexelCopyTextureInfo _texel_copy_texture_info(WGPUTexture p_texture, uint32_t p_mipmap, const Vector3i &p_offset, uint32_t p_layer) {
 	WGPUTexelCopyTextureInfo info = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
 	info.texture = p_texture;
 	info.mipLevel = p_mipmap;
-	info.origin = { (uint32_t)p_offset.x, (uint32_t)p_offset.y, (uint32_t)p_offset.z };
+	// WebGPU addresses array layers through origin.z (there is no separate
+	// subresource field); RD supplies layers via the subresource and z = 0
+	// for arrays, so the two never collide.
+	info.origin = { (uint32_t)p_offset.x, (uint32_t)p_offset.y, (uint32_t)p_offset.z + p_layer };
 	return info;
 }
 
@@ -1337,8 +1340,8 @@ void RenderingDeviceDriverWebGPU::command_copy_texture(CommandBufferID p_cmd_buf
 	ERR_FAIL_NULL(cb_info->encoder);
 	for (uint32_t i = 0; i < p_regions.size(); i++) {
 		const TextureCopyRegion &region = p_regions[i];
-		WGPUTexelCopyTextureInfo src = _texel_copy_texture_info(((TextureInfo *)p_src_texture.id)->texture, region.src_subresources.mipmap, region.src_offset);
-		WGPUTexelCopyTextureInfo dst = _texel_copy_texture_info(((TextureInfo *)p_dst_texture.id)->texture, region.dst_subresources.mipmap, region.dst_offset);
+		WGPUTexelCopyTextureInfo src = _texel_copy_texture_info(((TextureInfo *)p_src_texture.id)->texture, region.src_subresources.mipmap, region.src_offset, region.src_subresources.base_layer);
+		WGPUTexelCopyTextureInfo dst = _texel_copy_texture_info(((TextureInfo *)p_dst_texture.id)->texture, region.dst_subresources.mipmap, region.dst_offset, region.dst_subresources.base_layer);
 		WGPUExtent3D size = { (uint32_t)region.size.x, (uint32_t)region.size.y, (uint32_t)region.size.z };
 		wgpuCommandEncoderCopyTextureToTexture(cb_info->encoder, &src, &dst, &size);
 	}
@@ -1388,7 +1391,7 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 						}
 					}
 				}
-				WGPUTexelCopyTextureInfo dst_info = _texel_copy_texture_info(dst_expand->texture, region.texture_subresource.mipmap, region.texture_offset);
+				WGPUTexelCopyTextureInfo dst_info = _texel_copy_texture_info(dst_expand->texture, region.texture_subresource.mipmap, region.texture_offset, region.texture_subresource.layer);
 				WGPUTexelCopyBufferLayout layout = {};
 				layout.offset = 0;
 				layout.bytesPerRow = w * 4;
@@ -1427,7 +1430,7 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 		const uint32_t bytes_per_row = region.row_pitch != 0 ? (uint32_t)region.row_pitch : (uint32_t)region.texture_region_size.x * _data_format_texel_size(texture->format);
 		src.layout.bytesPerRow = bytes_per_row;
 		src.layout.rowsPerImage = region.texture_region_size.y;
-		WGPUTexelCopyTextureInfo dst = _texel_copy_texture_info(((TextureInfo *)p_dst_texture.id)->texture, region.texture_subresource.mipmap, region.texture_offset);
+		WGPUTexelCopyTextureInfo dst = _texel_copy_texture_info(((TextureInfo *)p_dst_texture.id)->texture, region.texture_subresource.mipmap, region.texture_offset, region.texture_subresource.layer);
 		WGPUExtent3D size = { (uint32_t)region.texture_region_size.x, (uint32_t)region.texture_region_size.y, (uint32_t)region.texture_region_size.z };
 		if (bytes_per_row % 256 != 0 && (region.texture_region_size.y > 1 || region.texture_region_size.z > 1)) {
 			// WebGPU requires bytesPerRow to be a multiple of 256 for
@@ -1464,7 +1467,7 @@ void RenderingDeviceDriverWebGPU::command_copy_texture_to_buffer(CommandBufferID
 	TextureInfo *texture = (TextureInfo *)p_src_texture.id;
 	for (uint32_t i = 0; i < p_regions.size(); i++) {
 		const BufferTextureCopyRegion &region = p_regions[i];
-		WGPUTexelCopyTextureInfo src = _texel_copy_texture_info(((TextureInfo *)p_src_texture.id)->texture, region.texture_subresource.mipmap, region.texture_offset);
+		WGPUTexelCopyTextureInfo src = _texel_copy_texture_info(((TextureInfo *)p_src_texture.id)->texture, region.texture_subresource.mipmap, region.texture_offset, region.texture_subresource.layer);
 		WGPUTexelCopyBufferInfo dst = WGPU_TEXEL_COPY_BUFFER_INFO_INIT;
 		dst.buffer = ((BufferInfo *)p_dst_buffer.id)->buffer;
 		dst.layout.offset = region.buffer_offset;
