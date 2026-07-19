@@ -514,7 +514,15 @@ void RendererSceneRenderRD::_render_buffers_post_process_and_tonemap(const Rende
 		buffers.half_texture[0] = rb->get_texture_slice(RB_SCOPE_BUFFERS, RB_TEX_BLUR_1, 0, 0);
 		buffers.half_texture[1] = rb->get_texture_slice(RB_SCOPE_BUFFERS, RB_TEX_BLUR_0, 0, 1);
 
-		if (can_use_storage) {
+		// The compute bokeh needs read-write storage on the color format,
+		// which some drivers (e.g. WebGPU) cannot provide; those use the
+		// raster path even when storage is otherwise available.
+		const bool use_compute_dof = can_use_storage && RD::get_singleton()->has_feature(RD::SUPPORTS_READ_WRITE_STORAGE_IMAGES_ANY_FORMAT);
+		if (!use_compute_dof) {
+			rb->allocate_weight_buffers();
+		}
+
+		if (use_compute_dof) {
 			for (uint32_t i = 0; i < rb->get_view_count(); i++) {
 				buffers.base_texture = use_upscaled_texture ? rb->get_upscaled_texture(i) : rb->get_internal_texture(i);
 				buffers.depth_texture = rb->get_depth_texture(i);
@@ -1867,7 +1875,7 @@ void RendererSceneRenderRD::init() {
 		raster_effects.set_flag(RendererRD::CopyEffects::RASTER_EFFECT_OCTMAP);
 	}
 
-	bokeh_dof = memnew(RendererRD::BokehDOF(!can_use_storage));
+	bokeh_dof = memnew(RendererRD::BokehDOF(!can_use_storage || !RD::get_singleton()->has_feature(RD::SUPPORTS_READ_WRITE_STORAGE_IMAGES_ANY_FORMAT)));
 	copy_effects = memnew(RendererRD::CopyEffects(raster_effects));
 	debug_effects = memnew(RendererRD::DebugEffects);
 	luminance = memnew(RendererRD::Luminance(!can_use_storage));
