@@ -85,6 +85,11 @@ class ClusterBuilderSharedDataRD {
 		};
 
 		RID shader_pipelines[PIPELINE_MAX];
+		// Set when the driver cannot run fragment shaders without attachments
+		// (SUPPORTS_FRAGMENT_SHADER_WITH_ONLY_SIDE_EFFECTS is false); the
+		// SHADER_USE_ATTACHMENT variant then renders into a dummy color
+		// attachment created by ClusterBuilderRD::setup().
+		bool use_attachment = false;
 	} cluster_render;
 
 	struct ClusterStore {
@@ -198,6 +203,7 @@ private:
 	Size2i cluster_screen_size;
 
 	RID framebuffer;
+	RID framebuffer_attachment; // Dummy color target when the driver needs attachments.
 	RID cluster_render_buffer; // Used for creating.
 	RID cluster_buffer; // Used for rendering.
 	RID element_buffer; // Used for storing, to hint element touches far plane or near plane.
