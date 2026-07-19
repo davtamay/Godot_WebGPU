@@ -1176,6 +1176,7 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 		// NonWritable on function-local variables is another 1.4-legal
 		// glslang hint that Tint's reader rejects.
 		spirv = spirv_preprocess::strip_nonwritable_on_function_vars(spirv);
+		spirv = spirv_preprocess::strip_volatile_decorations(spirv);
 		// The clustered renderer uses subgroup ops (as a wave-coherence
 		// optimization) and the HelperInvocation builtin unconditionally;
 		// Tint's reader supports neither. Lower both to exact degraded
