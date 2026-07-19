@@ -1001,7 +1001,11 @@ uint32_t RenderingShaderContainerWebGPU::_format_version() const {
 // boundaries.
 static bool _rename_reserved_words(String &r_text) {
 	bool changed = false;
-	for (const char *reserved : { "target", "unorm", "snorm", "filter", "type" }) {
+	// The list covers WGSL-reserved words that are legal GLSL identifiers
+	// (GLSL's own reserved words can never reach the WGSL text). None of
+	// them collide with WGSL builtin function names, so a blind whole-word
+	// rename is safe: declarations and uses move together.
+	for (const char *reserved : { "target", "unorm", "snorm", "filter", "type", "from", "get", "set", "pass", "self", "active", "common", "meta", "final", "new", "ref", "use", "of", "std", "with", "mod", "match", "move", "impl", "where" }) {
 		const String word = reserved;
 		int pos = 0;
 		while ((pos = r_text.find(word, pos)) != -1) {
@@ -1099,19 +1103,48 @@ static bool _unwrap_reader_atomic_taint(String &r_text) {
 	return changed;
 }
 
-bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p_shader) {
-	// Read-write storage images beyond 32-bit single-channel formats cannot
-	// exist in WebGPU; failing the bake here turns those variants into
-	// ordinary runtime cache misses (benign) instead of runtime shader
-	// failures.
-	for (const ReflectionBindingData &binding : reflection_binding_set_uniforms_data) {
-		if (binding.type != RDC::UNIFORM_TYPE_IMAGE || binding.writable == 0) {
-			continue;
+// WebGPU storage texture rules: the write access mode works for the full
+// storage format list, but read and read_write are restricted to 32-bit
+// single-channel formats. Tint emits whatever access the SPIR-V used and
+// Dawn only rejects it at pipeline creation (which poisons the frame), so
+// gate the generated WGSL here at bake time, where a failure is a benign
+// runtime cache miss instead.
+static bool _wgsl_storage_textures_supported(const String &p_text) {
+	static const char *supported_formats[] = { "rgba8unorm", "rgba8snorm", "rgba8uint", "rgba8sint", "rgba16uint", "rgba16sint", "rgba16float", "r32uint", "r32sint", "r32float", "rg32uint", "rg32sint", "rg32float", "rgba32uint", "rgba32sint", "rgba32float" };
+	int pos = 0;
+	while ((pos = p_text.find("texture_storage_", pos)) != -1) {
+		const int open = p_text.find("<", pos);
+		if (open == -1) {
+			return false;
 		}
-		const bool rw_ok = binding.texture_format == RDC::DATA_FORMAT_R32_SFLOAT || binding.texture_format == RDC::DATA_FORMAT_R32_UINT || binding.texture_format == RDC::DATA_FORMAT_R32_SINT;
-		ERR_FAIL_COND_V_MSG(!rw_ok, false, vformat("Variant uses read-write storage on format %d, which WebGPU does not support.", binding.texture_format));
+		const int close = p_text.find(">", open);
+		if (close == -1) {
+			return false;
+		}
+		const Vector<String> params = p_text.substr(open + 1, close - open - 1).split(",");
+		if (params.size() == 2) {
+			const String format = params[0].strip_edges();
+			const String access = params[1].strip_edges();
+			bool format_ok = false;
+			for (const char *supported : supported_formats) {
+				if (format == supported) {
+					format_ok = true;
+					break;
+				}
+			}
+			if (!format_ok) {
+				return false;
+			}
+			if (access != "write" && !format.begins_with("r32")) {
+				return false;
+			}
+		}
+		pos = close;
 	}
+	return true;
+}
 
+bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p_shader) {
 	ERR_FAIL_COND_V_MSG(tint_path.is_empty(), false,
 			"WebGPU shaders can only be compiled at export time with the Tint translator configured; runtime shader compilation is not supported on the web platform.");
 
@@ -1129,6 +1162,18 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 		// storage buffers read-only so Tint emits var<storage, read>.
 		spirv = spirv_preprocess::fan_out_binding_arrays(spirv, ARRAY_BINDING_BASE, ARRAY_BINDING_STRIDE, MAX_FANNED_BINDING);
 		spirv = spirv_preprocess::flatten_binding_arrays(spirv);
+		// OpCopyLogical is a SPIR-V 1.4-ism the 1.3 downgrade must also
+		// rewrite; the clustered scene shader's vertex stages emit it.
+		spirv = spirv_preprocess::rewrite_copy_logical(spirv);
+		// NonWritable on function-local variables is another 1.4-legal
+		// glslang hint that Tint's reader rejects.
+		spirv = spirv_preprocess::strip_nonwritable_on_function_vars(spirv);
+		// The clustered renderer uses subgroup ops (as a wave-coherence
+		// optimization) and the HelperInvocation builtin unconditionally;
+		// Tint's reader supports neither. Lower both to exact degraded
+		// semantics (wave-of-1, helper check off).
+		spirv = spirv_preprocess::lower_subgroup_ops_to_single_invocation(spirv);
+		spirv = spirv_preprocess::lower_helper_invocation_to_false(spirv);
 		// Tint rejects the ViewIndex builtin (no WebGPU multiview): lower it
 		// to constant zero so every variant translates; view 0 is correct
 		// for the single-view rendering this driver does.
@@ -1266,6 +1311,10 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 		{
 			String text;
 			text.append_utf8((const char *)wgsl.ptr(), wgsl.size());
+			if (!_wgsl_storage_textures_supported(text)) {
+				print_verbose(vformat("WebGPU bake: excluding shader '%s' stage #%d: storage texture format/access combination not supported by WebGPU.", String::utf8(shader_name.get_data()), i));
+				return false;
+			}
 			bool directives_changed = false;
 			// Tint stamps its output with a Chromium-internal extension that
 			// browsers only accept behind --enable-unsafe-webgpu; the
