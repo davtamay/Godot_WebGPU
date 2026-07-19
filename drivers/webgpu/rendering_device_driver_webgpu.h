@@ -96,9 +96,20 @@ private:
 		uint64_t allocation_size = 0;
 		bool owned = true; // False for textures wrapped from external handles.
 		SwizzleExpand swizzle_expand = SWIZZLE_EXPAND_NONE;
+		// Lazily-created DepthOnly-aspect view for sampling combined
+		// depth/stencil textures (the default view selects both aspects,
+		// which WebGPU rejects in sampled bindings).
+		WGPUTextureView depth_only_view = nullptr;
+		// Whether the sRGB sibling was declared in viewFormats at creation
+		// (storage textures skip it; sibling views then degrade to the
+		// texture's own format).
+		bool srgb_sibling_declared = false;
 	};
 
 	struct ShaderInfo {
+		// Shader class name, used as the Dawn object label so validation
+		// messages identify the offender.
+		CharString name;
 		LocalVector<WGPUShaderModule> modules;
 		LocalVector<ShaderStage> module_stages;
 		LocalVector<WGPUBindGroupLayout> bind_group_layouts;
@@ -135,6 +146,11 @@ private:
 		// Sampler bindings the WGSL declares as sampler_comparison; binding a
 		// comparison sampler anywhere else needs a plain substitute.
 		HashSet<uint64_t> comparison_declared_bindings;
+		// Storage image bindings absent from every stage's WGSL
+		// (dead-eliminated) whose reflected format WebGPU cannot use for
+		// storage: the layout uses a valid placeholder (r32float read) and
+		// bind groups substitute a driver-owned placeholder texture.
+		HashSet<uint64_t> dead_storage_bindings;
 	};
 
 	static const uint32_t MAX_BIND_GROUPS = 4;
@@ -245,6 +261,9 @@ private:
 	WGPUTexture placeholder_float_texture = nullptr;
 	WGPUTextureView placeholder_float_view = nullptr;
 	WGPUTextureView _get_placeholder_float_view();
+	WGPUTexture placeholder_storage_texture = nullptr;
+	WGPUTextureView placeholder_storage_view = nullptr;
+	WGPUTextureView _get_placeholder_storage_view();
 	WGPUBindGroup _uniform_set_build(VectorView<BoundUniform> p_uniforms, const ShaderInfo *p_shader_info, uint32_t p_set_index, UniformSetInfo *p_bookkeeping);
 	LocalVector<BufferInfo *> dynamic_buffers_all;
 	// Bumped whenever an external (XR layer) texture is imported; stamps
@@ -347,7 +366,7 @@ public:
 	virtual void command_clear_buffer(CommandBufferID p_cmd_buffer, BufferID p_buffer, uint64_t p_offset, uint64_t p_size) override;
 	virtual void command_copy_buffer(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, BufferID p_dst_buffer, VectorView<BufferCopyRegion> p_regions) override;
 	virtual void command_copy_texture(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<TextureCopyRegion> p_regions) override;
-	virtual void command_resolve_texture(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, uint32_t p_src_layer, uint32_t p_src_mipmap, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, uint32_t p_dst_layer, uint32_t p_dst_mipmap) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
+	virtual void command_resolve_texture(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, uint32_t p_src_layer, uint32_t p_src_mipmap, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, uint32_t p_dst_layer, uint32_t p_dst_mipmap) override;
 	virtual void command_clear_color_texture(CommandBufferID p_cmd_buffer, TextureID p_texture, TextureLayout p_texture_layout, const Color &p_color, const TextureSubresourceRange &p_subresources) override;
 	virtual void command_clear_depth_stencil_texture(CommandBufferID p_cmd_buffer, TextureID p_texture, TextureLayout p_texture_layout, float p_depth, uint8_t p_stencil, const TextureSubresourceRange &p_subresources) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual void command_copy_buffer_to_texture(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<BufferTextureCopyRegion> p_regions) override;
@@ -426,14 +445,12 @@ public:
 	virtual uint64_t get_lazily_memory_used() override { return 0; }
 	virtual uint64_t limit_get(Limit p_limit) override;
 	virtual bool has_feature(Features p_feature) override {
-		switch (p_feature) {
-			// Half float needs the shader-f16 device feature (tint emits
-			// enable f16), which the loader does not request yet.
-			case SUPPORTS_FRAGMENT_SHADER_WITH_ONLY_SIDE_EFFECTS:
-				return true;
-			default:
-				return false;
-		}
+		// Half float needs the shader-f16 device feature (tint emits
+		// enable f16), which the loader does not request yet.
+		// SUPPORTS_FRAGMENT_SHADER_WITH_ONLY_SIDE_EFFECTS must stay false:
+		// WebGPU render pipelines require at least one attachment, so the
+		// cluster builder has to take its USE_ATTACHMENT variant.
+		return false;
 	}
 	virtual const MultiviewCapabilities &get_multiview_capabilities() override { return multiview_capabilities; }
 	virtual const FragmentShadingRateCapabilities &get_fragment_shading_rate_capabilities() override { return fragment_shading_rate_capabilities; }
