@@ -559,7 +559,12 @@ static WGPUTextureFormat _data_format_to_wgpu(RenderingDeviceCommons::DataFormat
 		case RenderingDeviceCommons::DATA_FORMAT_R8G8_SNORM:
 			return WGPUTextureFormat_RG8Snorm;
 		case RenderingDeviceCommons::DATA_FORMAT_R8G8_UINT:
-			return WGPUTextureFormat_RG8Uint;
+			// Substituted globally (not just for storage usage): the clustered
+			// renderer's voxel GI buffer is both a prepass color attachment and
+			// a storage image (the MSAA GI resolve writes it), and rg8ui is not
+			// a WGSL storage format. rg32uint keeps the two-component uint
+			// fragment output and u32 sampling compatible everywhere.
+			return WGPUTextureFormat_RG32Uint;
 		case RenderingDeviceCommons::DATA_FORMAT_R8G8_SINT:
 			return WGPUTextureFormat_RG8Sint;
 		case RenderingDeviceCommons::DATA_FORMAT_R8G8B8A8_UNORM:
@@ -981,6 +986,12 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 		}
 	}
 	WGPUTextureFormat wgpu_format = swizzle_expand != TextureInfo::SWIZZLE_EXPAND_NONE ? WGPUTextureFormat_RGBA8Unorm : _data_format_to_wgpu(p_format.format);
+	if (p_format.samples != TEXTURE_SAMPLES_1 && p_format.format == DATA_FORMAT_R8G8_UINT) {
+		// The rg8ui->rg32uint storage substitution only applies to
+		// single-sample textures (rg32uint cannot be multisampled; the MSAA
+		// voxel GI buffer is consumed by a compute resolve sampling u32).
+		wgpu_format = WGPUTextureFormat_RG8Uint;
+	}
 	ERR_FAIL_COND_V_MSG(wgpu_format == WGPUTextureFormat_Undefined, TextureID(), vformat("Unsupported texture format %d on the WebGPU driver.", p_format.format));
 	ERR_FAIL_COND_V_MSG(p_format.samples != TEXTURE_SAMPLES_1 && p_format.samples != TEXTURE_SAMPLES_4, TextureID(), "WebGPU only supports 1 or 4 samples per texture.");
 
@@ -2690,6 +2701,13 @@ RenderingDeviceDriver::RenderPassID RenderingDeviceDriverWebGPU::render_pass_cre
 		const Attachment &attachment = p_attachments[i];
 		RenderPassAttachment pass_attachment;
 		pass_attachment.format = _data_format_to_wgpu(attachment.format);
+		if (attachment.samples != TEXTURE_SAMPLES_1 && attachment.format == DATA_FORMAT_R8G8_UINT) {
+			// The rg8ui->rg32uint storage substitution only applies to
+			// single-sample textures (rg32uint cannot be multisampled; the
+			// MSAA twin is resolved by a compute shader that samples it as
+			// u32, which is format-agnostic).
+			pass_attachment.format = WGPUTextureFormat_RG8Uint;
+		}
 		pass_attachment.is_depth_stencil = _is_depth_stencil_format(attachment.format);
 		pass_attachment.load_op = attachment.load_op == ATTACHMENT_LOAD_OP_LOAD ? WGPULoadOp_Load : WGPULoadOp_Clear;
 		pass_attachment.store_op = attachment.store_op == ATTACHMENT_STORE_OP_STORE ? WGPUStoreOp_Store : WGPUStoreOp_Discard;
