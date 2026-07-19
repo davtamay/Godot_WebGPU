@@ -5160,21 +5160,26 @@ RenderForwardClustered::RenderForwardClustered() {
 	}
 
 	{
+		// Some drivers (e.g. WebGPU) have no r8unorm storage support; fall
+		// back to rgba8 there (the shader only ever writes/reads red).
+		const bool use_rgba8 = !RD::get_singleton()->texture_is_format_supported_for_usage(RD::DATA_FORMAT_R8_UNORM, RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT);
+
 		Vector<String> modes;
 		modes.push_back("\n");
+		modes.push_back("\n#define USE_RGBA8_FORMAT\n");
 		best_fit_normal.shader.initialize(modes);
 		best_fit_normal.shader_version = best_fit_normal.shader.version_create();
-		best_fit_normal.pipeline = RD::get_singleton()->compute_pipeline_create(best_fit_normal.shader.version_get_shader(best_fit_normal.shader_version, 0));
+		best_fit_normal.pipeline = RD::get_singleton()->compute_pipeline_create(best_fit_normal.shader.version_get_shader(best_fit_normal.shader_version, use_rgba8 ? 1 : 0));
 
 		RD::TextureFormat tformat;
-		tformat.format = RD::DATA_FORMAT_R8_UNORM;
+		tformat.format = use_rgba8 ? RD::DATA_FORMAT_R8G8B8A8_UNORM : RD::DATA_FORMAT_R8_UNORM;
 		tformat.width = 1024;
 		tformat.height = 1024;
 		tformat.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT;
 		tformat.texture_type = RD::TEXTURE_TYPE_2D;
 		best_fit_normal.texture = RD::get_singleton()->texture_create(tformat, RD::TextureView());
 
-		RID shader = best_fit_normal.shader.version_get_shader(best_fit_normal.shader_version, 0);
+		RID shader = best_fit_normal.shader.version_get_shader(best_fit_normal.shader_version, use_rgba8 ? 1 : 0);
 		ERR_FAIL_COND(shader.is_null());
 
 		Vector<RD::Uniform> uniforms;
@@ -5197,21 +5202,26 @@ RenderForwardClustered::RenderForwardClustered() {
 
 	/* DFG LUT */
 	{
+		// Some drivers (e.g. WebGPU) have no rg16float storage support; fall
+		// back to rgba16f there (only red/green are ever sampled).
+		const bool use_rgba16 = !RD::get_singleton()->texture_is_format_supported_for_usage(RD::DATA_FORMAT_R16G16_SFLOAT, RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT);
+
 		Vector<String> modes;
 		modes.push_back("\n");
+		modes.push_back("\n#define USE_RGBA16_FORMAT\n");
 		dfg_lut.shader.initialize(modes);
 		dfg_lut.shader_version = dfg_lut.shader.version_create();
-		dfg_lut.pipeline = RD::get_singleton()->compute_pipeline_create(dfg_lut.shader.version_get_shader(dfg_lut.shader_version, 0));
+		dfg_lut.pipeline = RD::get_singleton()->compute_pipeline_create(dfg_lut.shader.version_get_shader(dfg_lut.shader_version, use_rgba16 ? 1 : 0));
 
 		RD::TextureFormat tformat;
-		tformat.format = RD::DATA_FORMAT_R16G16_SFLOAT;
+		tformat.format = use_rgba16 ? RD::DATA_FORMAT_R16G16B16A16_SFLOAT : RD::DATA_FORMAT_R16G16_SFLOAT;
 		tformat.width = 128;
 		tformat.height = 128;
 		tformat.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT;
 		tformat.texture_type = RD::TEXTURE_TYPE_2D;
 		dfg_lut.texture = RD::get_singleton()->texture_create(tformat, RD::TextureView());
 
-		RID shader = dfg_lut.shader.version_get_shader(dfg_lut.shader_version, 0);
+		RID shader = dfg_lut.shader.version_get_shader(dfg_lut.shader_version, use_rgba16 ? 1 : 0);
 		ERR_FAIL_COND(shader.is_null());
 
 		Vector<RD::Uniform> uniforms;
