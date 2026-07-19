@@ -91,6 +91,7 @@
 | 73 | webgpu: Bake the fog-volume fallback and widen rg16float | Upstream's volumetric fog already ships a buffer-atomics fallback for drivers without image atomics (SUPPORTS_IMAGE_ATOMIC_32_BIT, the MoltenVK capability this driver also reports false) - its variants just could not bake: the fog maps' Volatile and Coherent member decorations have no WGSL equivalent and Tint rejects them; the atomic operations provide the ordering the shader relies on, so a pass strips the hints. rg16float also substitutes globally rather than only for storage usage: the motion-vector buffers pair an rg16f MSAA attachment with a storage-substituted resolve target and resolve pairs must match formats (fragment outputs and sampling are format-agnostic in WGSL). FogVolume nodes and TAA both verified on the Forward+ showcase; mobile regression zero errors | 0 | not yet |
 | 74 | webgpu: Widen the rg8ui voxel GI buffer for storage use | The clustered renderer's per-pixel voxel GI index buffer is rg8ui, created with storage usage whenever storage is available (the MSAA GI resolve writes it as a storage image), and rg8ui is not a WGSL storage format. rg8uint widens globally to rg32uint (attachment, storage, and sampled views must agree; the two-component uint fragment output and u32 sampling are unaffected), with single-sample scope enforced at texture and render-pass creation since rg32uint cannot be multisampled - the MSAA twin stays rg8uint and is consumed by the compute resolve, which samples it format-agnostically. The bake-side SPIR-V substitution gains the matching rg8ui->rg32ui row, un-excluding the voxel GI resolve variant. First half of the static-VoxelGI bring-up | 0 | not yet |
 | 75 | webgpu: Bind depth textures in textureLoad-only float slots | The GI pass reads the raw scene depth with texelFetch through a plain texture2D, which Tint emits as textureLoad on texture_2d<f32> - no texture_depth_ declaration, so the driver's depth-in-float-slot rule bound the zero placeholder and every reconstructed vertex sat on the far plane (probe bounds-reject, black ambient buffer). Texture slots whose WGSL identifier only ever appears in its declaration or directly inside textureLoad are now typed UnfilterableFloat in the layout - legal for every float format and additionally for depth-aspect views - and the bind path then uses the real depth-only view instead of the placeholder. The load-only test is occurrence-based rather than call-site-based because Tint routes textures through helper-function parameters (the cone-trace helpers), which Dawn's static texture/sampler pairing validation follows. Completes the static-VoxelGI bring-up: the Cornell probe scene matches the Vulkan ground truth with MSAA 4x, strict probe pixel-exact, mobile and Forward+ Cornell regressions clean | 0 | not yet |
+| 76 | docs: Record static VoxelGI and the paused GI roadmap | Coverage section refreshed to patch 75: Forward+ now lists SSAO/SSIL/SSR/TAA/DOF/FogVolumes and static VoxelGI as running; the exclusion census updated to the 45 blocked-class variants; the realtime-GI item rewritten with the corrected findings (the image-atomics claim was overbroad - upstream ships an unwired NO_IMAGE_ATOMICS fallback, and the GI sampling side already bakes clean) and the deliberate pause: the remaining rungs (dynamic-object VoxelGI, SDFGI voxelization wiring, SDFGI integrate buffer-ization) each require edits to actively-maintained upstream renderer files, mapped here with per-rung scope and risk for whenever work resumes | 0 | not yet |
 
 (Rows 53-61 pending backfill. Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
 experimental WebXR-WebGPU since April 2026. NOTE: upstream
@@ -98,7 +99,7 @@ already compiles RenderingDevice + renderer_rd unconditionally on all
 platforms including web; the per-platform RD_ENABLED define is the only
 gate, which is why patch 01 is a detect.py-only change.)
 
-## Renderer coverage and future work (as of patch 69)
+## Renderer coverage and future work (as of patch 75)
 
 ### What runs today
 
@@ -109,22 +110,30 @@ browsers with no flags, from the same AOT-baked WGSL pipeline:
   GPU particles, glow, MSAA 4x, baked lightmaps with dynamic-index
   binding arrays, light probes, reflection probes (UPDATE_ONCE), mixed
   lighting, WebXR (per-view path; Quest and Galaxy XR verified).
-- **Forward+ (clustered)** (new in patches 62-69): clustered
+- **Forward+ (clustered)** (patches 62-75): clustered
   omni/spot/decal/probe lighting, cascaded directional shadows, MSAA
-  command resolve, environmental volumetric fog, reflection probes in
-  both UPDATE_ONCE and UPDATE_ALWAYS (realtime) modes, baked lightmaps,
-  the DFG/best-fit-normal PBR pipeline. Verified against the Mobile
-  render of the same scene.
+  command resolve, environmental volumetric fog, FogVolume nodes,
+  reflection probes in both UPDATE_ONCE and UPDATE_ALWAYS (realtime)
+  modes, baked lightmaps, the DFG/best-fit-normal PBR pipeline, SSAO,
+  SSIL, SSR, TAA, depth of field (raster path), and **static VoxelGI**
+  (editor-baked voxel cone tracing with runtime light injection: moving
+  lights drag their bounced light live, emissive surfaces illuminate
+  with no light nodes; verified against the Vulkan render of the same
+  scene, with and without MSAA 4x). Verified against the Mobile render
+  of the same scene.
 
 Firefox (wgpu/naga) validates the same baked WGSL for boot, 2D, 3D,
 and compute.
 
-### Known exclusions (bake census: 7 variants)
+### Known exclusions (bake census: 45 variants)
 
-VoxelGI debug visualization (3), volumetric fog *volume injection* (3),
-FSR2 (1). Environmental fog is fully supported; only FogVolume nodes
-are affected. Plus 16 clustered scene variants for SDF voxelization and
-the SSAO/SSIL/SDFGI compute families (see below).
+All remaining exclusions are the image-atomics / int16 / read-write
+storage classes: VoxelGI dynamic-object relighting (3) and its debug
+visualization (3), SDFGI voxelization (clustered scene variants) and
+the probe-integration accumulator (1), FSR2 (int16), and legacy
+multiview/variant-0 holes. Every excluded shader fails cleanly to a
+null variant the engine tolerates; nothing in the supported feature set
+depends on them.
 
 ### Future opportunities, in rough order of value
 
@@ -133,18 +142,45 @@ the SSAO/SSIL/SDFGI compute families (see below).
    (octmap raster redirect) are capability fixes any limited driver
    needs, written without WebGPU references. Each merged PR leaves this
    stack and takes its rebase surface with it.
-2. **SSAO / SSIL / screen-space effects.** Blocked only on r8/rg8/r16f
-   storage image formats - the same probe-gated fallback pattern patch
-   67 established. Unlocks dynamic ambient occlusion and screen-space
-   indirect light (the nearest thing to realtime GI available without
-   the atomics work below).
-3. **Realtime GI (SDFGI / VoxelGI) and FogVolume nodes.** All blocked
-   on *image atomics*, which WebGPU 1.0 does not have (buffer atomics
-   exist; texture atomics are a proposal). Two paths: port the
-   voxelization/injection passes to storage-buffer atomics (real engine
-   work, upstream-valuable - it would also serve mobile hardware
-   without image atomics), or wait for the texture-atomics extension to
-   ship in browsers. Until then GI = lightmaps + probes.
+2. **Upstream the DOF capability (patch 72).** The
+   SUPPORTS_READ_WRITE_STORAGE_IMAGES_ANY_FORMAT capability plus the
+   completed raster bokeh path is the strongest standalone PR in the
+   stack: a real capability, a completed fallback, no WebGPU
+   references. (SSAO/SSIL/SSR/CanvasSdf shipped in patch 71 via the
+   storage-format substitution; no engine changes were needed.)
+3. **Remaining realtime GI (paused here by design).** Static VoxelGI
+   works today (patches 74-75); the rest was investigated and scoped,
+   then deliberately paused because every remaining piece must edit
+   actively-maintained upstream renderer files - unlike patches 74-75,
+   which touched only this driver. The map, in ascending risk:
+   - *Dynamic-object VoxelGI* (3 variants): moving objects plotted into
+     the voxel field. Blocked on rgba16f/rgba8 read-write storage
+     images (WGSL allows read-write on r32 formats only); port = split
+     each into a read+write pair or an r32ui packing under a
+     driver-gated variant. Touches voxel_gi.glsl and the gi.cpp uniform
+     sets. Moderate, independently shippable.
+   - *SDFGI voxelization*: upstream already ships a NO_IMAGE_ATOMICS
+     GLSL fallback in the clustered scene shader (plain load-or-store
+     on r32ui, WebGPU-legal) but only the fog system ever defines the
+     macro - the scene shader's fallback is dead code. Wiring it is a
+     variant-group addition in scene_shader_forward_clustered.cpp
+     mirroring fog.cpp's use of SUPPORTS_IMAGE_ATOMIC_32_BIT. Low risk,
+     and the strongest upstream-PR framing of anything here
+     ("complete coverage of your own capability fallback").
+   - *SDFGI probe integration*: the genuinely structural piece. The
+     probe history/average accumulators are rgba16i/rgba32i read-write
+     images (load-modify-store on the same texture); the port converts
+     them to storage buffers under the same capability, with
+     allocation plumbing in gi.cpp (~4,000 actively-maintained lines -
+     the largest rebase-conflict surface of the remaining work). SDFGI
+     needs both of its pieces before anything renders.
+   The GI *sampling* side (GiShaderRD) already bakes with zero
+   exclusions for both systems, so each port lights up consumption
+   that is already proven. Mitigation when resumed: capability-gated
+   fallbacks with no #ifdefs, byte-identical on capable drivers, and
+   early upstream PRs so the patches exit this stack. Texture atomics
+   remain a WebGPU proposal; if browsers ship them first, the
+   exclusions clear without any of this.
 4. **Native WGSL subgroups.** The wave-of-1 lowering (patch 64) is
    semantically exact but forfeits the wave-coherence optimization.
    WGSL now has a `subgroups` feature; when the pinned Tint's reader
