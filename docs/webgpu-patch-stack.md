@@ -85,12 +85,83 @@
 | 67 | [shared] rendering: Fall back to supported LUT storage formats | The clustered renderer's pre-integrated LUTs assume r8unorm (best-fit normals) and rg16float (DFG) storage image support, which WebGPU and some mobile hardware lack. Both generators gain a fallback variant (rgba8 / rgba16f - only the original channels are ever sampled) picked by probing texture_is_format_supported_for_usage, with the texture format switched to match. integrate_dfg.glsl was also missing its #VERSION_DEFINES marker, so variant defines were silently never injected. Zero change on drivers with native support. These LUTs feed the PBR pipeline's energy terms; without them every light multiplies to black | 36 | not yet |
 | 68 | [shared] rendering: Use raster octmaps whenever storage support is missing | The rgb10a2-storage probe guarding the compute octmap path only ran for the Mobile renderer (!can_use_storage); Forward+ assumed the format unconditionally, wedging sky and reflection radiance on drivers without it. The existing probe moves out of the mobile-only branch so any renderer redirects the octmap effects to their raster variants - the redirect upstream's own comment describes. Desktop drivers pass the probe and keep the compute path unchanged. Upstream-PR candidate | 18 | not yet |
 | 69 | [shared] web: Request compute limits from the adapter | The device request copies five more adapter limits (maxComputeInvocationsPerWorkgroup and the workgroup size/storage limits): several clustered-renderer compute shaders exceed WebGPU's 256-invocation default, and creation fails at pipeline time with the default-limit device even though the adapter supports more | 5 | not yet |
+| 70 | docs: Record the Forward+ state and future work | Coverage section for both renderers, the 7-variant exclusion census, and the future-work ladder: upstream the shared fallbacks, SSAO/SSIL format ports, realtime GI's image-atomics dependency (buffer-atomics port or the texture-atomics proposal), native WGSL subgroups, wider read-only storage textures, KTX2 compression, perf follow-ups, parked WebGPU-XR | 0 | pushed |
 
 (Rows 53-61 pending backfill. Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
 experimental WebXR-WebGPU since April 2026. NOTE: upstream
 already compiles RenderingDevice + renderer_rd unconditionally on all
 platforms including web; the per-platform RD_ENABLED define is the only
 gate, which is why patch 01 is a detect.py-only change.)
+
+## Renderer coverage and future work (as of patch 69)
+
+### What runs today
+
+Both RenderingDevice renderers render on WebGPU in stock Chromium
+browsers with no flags, from the same AOT-baked WGSL pipeline:
+
+- **Forward Mobile** (the shipping default): full 2D/3D, shadows, sky,
+  GPU particles, glow, MSAA 4x, baked lightmaps with dynamic-index
+  binding arrays, light probes, reflection probes (UPDATE_ONCE), mixed
+  lighting, WebXR (per-view path; Quest and Galaxy XR verified).
+- **Forward+ (clustered)** (new in patches 62-69): clustered
+  omni/spot/decal/probe lighting, cascaded directional shadows, MSAA
+  command resolve, environmental volumetric fog, reflection probes in
+  both UPDATE_ONCE and UPDATE_ALWAYS (realtime) modes, baked lightmaps,
+  the DFG/best-fit-normal PBR pipeline. Verified against the Mobile
+  render of the same scene.
+
+Firefox (wgpu/naga) validates the same baked WGSL for boot, 2D, 3D,
+and compute.
+
+### Known exclusions (bake census: 7 variants)
+
+VoxelGI debug visualization (3), volumetric fog *volume injection* (3),
+FSR2 (1). Environmental fog is fully supported; only FogVolume nodes
+are affected. Plus 16 clustered scene variants for SDF voxelization and
+the SSAO/SSIL/SDFGI compute families (see below).
+
+### Future opportunities, in rough order of value
+
+1. **Upstream the shared fallbacks.** Patches 66 (cluster builder
+   attachment completion), 67 (LUT storage format fallbacks), and 68
+   (octmap raster redirect) are capability fixes any limited driver
+   needs, written without WebGPU references. Each merged PR leaves this
+   stack and takes its rebase surface with it.
+2. **SSAO / SSIL / screen-space effects.** Blocked only on r8/rg8/r16f
+   storage image formats - the same probe-gated fallback pattern patch
+   67 established. Unlocks dynamic ambient occlusion and screen-space
+   indirect light (the nearest thing to realtime GI available without
+   the atomics work below).
+3. **Realtime GI (SDFGI / VoxelGI) and FogVolume nodes.** All blocked
+   on *image atomics*, which WebGPU 1.0 does not have (buffer atomics
+   exist; texture atomics are a proposal). Two paths: port the
+   voxelization/injection passes to storage-buffer atomics (real engine
+   work, upstream-valuable - it would also serve mobile hardware
+   without image atomics), or wait for the texture-atomics extension to
+   ship in browsers. Until then GI = lightmaps + probes.
+4. **Native WGSL subgroups.** The wave-of-1 lowering (patch 64) is
+   semantically exact but forfeits the wave-coherence optimization.
+   WGSL now has a `subgroups` feature; when the pinned Tint's reader
+   translates GroupNonUniform ops, drop the pass and request the device
+   feature (adapter-gated, the loader pattern already exists).
+5. **Read-only storage textures beyond r32.** The WGSL
+   `readonly_and_readwrite_storage_textures` language feature widens
+   the read/read_write format rules; adopting it relaxes the patch-64
+   bake gate and removes Tint's sampled-texture conversion for
+   read-only images.
+6. **Texture compression.** Exports currently ship uncompressed RGBA8
+   (VRAM compression off); lightmap EXRs need a manual import flip.
+   Proper fix: KTX2/Basis transcode plus an adapter-gated
+   texture-compression-bc feature request in the loader.
+7. **Perf follow-ups.** The sky re-filters all radiance layers every
+   frame on clustered (upstream behavior worth a dirty-check); render
+   bundles (snapshot-style recording) remain the one technique peers
+   ship that this backend lacks; MSAA 2x/8x still need a clamp to 4.
+8. **WebGPU-XR (parked).** The stereo per-view path works end to end on
+   Quest; re-entry is gated on browsers shedding the XRGPUBinding
+   frame-copy tax and the second-session resume bug (see the parked
+   notes in the project memory).
 
 ## Rules
 
