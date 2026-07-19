@@ -1,6 +1,8 @@
 #[compute]
 #version 450
 
+#VERSION_DEFINES
+
 // References:
 // https://www.gamedevs.org/uploads/real-shading-in-unreal-engine-4.pdf
 // https://google.github.io/filament/Filament.html
@@ -8,7 +10,13 @@
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
+#ifdef USE_RGBA16_FORMAT
+// Fallback for drivers without rg16float storage support (e.g. WebGPU);
+// only the red/green channels are ever sampled.
+layout(rgba16f, set = 0, binding = 0) uniform restrict writeonly image2D current_image;
+#else
 layout(rg16f, set = 0, binding = 0) uniform restrict writeonly image2D current_image;
+#endif
 
 #define M_PI 3.14159265359
 #define SAMPLE_COUNT 1024
