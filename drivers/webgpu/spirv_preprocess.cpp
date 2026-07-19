@@ -2217,6 +2217,8 @@ static constexpr uint32_t SSIF_R16SNORM = 19;
 static constexpr uint32_t SSIF_RG32I = 25;
 static constexpr uint32_t SSIF_RG16I = 26;
 static constexpr uint32_t SSIF_R32UI = 33;
+static constexpr uint32_t SSIF_RG32UI = 35;
+static constexpr uint32_t SSIF_RG8UI = 37;
 static constexpr uint32_t SSIF_R16UI = 38;
 
 static uint32_t _storage_image_format_substitute(uint32_t p_format) {
@@ -2238,6 +2240,10 @@ static uint32_t _storage_image_format_substitute(uint32_t p_format) {
 			return SSIF_R32F;
 		case SSIF_RG16I:
 			return SSIF_RG32I;
+		case SSIF_RG8UI:
+			// The clustered voxel GI buffer; the driver widens the RD format
+			// globally (attachment + storage + sampled must agree).
+			return SSIF_RG32UI;
 		case SSIF_R16UI:
 			return SSIF_R32UI;
 		default:
