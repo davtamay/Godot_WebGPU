@@ -226,6 +226,7 @@ public:
 
 	// Allocate shared buffers
 	void allocate_blur_textures();
+	void allocate_weight_buffers();
 
 	// Custom data
 	bool has_custom_data(const StringName &p_name);
