@@ -587,7 +587,12 @@ static WGPUTextureFormat _data_format_to_wgpu(RenderingDeviceCommons::DataFormat
 		case RenderingDeviceCommons::DATA_FORMAT_R16G16_SINT:
 			return WGPUTextureFormat_RG16Sint;
 		case RenderingDeviceCommons::DATA_FORMAT_R16G16_SFLOAT:
-			return WGPUTextureFormat_RG16Float;
+			// Substituted globally (not just for storage usage): the motion
+			// vector buffers pair an rg16f MSAA attachment with a
+			// storage-substituted resolve target, and resolve pairs must
+			// match formats. Fragment outputs and sampling are
+			// format-agnostic in WGSL, so widening is transparent.
+			return WGPUTextureFormat_RGBA16Float;
 		case RenderingDeviceCommons::DATA_FORMAT_R16G16B16A16_UINT:
 			return WGPUTextureFormat_RGBA16Uint;
 		case RenderingDeviceCommons::DATA_FORMAT_R16G16B16A16_SINT:
