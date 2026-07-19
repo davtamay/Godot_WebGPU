@@ -2133,6 +2133,64 @@ Vector<uint8_t> lower_helper_invocation_to_false(const Vector<uint8_t> &p_bytes)
 	return out;
 }
 
+// ---- strip_volatile_decorations ----
+//
+// The volumetric fog's buffer-atomics fallback marks its map members
+// Volatile and Coherent as coherence hints; WGSL has no volatile and Tint
+// rejects the decoration. The atomic operations themselves provide the
+// ordering the shader relies on, so the hint is dropped.
+
+static constexpr uint32_t SVD_DECO_VOLATILE = 21;
+static constexpr uint32_t SVD_DECO_COHERENT = 23;
+
+static bool _is_stripped_hint(uint32_t p_decoration) {
+	return p_decoration == SVD_DECO_VOLATILE || p_decoration == SVD_DECO_COHERENT;
+}
+
+Vector<uint8_t> strip_volatile_decorations(const Vector<uint8_t> &p_bytes) {
+	const int64_t len = p_bytes.size();
+	const uint32_t total_words = (uint32_t)(len / 4);
+	if (total_words < 5) {
+		return p_bytes;
+	}
+	const uint8_t *data = p_bytes.ptr();
+	bool found = false;
+	uint32_t pos = 5;
+	while (pos < total_words) {
+		uint32_t w0 = read_word(data, len, pos);
+		uint32_t wc = (w0 >> 16);
+		uint16_t op = (uint16_t)(w0 & 0xFFFF);
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		if ((op == OP_DECORATE && wc == 3 && _is_stripped_hint(read_word(data, len, pos + 2))) || (op == OP_MEMBER_DECORATE && wc == 4 && _is_stripped_hint(read_word(data, len, pos + 3)))) {
+			found = true;
+			break;
+		}
+		pos += wc;
+	}
+	if (!found) {
+		return p_bytes;
+	}
+	Vector<uint8_t> out;
+	append_bytes(out, data, 0, 5 * 4);
+	pos = 5;
+	while (pos < total_words) {
+		uint32_t w0 = read_word(data, len, pos);
+		uint32_t wc = (w0 >> 16);
+		uint16_t op = (uint16_t)(w0 & 0xFFFF);
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		const bool skip = (op == OP_DECORATE && wc == 3 && _is_stripped_hint(read_word(data, len, pos + 2))) || (op == OP_MEMBER_DECORATE && wc == 4 && _is_stripped_hint(read_word(data, len, pos + 3)));
+		if (!skip) {
+			append_bytes(out, data, (int64_t)pos * 4, (int64_t)wc * 4);
+		}
+		pos += wc;
+	}
+	return out;
+}
+
 // ---- substitute_storage_image_formats ----
 //
 // WGSL's storage texture format list is far smaller than SPIR-V's; the
