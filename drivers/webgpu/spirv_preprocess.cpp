@@ -2133,6 +2133,219 @@ Vector<uint8_t> lower_helper_invocation_to_false(const Vector<uint8_t> &p_bytes)
 	return out;
 }
 
+// ---- substitute_storage_image_formats ----
+//
+// WGSL's storage texture format list is far smaller than SPIR-V's; the
+// engine's screen-space effects use r16f/r8/rg8-class storage images that
+// cannot exist on WebGPU. Substitute each unsupported format with a
+// WGSL-legal one whose imageLoad/imageStore semantics are value-identical
+// for in-range data (wider unorm keeps normalization, floats and integers
+// widen losslessly). The driver applies the same substitution when the
+// texture is created, so bindings stay consistent end to end.
+
+static constexpr uint16_t SSIF_OP_TYPE_IMAGE = 25;
+
+// SPIR-V ImageFormat values.
+static constexpr uint32_t SSIF_RGBA16F = 2;
+static constexpr uint32_t SSIF_R32F = 3;
+static constexpr uint32_t SSIF_RGBA8 = 4;
+static constexpr uint32_t SSIF_RG16F = 7;
+static constexpr uint32_t SSIF_R11G11B10F = 8;
+static constexpr uint32_t SSIF_R16F = 9;
+static constexpr uint32_t SSIF_RG8 = 13;
+static constexpr uint32_t SSIF_R16 = 14;
+static constexpr uint32_t SSIF_R8 = 15;
+static constexpr uint32_t SSIF_R16SNORM = 19;
+static constexpr uint32_t SSIF_RG32I = 25;
+static constexpr uint32_t SSIF_RG16I = 26;
+static constexpr uint32_t SSIF_R32UI = 33;
+static constexpr uint32_t SSIF_R16UI = 38;
+
+static uint32_t _storage_image_format_substitute(uint32_t p_format) {
+	switch (p_format) {
+		case SSIF_R16F:
+			return SSIF_R32F;
+		case SSIF_RG16F:
+			return SSIF_RGBA16F;
+		case SSIF_R11G11B10F:
+			return SSIF_RGBA16F;
+		case SSIF_R8:
+			// r32f rather than rgba8: same 4-byte cost, and read_write
+			// access stays legal (the SSIL edges image is read-write).
+			return SSIF_R32F;
+		case SSIF_RG8:
+			return SSIF_RGBA8;
+		case SSIF_R16:
+		case SSIF_R16SNORM:
+			return SSIF_R32F;
+		case SSIF_RG16I:
+			return SSIF_RG32I;
+		case SSIF_R16UI:
+			return SSIF_R32UI;
+		default:
+			return p_format;
+	}
+}
+
+Vector<uint8_t> substitute_storage_image_formats(const Vector<uint8_t> &p_bytes) {
+	const int64_t len = p_bytes.size();
+	const uint32_t total_words = (uint32_t)(len / 4);
+	if (total_words < 5) {
+		return p_bytes;
+	}
+	const uint8_t *data = p_bytes.ptr();
+	bool found = false;
+	uint32_t pos = 5;
+	while (pos < total_words) {
+		uint32_t w0 = read_word(data, len, pos);
+		uint32_t wc = (w0 >> 16);
+		uint16_t op = (uint16_t)(w0 & 0xFFFF);
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		// OpTypeImage: [result, sampled type, dim, depth, arrayed, ms,
+		// sampled, format, (access)]; format is word 8. Sampled == 2 means
+		// a storage image.
+		if (op == SSIF_OP_TYPE_IMAGE && wc >= 9 && read_word(data, len, pos + 7) == 2 && _storage_image_format_substitute(read_word(data, len, pos + 8)) != read_word(data, len, pos + 8)) {
+			found = true;
+			break;
+		}
+		pos += wc;
+	}
+	if (!found) {
+		return p_bytes;
+	}
+	Vector<uint8_t> out = p_bytes;
+	{
+		uint8_t *out_data = out.ptrw();
+		pos = 5;
+		while (pos < total_words) {
+			uint32_t w0 = read_word(out_data, len, pos);
+			uint32_t wc = (w0 >> 16);
+			uint16_t op = (uint16_t)(w0 & 0xFFFF);
+			if (wc == 0 || pos + wc > total_words) {
+				break;
+			}
+			if (op == SSIF_OP_TYPE_IMAGE && wc >= 9 && read_word(out_data, len, pos + 7) == 2) {
+				const uint32_t substitute = _storage_image_format_substitute(read_word(out_data, len, pos + 8));
+				memcpy(out_data + (pos + 8) * 4, &substitute, 4);
+			}
+			pos += wc;
+		}
+	}
+
+	// Substitution can merge formerly-distinct declarations (r8 and rg8 both
+	// become rgba8), and SPIR-V forbids duplicate non-aggregate types.
+	// Dedupe image, sampled-image, and pointer types (each round can expose
+	// the next kind of duplicate), remapping references at the positions
+	// where a type id can legally appear.
+	for (int round = 0; round < 4; round++) {
+		uint8_t *out_data = out.ptrw();
+		const int64_t dlen = out.size();
+		const uint32_t dwords = (uint32_t)(dlen / 4);
+		HashMap<uint32_t, uint32_t> remap; // Dropped id -> canonical id.
+		{
+			LocalVector<Pair<uint32_t, uint32_t>> seen; // (pos, wc) of kept type decls.
+			uint32_t dpos = 5;
+			while (dpos < dwords) {
+				uint32_t w0 = read_word(out_data, dlen, dpos);
+				uint32_t wc = (w0 >> 16);
+				uint16_t op = (uint16_t)(w0 & 0xFFFF);
+				if (wc == 0 || dpos + wc > dwords) {
+					break;
+				}
+				if (op == SSIF_OP_TYPE_IMAGE || op == OP_TYPE_SAMPLED_IMAGE || op == OP_TYPE_POINTER) {
+					bool duplicate = false;
+					for (const Pair<uint32_t, uint32_t> &prev : seen) {
+						if (prev.second != wc || read_word(out_data, dlen, prev.first) != w0) {
+							continue;
+						}
+						bool same = true;
+						for (uint32_t i = 2; i < wc; i++) { // Skip the result id.
+							if (read_word(out_data, dlen, prev.first + i) != read_word(out_data, dlen, dpos + i)) {
+								same = false;
+								break;
+							}
+						}
+						if (same) {
+							remap.insert(read_word(out_data, dlen, dpos + 1), read_word(out_data, dlen, prev.first + 1));
+							duplicate = true;
+							break;
+						}
+					}
+					if (!duplicate) {
+						seen.push_back(Pair<uint32_t, uint32_t>(dpos, wc));
+					}
+				}
+				dpos += wc;
+			}
+		}
+		if (remap.is_empty()) {
+			break;
+		}
+		Vector<uint8_t> next;
+		append_bytes(next, out_data, 0, 5 * 4);
+		uint32_t dpos = 5;
+		while (dpos < dwords) {
+			uint32_t w0 = read_word(out_data, dlen, dpos);
+			uint32_t wc = (w0 >> 16);
+			uint16_t op = (uint16_t)(w0 & 0xFFFF);
+			if (wc == 0 || dpos + wc > dwords) {
+				break;
+			}
+			const bool dropped = (op == SSIF_OP_TYPE_IMAGE || op == OP_TYPE_SAMPLED_IMAGE || op == OP_TYPE_POINTER) && remap.has(read_word(out_data, dlen, dpos + 1));
+			if (!dropped) {
+				const int64_t start = next.size();
+				append_bytes(next, out_data, (int64_t)dpos * 4, (int64_t)wc * 4);
+				uint8_t *w = next.ptrw() + start;
+				// Word positions where a type id can appear, by opcode.
+				uint32_t first = 0;
+				uint32_t last = 0;
+				switch (op) {
+					case OP_TYPE_POINTER:
+						first = last = 3;
+						break;
+					case OP_TYPE_SAMPLED_IMAGE:
+					case OP_TYPE_ARRAY:
+					case OP_TYPE_RUNTIME_ARRAY:
+						first = last = 2;
+						break;
+					case 33: // OpTypeFunction: return + parameter types.
+						first = 2;
+						last = wc - 1;
+						break;
+					case 5: // OpName target.
+					case OP_DECORATE:
+					case OP_VARIABLE:
+					case OP_LOAD:
+					case OP_ACCESS_CHAIN:
+					case OP_IN_BOUNDS_ACCESS_CHAIN:
+					case 54: // OpFunction return type.
+					case 55: // OpFunctionParameter.
+					case 57: // OpFunctionCall return type.
+					case OP_COPY_OBJECT:
+					case 86: // OpSampledImage result type.
+						first = last = 1;
+						break;
+					default:
+						break;
+				}
+				for (uint32_t i = first; first != 0 && i <= last && i < wc; i++) {
+					uint32_t v;
+					memcpy(&v, w + i * 4, 4);
+					const uint32_t *mapped = remap.getptr(v);
+					if (mapped != nullptr) {
+						memcpy(w + i * 4, mapped, 4);
+					}
+				}
+			}
+			dpos += wc;
+		}
+		out = next;
+	}
+	return out;
+}
+
 // ---- fan_out_binding_arrays ----
 //
 // Tint rejects arrays of handle types, and the flatten_binding_arrays
