@@ -1135,7 +1135,11 @@ static bool _wgsl_storage_textures_supported(const String &p_text) {
 			if (!format_ok) {
 				return false;
 			}
-			if (access != "write" && !format.begins_with("r32")) {
+			// read_write stays restricted to 32-bit single-channel formats;
+			// plain read is legal for every storage format via the shipped
+			// readonly_and_readwrite_storage_textures WGSL feature (Tint
+			// emits the requires directive itself).
+			if (access == "read_write" && !format.begins_with("r32")) {
 				return false;
 			}
 		}
@@ -1165,6 +1169,10 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 		// OpCopyLogical is a SPIR-V 1.4-ism the 1.3 downgrade must also
 		// rewrite; the clustered scene shader's vertex stages emit it.
 		spirv = spirv_preprocess::rewrite_copy_logical(spirv);
+		// Storage image formats WGSL cannot express substitute for
+		// value-compatible legal ones; the driver mirrors the substitution
+		// when the texture is created.
+		spirv = spirv_preprocess::substitute_storage_image_formats(spirv);
 		// NonWritable on function-local variables is another 1.4-legal
 		// glslang hint that Tint's reader rejects.
 		spirv = spirv_preprocess::strip_nonwritable_on_function_vars(spirv);
