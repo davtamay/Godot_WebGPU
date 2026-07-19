@@ -65,6 +65,7 @@ static constexpr uint16_t OP_VARIABLE = 59;
 static constexpr uint16_t OP_LOAD = 61;
 static constexpr uint16_t OP_DECORATE = 71;
 static constexpr uint16_t OP_COPY_OBJECT = 83;
+static constexpr uint16_t OP_COPY_LOGICAL = 400;
 static constexpr uint16_t OP_TYPE_VECTOR = 23;
 static constexpr uint16_t OP_STORE = 62;
 static constexpr uint16_t OP_ACCESS_CHAIN = 65;
@@ -1526,6 +1527,609 @@ Vector<uint8_t> lower_spec_constant_ops_to_runtime(const Vector<uint8_t> &p_byte
 	// Update the id bound.
 	uint8_t *out_ptr = out.ptrw();
 	memcpy(out_ptr + 12, &id_bound, 4);
+	return out;
+}
+
+// ---- rewrite_copy_logical ----
+//
+// OpCopyLogical is a SPIR-V 1.4 instruction that copies between LOGICALLY
+// matching but DISTINCT composite types -- glslang emits it when copying a
+// Block-decorated UBO struct (explicit offsets/strides) into a plain
+// function-local struct of the same shape (the clustered scene shader's
+// SceneData does exactly this). Tint's reader rejects it, and OpCopyObject
+// is no substitute (it requires identical types). Lower it to the SPIR-V
+// 1.3 equivalent instead: a recursive per-member OpCompositeExtract /
+// OpCompositeConstruct copy, converting mismatched struct/array member
+// types level by level. When the two types happen to be identical, a plain
+// OpCopyObject suffices. Any unexpected shape bails the whole pass,
+// leaving the variant excluded exactly as it is today.
+
+static constexpr uint16_t CL_OP_TYPE_STRUCT = 30;
+static constexpr uint16_t CL_OP_UNDEF = 3;
+static constexpr uint16_t CL_OP_FUNCTION_PARAMETER = 55;
+static constexpr uint16_t CL_OP_FUNCTION_CALL = 57;
+static constexpr uint16_t CL_OP_SELECT = 169;
+static constexpr uint16_t CL_OP_PHI = 245;
+static constexpr uint16_t CL_OP_COMPOSITE_CONSTRUCT = 80;
+static constexpr uint16_t CL_OP_COMPOSITE_EXTRACT = 81;
+
+struct CopyLogicalTypeInfo {
+	uint16_t opcode = 0;
+	LocalVector<uint32_t> operands; // Type-specific words after the result id.
+};
+
+// Emits a structural copy of p_src_id (type p_src_type) as type p_dst_type
+// into r_emit. Returns the result id, or 0 on an unsupported shape.
+static uint32_t _copy_logical_emit(const HashMap<uint32_t, CopyLogicalTypeInfo> &p_types, const HashMap<uint32_t, uint32_t> &p_const_values, uint32_t p_dst_type, uint32_t p_src_id, uint32_t p_src_type, uint32_t &r_next_id, Vector<uint8_t> &r_emit, uint32_t p_forced_result, int p_depth) {
+	if (p_depth > 16) {
+		return 0;
+	}
+	if (p_dst_type == p_src_type) {
+		// Identical types; a plain OpCopyObject is valid.
+		uint32_t result = p_forced_result ? p_forced_result : r_next_id++;
+		push_word(r_emit, (4u << 16) | OP_COPY_OBJECT);
+		push_word(r_emit, p_dst_type);
+		push_word(r_emit, result);
+		push_word(r_emit, p_src_id);
+		return result;
+	}
+	const CopyLogicalTypeInfo *dst = p_types.getptr(p_dst_type);
+	const CopyLogicalTypeInfo *src = p_types.getptr(p_src_type);
+	if (!dst || !src || dst->opcode != src->opcode) {
+		return 0;
+	}
+	// Gather the member/element types of both sides.
+	LocalVector<uint32_t> dst_members;
+	LocalVector<uint32_t> src_members;
+	if (dst->opcode == CL_OP_TYPE_STRUCT) {
+		dst_members = dst->operands;
+		src_members = src->operands;
+	} else if (dst->opcode == OP_TYPE_ARRAY) {
+		// operands = [element type, length constant id].
+		if (dst->operands.size() != 2 || src->operands.size() != 2) {
+			return 0;
+		}
+		const uint32_t *dst_len = p_const_values.getptr(dst->operands[1]);
+		const uint32_t *src_len = p_const_values.getptr(src->operands[1]);
+		if (!dst_len || !src_len || *dst_len != *src_len || *dst_len == 0 || *dst_len > 4096) {
+			return 0;
+		}
+		for (uint32_t i = 0; i < *dst_len; i++) {
+			dst_members.push_back(dst->operands[0]);
+			src_members.push_back(src->operands[0]);
+		}
+	} else {
+		// Distinct ids of any non-aggregate kind cannot be logically matching.
+		return 0;
+	}
+	if (dst_members.size() != src_members.size() || dst_members.is_empty()) {
+		return 0;
+	}
+	LocalVector<uint32_t> member_results;
+	for (uint32_t i = 0; i < src_members.size(); i++) {
+		uint32_t extracted = r_next_id++;
+		push_word(r_emit, (5u << 16) | CL_OP_COMPOSITE_EXTRACT);
+		push_word(r_emit, src_members[i]);
+		push_word(r_emit, extracted);
+		push_word(r_emit, p_src_id);
+		push_word(r_emit, i);
+		uint32_t converted = extracted;
+		if (dst_members[i] != src_members[i]) {
+			converted = _copy_logical_emit(p_types, p_const_values, dst_members[i], extracted, src_members[i], r_next_id, r_emit, 0, p_depth + 1);
+			if (converted == 0) {
+				return 0;
+			}
+		}
+		member_results.push_back(converted);
+	}
+	uint32_t result = p_forced_result ? p_forced_result : r_next_id++;
+	push_word(r_emit, ((3u + member_results.size()) << 16) | CL_OP_COMPOSITE_CONSTRUCT);
+	push_word(r_emit, p_dst_type);
+	push_word(r_emit, result);
+	for (uint32_t i = 0; i < member_results.size(); i++) {
+		push_word(r_emit, member_results[i]);
+	}
+	return result;
+}
+
+Vector<uint8_t> rewrite_copy_logical(const Vector<uint8_t> &p_bytes) {
+	const int64_t len = p_bytes.size();
+	const uint32_t total_words = (uint32_t)(len / 4);
+	if (total_words < 5) {
+		return p_bytes;
+	}
+	const uint8_t *data = p_bytes.ptr();
+
+	// Scan: types, plain int constants (array lengths), value result types,
+	// and whether any OpCopyLogical exists at all.
+	HashMap<uint32_t, CopyLogicalTypeInfo> types;
+	HashMap<uint32_t, uint32_t> const_values;
+	HashMap<uint32_t, uint32_t> value_types; // result id -> result type id.
+	bool found = false;
+	uint32_t pos = 5;
+	while (pos < total_words) {
+		uint32_t w0 = read_word(data, len, pos);
+		uint32_t wc = (w0 >> 16);
+		uint16_t op = (uint16_t)(w0 & 0xFFFF);
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		switch (op) {
+			case CL_OP_TYPE_STRUCT:
+			case OP_TYPE_ARRAY: {
+				CopyLogicalTypeInfo info;
+				info.opcode = op;
+				for (uint32_t i = 2; i < wc; i++) {
+					info.operands.push_back(read_word(data, len, pos + i));
+				}
+				types.insert(read_word(data, len, pos + 1), info);
+			} break;
+			case OP_CONSTANT: {
+				if (wc >= 4) {
+					const_values.insert(read_word(data, len, pos + 2), read_word(data, len, pos + 3));
+				}
+			} break;
+			case CL_OP_UNDEF:
+			case OP_LOAD:
+			case OP_COPY_OBJECT:
+			case OP_COPY_LOGICAL:
+			case CL_OP_COMPOSITE_CONSTRUCT:
+			case CL_OP_COMPOSITE_EXTRACT:
+			case CL_OP_FUNCTION_PARAMETER:
+			case CL_OP_FUNCTION_CALL:
+			case CL_OP_SELECT:
+			case CL_OP_PHI:
+			case OP_CONSTANT_COMPOSITE: {
+				if (wc >= 3) {
+					value_types.insert(read_word(data, len, pos + 2), read_word(data, len, pos + 1));
+				}
+				if (op == OP_COPY_LOGICAL) {
+					found = true;
+				}
+			} break;
+			default:
+				break;
+		}
+		pos += wc;
+	}
+	if (!found) {
+		return p_bytes;
+	}
+
+	uint32_t next_id = read_word(data, len, 3);
+	Vector<uint8_t> out;
+	out.resize(0);
+	append_bytes(out, data, 0, 5 * 4);
+	pos = 5;
+	while (pos < total_words) {
+		uint32_t w0 = read_word(data, len, pos);
+		uint32_t wc = (w0 >> 16);
+		uint16_t op = (uint16_t)(w0 & 0xFFFF);
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		if (op == OP_COPY_LOGICAL && wc == 4) {
+			uint32_t dst_type = read_word(data, len, pos + 1);
+			uint32_t result_id = read_word(data, len, pos + 2);
+			uint32_t src_id = read_word(data, len, pos + 3);
+			const uint32_t *src_type = value_types.getptr(src_id);
+			if (!src_type) {
+				return p_bytes; // Untracked operand producer; leave for exclusion.
+			}
+			Vector<uint8_t> emitted;
+			uint32_t got = _copy_logical_emit(types, const_values, dst_type, src_id, *src_type, next_id, emitted, result_id, 0);
+			if (got != result_id) {
+				return p_bytes; // Unsupported shape; leave for exclusion.
+			}
+			append_bytes(out, emitted.ptr(), 0, emitted.size());
+			// The lowered results are plain values; record the copy's type for
+			// any later OpCopyLogical chained off this one.
+			value_types.insert(result_id, dst_type);
+		} else {
+			append_bytes(out, data, (int64_t)pos * 4, (int64_t)wc * 4);
+		}
+		pos += wc;
+	}
+	// Patch the id bound for the fresh intermediate ids.
+	uint8_t *out_data = out.ptrw();
+	memcpy(out_data + 3 * 4, &next_id, 4);
+	return out;
+}
+
+// ---- strip_nonwritable_on_function_vars ----
+//
+// glslang decorates the function-local "indexable" copies of const arrays
+// with NonWritable, which SPIR-V 1.4 allows on any variable but 1.3 (and
+// Tint's reader) restricts to storage images, uniform blocks and storage
+// buffers. The decoration is a pure optimization hint; drop it when the
+// target is a Function-storage variable.
+
+static constexpr uint32_t SNW_DECO_NONWRITABLE = 24;
+static constexpr uint32_t SNW_SC_FUNCTION = 7;
+
+Vector<uint8_t> strip_nonwritable_on_function_vars(const Vector<uint8_t> &p_bytes) {
+	const int64_t len = p_bytes.size();
+	const uint32_t total_words = (uint32_t)(len / 4);
+	if (total_words < 5) {
+		return p_bytes;
+	}
+	const uint8_t *data = p_bytes.ptr();
+
+	// Prescan: NonWritable decoration targets + Function-storage variables.
+	HashSet<uint32_t> nonwritable_targets;
+	HashSet<uint32_t> function_vars;
+	uint32_t pos = 5;
+	while (pos < total_words) {
+		uint32_t w0 = read_word(data, len, pos);
+		uint32_t wc = (w0 >> 16);
+		uint16_t op = (uint16_t)(w0 & 0xFFFF);
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		if (op == OP_DECORATE && wc == 3 && read_word(data, len, pos + 2) == SNW_DECO_NONWRITABLE) {
+			nonwritable_targets.insert(read_word(data, len, pos + 1));
+		} else if (op == OP_VARIABLE && wc >= 4 && read_word(data, len, pos + 3) == SNW_SC_FUNCTION) {
+			function_vars.insert(read_word(data, len, pos + 2));
+		}
+		pos += wc;
+	}
+	bool any = false;
+	for (const uint32_t target : nonwritable_targets) {
+		if (function_vars.has(target)) {
+			any = true;
+			break;
+		}
+	}
+	if (!any) {
+		return p_bytes;
+	}
+
+	Vector<uint8_t> out;
+	append_bytes(out, data, 0, 5 * 4);
+	pos = 5;
+	while (pos < total_words) {
+		uint32_t w0 = read_word(data, len, pos);
+		uint32_t wc = (w0 >> 16);
+		uint16_t op = (uint16_t)(w0 & 0xFFFF);
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		bool skip = op == OP_DECORATE && wc == 3 && read_word(data, len, pos + 2) == SNW_DECO_NONWRITABLE && function_vars.has(read_word(data, len, pos + 1));
+		if (!skip) {
+			append_bytes(out, data, (int64_t)pos * 4, (int64_t)wc * 4);
+		}
+		pos += wc;
+	}
+	return out;
+}
+
+// ---- lower_subgroup_ops_to_single_invocation ----
+//
+// The Forward+ clustered shaders use subgroup operations unconditionally
+// (upstream assumes Vulkan 1.1), but only as a wave-coherence optimization
+// over idempotent merges: reductions feed loop bounds and masks that each
+// invocation re-filters, and the cluster writer's ballot dedup guards an
+// atomicOr whose repeated execution is a no-op. Tint's SPIR-V reader
+// predates WGSL subgroups and rejects the opcodes, so lower them to exact
+// wave-of-1 semantics instead:
+//
+//   Reduce min/max/and/or/xor/add, Broadcast(First), All, Any -> the value
+//   Ballot(pred)               -> (pred ? 1u : 0u, 0, 0, 0)
+//   BallotBitCount Exclusive   -> 0u          (lane 0 has no lower lanes)
+//   BallotBitCount Reduce      -> mask.x & 1u (one possible active lane)
+//
+// Every invocation then does its own full (correct) work; only the wave
+// bandwidth sharing is lost. Any other subgroup instruction bails the pass,
+// leaving the variant excluded as it is today.
+
+static constexpr uint16_t SG_OP_CAPABILITY = 17;
+static constexpr uint16_t SG_OP_COMPOSITE_CONSTRUCT = 80;
+static constexpr uint16_t SG_OP_COMPOSITE_EXTRACT = 81;
+static constexpr uint16_t SG_OP_SELECT = 169;
+static constexpr uint16_t SG_OP_BITWISE_AND = 199;
+static constexpr uint16_t SG_OP_ALL = 334;
+static constexpr uint16_t SG_OP_ANY = 335;
+static constexpr uint16_t SG_OP_BROADCAST = 337;
+static constexpr uint16_t SG_OP_BROADCAST_FIRST = 338;
+static constexpr uint16_t SG_OP_BALLOT = 339;
+static constexpr uint16_t SG_OP_BALLOT_BIT_COUNT = 342;
+static constexpr uint16_t SG_OP_ARITH_FIRST = 349; // IAdd.
+static constexpr uint16_t SG_OP_ARITH_LAST = 361; // BitwiseXor.
+static constexpr uint16_t SG_GROUP_NONUNIFORM_FIRST = 333;
+static constexpr uint16_t SG_GROUP_NONUNIFORM_LAST = 363;
+static constexpr uint32_t SG_GROUP_OP_REDUCE = 0;
+static constexpr uint32_t SG_GROUP_OP_EXCLUSIVE_SCAN = 2;
+static constexpr uint32_t SG_CAP_GROUP_NONUNIFORM_FIRST = 61;
+static constexpr uint32_t SG_CAP_GROUP_NONUNIFORM_LAST = 68;
+
+Vector<uint8_t> lower_subgroup_ops_to_single_invocation(const Vector<uint8_t> &p_bytes) {
+	const int64_t len = p_bytes.size();
+	const uint32_t total_words = (uint32_t)(len / 4);
+	if (total_words < 5) {
+		return p_bytes;
+	}
+	const uint8_t *data = p_bytes.ptr();
+
+	// Prescan: find subgroup ops, validate every one is a supported shape,
+	// and locate the uint type for constant synthesis.
+	bool found = false;
+	bool needs_uint_consts = false;
+	uint32_t uint_type = 0;
+	uint32_t uint_type_def_pos = 0;
+	uint32_t pos = 5;
+	while (pos < total_words) {
+		uint32_t w0 = read_word(data, len, pos);
+		uint32_t wc = (w0 >> 16);
+		uint16_t op = (uint16_t)(w0 & 0xFFFF);
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		if (op == OP_TYPE_INT && wc == 4 && read_word(data, len, pos + 2) == 32 && read_word(data, len, pos + 3) == 0) {
+			uint_type = read_word(data, len, pos + 1);
+			uint_type_def_pos = pos;
+		} else if (op >= SG_GROUP_NONUNIFORM_FIRST && op <= SG_GROUP_NONUNIFORM_LAST) {
+			found = true;
+			bool supported = false;
+			if ((op == SG_OP_ALL || op == SG_OP_ANY || op == SG_OP_BROADCAST_FIRST) && wc == 5) {
+				supported = true;
+			} else if (op == SG_OP_BROADCAST && wc == 6) {
+				supported = true;
+			} else if (op == SG_OP_BALLOT && wc == 5) {
+				supported = true;
+				needs_uint_consts = true;
+			} else if (op == SG_OP_BALLOT_BIT_COUNT && wc == 6) {
+				uint32_t group_op = read_word(data, len, pos + 4);
+				supported = group_op == SG_GROUP_OP_REDUCE || group_op == SG_GROUP_OP_EXCLUSIVE_SCAN;
+				needs_uint_consts = true;
+			} else if (op >= SG_OP_ARITH_FIRST && op <= SG_OP_ARITH_LAST && wc == 6) {
+				supported = read_word(data, len, pos + 4) == SG_GROUP_OP_REDUCE;
+			}
+			if (!supported) {
+				return p_bytes; // Unsupported subgroup use; leave for exclusion.
+			}
+		}
+		pos += wc;
+	}
+	if (!found) {
+		return p_bytes;
+	}
+	if (needs_uint_consts && uint_type == 0) {
+		return p_bytes;
+	}
+
+	uint32_t next_id = read_word(data, len, 3);
+	uint32_t uint_0 = 0;
+	uint32_t uint_1 = 0;
+	if (needs_uint_consts) {
+		uint_0 = next_id++;
+		uint_1 = next_id++;
+	}
+
+	Vector<uint8_t> out;
+	append_bytes(out, data, 0, 5 * 4);
+	pos = 5;
+	while (pos < total_words) {
+		uint32_t w0 = read_word(data, len, pos);
+		uint32_t wc = (w0 >> 16);
+		uint16_t op = (uint16_t)(w0 & 0xFFFF);
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		if (op == SG_OP_CAPABILITY && wc == 2 && read_word(data, len, pos + 1) >= SG_CAP_GROUP_NONUNIFORM_FIRST && read_word(data, len, pos + 1) <= SG_CAP_GROUP_NONUNIFORM_LAST) {
+			// Dropped: nothing references subgroup capabilities anymore.
+		} else if (op >= SG_GROUP_NONUNIFORM_FIRST && op <= SG_GROUP_NONUNIFORM_LAST) {
+			uint32_t result_type = read_word(data, len, pos + 1);
+			uint32_t result_id = read_word(data, len, pos + 2);
+			if (op == SG_OP_BALLOT) {
+				// (pred ? 1u : 0u, 0, 0, 0).
+				uint32_t pred = read_word(data, len, pos + 4);
+				uint32_t sel = next_id++;
+				push_word(out, (6u << 16) | SG_OP_SELECT);
+				push_word(out, uint_type);
+				push_word(out, sel);
+				push_word(out, pred);
+				push_word(out, uint_1);
+				push_word(out, uint_0);
+				push_word(out, (7u << 16) | SG_OP_COMPOSITE_CONSTRUCT);
+				push_word(out, result_type);
+				push_word(out, result_id);
+				push_word(out, sel);
+				push_word(out, uint_0);
+				push_word(out, uint_0);
+				push_word(out, uint_0);
+			} else if (op == SG_OP_BALLOT_BIT_COUNT) {
+				uint32_t group_op = read_word(data, len, pos + 4);
+				uint32_t value = read_word(data, len, pos + 5);
+				if (group_op == SG_GROUP_OP_EXCLUSIVE_SCAN) {
+					push_word(out, (4u << 16) | OP_COPY_OBJECT);
+					push_word(out, result_type);
+					push_word(out, result_id);
+					push_word(out, uint_0);
+				} else {
+					uint32_t extracted = next_id++;
+					push_word(out, (5u << 16) | SG_OP_COMPOSITE_EXTRACT);
+					push_word(out, result_type);
+					push_word(out, extracted);
+					push_word(out, value);
+					push_word(out, 0);
+					push_word(out, (5u << 16) | SG_OP_BITWISE_AND);
+					push_word(out, result_type);
+					push_word(out, result_id);
+					push_word(out, extracted);
+					push_word(out, uint_1);
+				}
+			} else {
+				// Broadcast(First)/All/Any/Reduce arithmetic: the value operand
+				// sits right after the execution scope in every layout.
+				uint32_t value = (op >= SG_OP_ARITH_FIRST && op <= SG_OP_ARITH_LAST) ? read_word(data, len, pos + 5) : read_word(data, len, pos + 4);
+				push_word(out, (4u << 16) | OP_COPY_OBJECT);
+				push_word(out, result_type);
+				push_word(out, result_id);
+				push_word(out, value);
+			}
+		} else {
+			append_bytes(out, data, (int64_t)pos * 4, (int64_t)wc * 4);
+			if (needs_uint_consts && pos == uint_type_def_pos) {
+				push_word(out, (4u << 16) | OP_CONSTANT);
+				push_word(out, uint_type);
+				push_word(out, uint_0);
+				push_word(out, 0);
+				push_word(out, (4u << 16) | OP_CONSTANT);
+				push_word(out, uint_type);
+				push_word(out, uint_1);
+				push_word(out, 1);
+			}
+		}
+		pos += wc;
+	}
+	uint8_t *out_data = out.ptrw();
+	memcpy(out_data + 3 * 4, &next_id, 4);
+	return out;
+}
+
+// ---- lower_helper_invocation_to_false ----
+//
+// Tint's reader rejects the HelperInvocation builtin (no WGSL equivalent in
+// its era). The cluster writer only reads it to skip idempotent atomicOr
+// merges from helper invocations -- and upstream already ships a mode that
+// disables that check entirely (sc_use_helper_check, off on Apple where the
+// builtin is unreliable). Reproduce that mode structurally: turn the
+// builtin input into a Private variable initialized to false, so every
+// read sees "not a helper invocation".
+
+static constexpr uint32_t HI_BUILTIN_HELPER_INVOCATION = 23;
+static constexpr uint32_t HI_SC_PRIVATE = 6;
+
+Vector<uint8_t> lower_helper_invocation_to_false(const Vector<uint8_t> &p_bytes) {
+	const int64_t len = p_bytes.size();
+	const uint32_t total_words = (uint32_t)(len / 4);
+	if (total_words < 5) {
+		return p_bytes;
+	}
+	const uint8_t *data = p_bytes.ptr();
+
+	// Prescan: the decorated variable, its pointer type and the pointee bool.
+	uint32_t helper_var = 0;
+	uint32_t pos = 5;
+	while (pos < total_words) {
+		uint32_t w0 = read_word(data, len, pos);
+		uint32_t wc = (w0 >> 16);
+		uint16_t op = (uint16_t)(w0 & 0xFFFF);
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		if (op == OP_DECORATE && wc == 4 && read_word(data, len, pos + 2) == DECO_BUILTIN && read_word(data, len, pos + 3) == HI_BUILTIN_HELPER_INVOCATION) {
+			helper_var = read_word(data, len, pos + 1);
+			break;
+		}
+		pos += wc;
+	}
+	if (helper_var == 0) {
+		return p_bytes;
+	}
+
+	// Find the variable's pointer type and that type's pointee.
+	uint32_t old_ptr_type = 0;
+	uint32_t bool_type = 0;
+	uint32_t ptr_def_pos = 0;
+	pos = 5;
+	while (pos < total_words) {
+		uint32_t w0 = read_word(data, len, pos);
+		uint32_t wc = (w0 >> 16);
+		uint16_t op = (uint16_t)(w0 & 0xFFFF);
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		if (op == OP_VARIABLE && wc >= 4 && read_word(data, len, pos + 2) == helper_var) {
+			old_ptr_type = read_word(data, len, pos + 1);
+		}
+		pos += wc;
+	}
+	if (old_ptr_type == 0) {
+		return p_bytes;
+	}
+	pos = 5;
+	while (pos < total_words) {
+		uint32_t w0 = read_word(data, len, pos);
+		uint32_t wc = (w0 >> 16);
+		uint16_t op = (uint16_t)(w0 & 0xFFFF);
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		if (op == OP_TYPE_POINTER && wc == 4 && read_word(data, len, pos + 1) == old_ptr_type) {
+			bool_type = read_word(data, len, pos + 3);
+			ptr_def_pos = pos;
+		}
+		pos += wc;
+	}
+	if (bool_type == 0) {
+		return p_bytes;
+	}
+
+	uint32_t next_id = read_word(data, len, 3);
+	uint32_t private_ptr_type = next_id++;
+	uint32_t false_const = next_id++;
+
+	Vector<uint8_t> out;
+	append_bytes(out, data, 0, 5 * 4);
+	pos = 5;
+	while (pos < total_words) {
+		uint32_t w0 = read_word(data, len, pos);
+		uint32_t wc = (w0 >> 16);
+		uint16_t op = (uint16_t)(w0 & 0xFFFF);
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		if (op == OP_DECORATE && wc == 4 && read_word(data, len, pos + 1) == helper_var && read_word(data, len, pos + 2) == DECO_BUILTIN) {
+			// Dropped builtin decoration.
+		} else if (op == OP_VARIABLE && wc >= 4 && read_word(data, len, pos + 2) == helper_var) {
+			push_word(out, (5u << 16) | OP_VARIABLE);
+			push_word(out, private_ptr_type);
+			push_word(out, helper_var);
+			push_word(out, HI_SC_PRIVATE);
+			push_word(out, false_const);
+		} else if (op == OP_ENTRY_POINT) {
+			// Interface must list only Input/Output under 1.3; drop the id.
+			// Words: [w0, exec model, entry id, name string..., interface...].
+			uint32_t name_end = 3;
+			while (name_end < wc) {
+				uint32_t nw = read_word(data, len, pos + name_end);
+				name_end++;
+				if ((nw & 0xFF000000) == 0 || (nw & 0x00FF0000) == 0 || (nw & 0x0000FF00) == 0 || (nw & 0x000000FF) == 0) {
+					break;
+				}
+			}
+			LocalVector<uint32_t> kept;
+			for (uint32_t i = name_end; i < wc; i++) {
+				uint32_t iface = read_word(data, len, pos + i);
+				if (iface != helper_var) {
+					kept.push_back(iface);
+				}
+			}
+			uint32_t new_wc = name_end + kept.size();
+			push_word(out, (new_wc << 16) | OP_ENTRY_POINT);
+			for (uint32_t i = 1; i < name_end; i++) {
+				push_word(out, read_word(data, len, pos + i));
+			}
+			for (uint32_t i = 0; i < kept.size(); i++) {
+				push_word(out, kept[i]);
+			}
+		} else {
+			append_bytes(out, data, (int64_t)pos * 4, (int64_t)wc * 4);
+			if (pos == ptr_def_pos) {
+				push_word(out, (4u << 16) | OP_TYPE_POINTER);
+				push_word(out, private_ptr_type);
+				push_word(out, HI_SC_PRIVATE);
+				push_word(out, bool_type);
+				push_word(out, (3u << 16) | OP_CONSTANT_FALSE);
+				push_word(out, bool_type);
+				push_word(out, false_const);
+			}
+		}
+		pos += wc;
+	}
+	uint8_t *out_data = out.ptrw();
+	memcpy(out_data + 3 * 4, &next_id, 4);
 	return out;
 }
 
