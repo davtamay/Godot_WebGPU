@@ -60,6 +60,26 @@ Vector<uint8_t> lower_view_index_to_zero(const Vector<uint8_t> &p_bytes);
 // Rewrites pointer types, removes access chains, and updates loads.
 Vector<uint8_t> flatten_binding_arrays(const Vector<uint8_t> &p_bytes);
 
+// Replace OpCopyLogical (SPIR-V 1.4, rejected by Tint) with OpCopyObject,
+// which has the identical word layout. Emitted by glslang for copies between
+// structurally-identical struct types (clustered scene shader vertex stages).
+Vector<uint8_t> rewrite_copy_logical(const Vector<uint8_t> &p_bytes);
+
+// Drop NonWritable decorations targeting Function-storage variables
+// (a SPIR-V 1.4-legal glslang hint that Tint's 1.3-era reader rejects).
+Vector<uint8_t> strip_nonwritable_on_function_vars(const Vector<uint8_t> &p_bytes);
+
+// Lower subgroup (GroupNonUniform) operations to exact single-invocation
+// semantics: reductions/broadcasts become the value itself, ballots become
+// a one-lane mask. Correct for the clustered renderer's use of subgroups as
+// a wave-coherence optimization over idempotent merges. Unsupported subgroup
+// instructions bail the pass, leaving the variant for bake exclusion.
+Vector<uint8_t> lower_subgroup_ops_to_single_invocation(const Vector<uint8_t> &p_bytes);
+
+// Replace the HelperInvocation builtin input with a Private variable
+// initialized to false (reproduces upstream's sc_use_helper_check-off mode).
+Vector<uint8_t> lower_helper_invocation_to_false(const Vector<uint8_t> &p_bytes);
+
 // Fan arrays of handle types out into one standalone variable per element at
 // binding p_binding_base + original_binding * p_binding_stride + element,
 // matching the layout the WebGPU driver builds for arrayed uniforms.
