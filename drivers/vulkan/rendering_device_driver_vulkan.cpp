@@ -7389,6 +7389,8 @@ bool RenderingDeviceDriverVulkan::has_feature(Features p_feature) {
 			return shader_capabilities.shader_float16_is_supported && physical_device_features.shaderInt16 && storage_buffer_capabilities.storage_buffer_16_bit_access_is_supported;
 		case SUPPORTS_FRAGMENT_SHADER_WITH_ONLY_SIDE_EFFECTS:
 			return true;
+		case SUPPORTS_READ_WRITE_STORAGE_IMAGES_ANY_FORMAT:
+			return true;
 		case SUPPORTS_BUFFER_DEVICE_ADDRESS:
 			return buffer_device_address_support;
 		case SUPPORTS_IMAGE_ATOMIC_32_BIT:

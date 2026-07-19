@@ -2693,6 +2693,8 @@ bool RenderingDeviceDriverMetal::has_feature(Features p_feature) {
 			return true;
 		case SUPPORTS_FRAGMENT_SHADER_WITH_ONLY_SIDE_EFFECTS:
 			return true;
+		case SUPPORTS_READ_WRITE_STORAGE_IMAGES_ANY_FORMAT:
+			return true;
 		case SUPPORTS_BUFFER_DEVICE_ADDRESS:
 			return device_properties->features.supports_gpu_address;
 		case SUPPORTS_METALFX_SPATIAL:
