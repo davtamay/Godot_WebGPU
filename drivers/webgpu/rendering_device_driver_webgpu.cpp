@@ -1847,6 +1847,10 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 	// etc.); Tint also converts read-only storage images into sampled
 	// textures, so reflection alone cannot type these bindings.
 	HashMap<uint64_t, WGPUTextureSampleType> sampled_texture_decls;
+	// Texture bindings whose identifier is used in any way other than a
+	// direct textureLoad call; float slots never used that way become
+	// UnfilterableFloat (see ShaderInfo::load_only_float_bindings).
+	HashSet<uint64_t> filter_used_texture_keys;
 	// Bindings the WGSL declares as multisampled textures; the layout must
 	// carry the multisampled flag.
 	HashSet<uint64_t> multisampled_texture_bindings;
@@ -2025,6 +2029,55 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 				}
 				call = strstr(p, "textureSample");
 			}
+			// A texture slot is load-only when every occurrence of its
+			// identifier is either the declaration or directly inside
+			// textureLoad(...). Anything else — a sample call, or being
+			// passed to a helper function that may sample it — disqualifies
+			// the slot (Dawn validates texture/sampler pairings statically
+			// through calls).
+			for (const KeyValue<String, uint64_t> &tn : texture_names) {
+				if (filter_used_texture_keys.has(tn.value)) {
+					continue;
+				}
+				const CharString name_utf8 = tn.key.utf8();
+				const int64_t name_len = name_utf8.length();
+				const char *hay = scan_text;
+				const char *hit;
+				while ((hit = strstr(hay, name_utf8.get_data())) != nullptr) {
+					const char *after = hit + name_len;
+					hay = after;
+					const bool left_ok = hit == scan_text || !(is_ascii_alphanumeric_char(hit[-1]) || hit[-1] == '_');
+					const bool right_ok = !(is_ascii_alphanumeric_char(*after) || *after == '_');
+					if (!left_ok || !right_ok) {
+						continue;
+					}
+					const char *colon = after;
+					while (*colon == ' ') {
+						colon++;
+					}
+					if (*colon == ':') {
+						continue; // Declaration site.
+					}
+					bool is_load = false;
+					const char *lp = hit;
+					while (lp > scan_text && lp[-1] == ' ') {
+						lp--;
+					}
+					if (lp > scan_text && lp[-1] == '(') {
+						lp--;
+						while (lp > scan_text && lp[-1] == ' ') {
+							lp--;
+						}
+						if (lp - scan_text >= 11 && strncmp(lp - 11, "textureLoad", 11) == 0) {
+							is_load = true;
+						}
+					}
+					if (!is_load) {
+						filter_used_texture_keys.insert(tn.value);
+						break;
+					}
+				}
+			}
 		}
 		if (strstr((const char *)wgsl.ptr(), "enable f16;") != nullptr) {
 			// The device was not requested with shader-f16; a module that
@@ -2045,6 +2098,15 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 		}
 		shader->modules.push_back(module);
 		shader->module_stages.push_back((ShaderStage)stage.shader_stage);
+	}
+
+	// Float texture slots never used with a filtering call become
+	// UnfilterableFloat, which additionally admits depth-aspect views (the
+	// GI pass texelFetches the raw depth buffer through a plain texture2D).
+	for (const KeyValue<uint64_t, WGPUTextureSampleType> &kv : sampled_texture_decls) {
+		if (kv.value == WGPUTextureSampleType_Float && !filter_used_texture_keys.has(kv.key)) {
+			shader->load_only_float_bindings.insert(kv.key);
+		}
 	}
 
 	// Depth-format slots: reflection formats plus WGSL texture_depth_*
@@ -2299,6 +2361,11 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 						// Multisampled bindings cannot be filterable.
 						entry.texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
 					}
+					if (entry.texture.sampleType == WGPUTextureSampleType_Float && shader->load_only_float_bindings.has(((uint64_t)set_index << 32) | entry.binding)) {
+						// textureLoad-only slot: unfilterable also admits
+						// depth-aspect views (all float formats stay valid).
+						entry.texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
+					}
 				} break;
 				case UNIFORM_TYPE_IMAGE: {
 					// Tint converts read-only storage images into sampled
@@ -2366,6 +2433,11 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 					entry.texture.multisampled = multisampled_texture_bindings.has(((uint64_t)set_index << 32) | entry.binding);
 					if (entry.texture.multisampled && entry.texture.sampleType == WGPUTextureSampleType_Float) {
 						// Multisampled bindings cannot be filterable.
+						entry.texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
+					}
+					if (entry.texture.sampleType == WGPUTextureSampleType_Float && shader->load_only_float_bindings.has(((uint64_t)set_index << 32) | entry.binding)) {
+						// textureLoad-only slot: unfilterable also admits
+						// depth-aspect views (all float formats stay valid).
 						entry.texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
 					}
 					cap_vertex_budget(entry);
@@ -2882,11 +2954,14 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_uniform_set_build(VectorView<BoundUn
 				} else {
 					const TextureInfo *bound_texture = (const TextureInfo *)uniform.ids[0].id;
 					const bool bound_depth = bound_texture->wgpu_format == WGPUTextureFormat_Depth16Unorm || bound_texture->wgpu_format == WGPUTextureFormat_Depth24Plus || bound_texture->wgpu_format == WGPUTextureFormat_Depth32Float || bound_texture->wgpu_format == WGPUTextureFormat_Depth24PlusStencil8 || bound_texture->wgpu_format == WGPUTextureFormat_Depth32FloatStencil8;
-					if (bound_depth && !shader->depth_declared_bindings.has(((uint64_t)p_set_index << 32) | remapped_binding)) {
+					if (bound_depth && !shader->depth_declared_bindings.has(((uint64_t)p_set_index << 32) | remapped_binding) && !shader->load_only_float_bindings.has(((uint64_t)p_set_index << 32) | remapped_binding)) {
 						// A depth texture bound where the shader samples float
-						// (typically the engine's default-texture substitution):
-						// WebGPU rejects the sample-type mismatch, so bind a
-						// placeholder instead.
+						// with filtering (typically the engine's default-texture
+						// substitution): WebGPU rejects the sample-type
+						// mismatch, so bind a placeholder instead.
+						// textureLoad-only slots are UnfilterableFloat, which
+						// depth-aspect views satisfy — they fall through to the
+						// real view below.
 						entry.textureView = _get_placeholder_float_view();
 					} else if (bound_depth && (bound_texture->wgpu_format == WGPUTextureFormat_Depth24PlusStencil8 || bound_texture->wgpu_format == WGPUTextureFormat_Depth32FloatStencil8)) {
 						// Combined depth/stencil: sampled bindings need a
