@@ -29,6 +29,7 @@
 /**************************************************************************/
 
 #include "shader_baker_export_plugin.h"
+#include "servers/rendering/renderer_rd/shaders/effects/bokeh_dof_raster.glsl.gen.h"
 
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
@@ -160,6 +161,21 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	// platforms without a shader compiler. Variant lists must match the ones
 	// in CopyEffects exactly (they determine the cache path hash).
 	if (RendererRD::CopyEffects::get_singleton() != nullptr && !RendererRD::CopyEffects::get_singleton()->get_raster_effects().has_flag(RendererRD::CopyEffects::RASTER_EFFECT_OCTMAP)) {
+		// The raster bokeh shares the redirect condition on the target.
+		BokehDofRasterShaderRD bokeh_raster;
+		Vector<String> bokeh_modes;
+		bokeh_modes.push_back("\n#define MODE_GEN_BLUR_SIZE\n");
+		bokeh_modes.push_back("\n#define MODE_BOKEH_BOX\n#define OUTPUT_WEIGHT\n");
+		bokeh_modes.push_back("\n#define MODE_BOKEH_BOX\n");
+		bokeh_modes.push_back("\n#define MODE_BOKEH_HEXAGONAL\n#define OUTPUT_WEIGHT\n");
+		bokeh_modes.push_back("\n#define MODE_BOKEH_HEXAGONAL\n");
+		bokeh_modes.push_back("\n#define MODE_BOKEH_CIRCULAR\n#define OUTPUT_WEIGHT\n");
+		bokeh_modes.push_back("\n#define MODE_COMPOSITE_BOKEH\n");
+		bokeh_raster.initialize(bokeh_modes);
+		RID bokeh_version = bokeh_raster.version_create();
+		_customize_shader_version(&bokeh_raster, bokeh_version);
+		bokeh_raster.version_free(bokeh_version);
+
 		OctmapDownsamplerRasterShaderRD octmap_downsampler_raster;
 		octmap_downsampler_raster.initialize({ "" });
 		RID octmap_downsampler_version = octmap_downsampler_raster.version_create();
