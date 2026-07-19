@@ -1030,6 +1030,10 @@ public:
 		SUPPORTS_FRAGMENT_SHADER_WITH_ONLY_SIDE_EFFECTS,
 		SUPPORTS_BUFFER_DEVICE_ADDRESS,
 		SUPPORTS_IMAGE_ATOMIC_32_BIT,
+		// Read-write storage image access in formats beyond 32-bit
+		// single-channel (e.g. rgba16f); WebGPU restricts read_write to
+		// r32float/r32uint/r32sint.
+		SUPPORTS_READ_WRITE_STORAGE_IMAGES_ANY_FORMAT,
 		SUPPORTS_VULKAN_MEMORY_MODEL,
 		SUPPORTS_FRAMEBUFFER_DEPTH_RESOLVE,
 		SUPPORTS_POINT_SIZE,
