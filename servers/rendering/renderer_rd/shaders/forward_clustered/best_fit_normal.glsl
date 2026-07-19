@@ -6,7 +6,13 @@
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
+#ifdef USE_RGBA8_FORMAT
+// Fallback for drivers without r8unorm storage support (e.g. WebGPU); only
+// the red channel is ever sampled.
+layout(rgba8, set = 0, binding = 0) uniform restrict writeonly image2D current_image;
+#else
 layout(r8, set = 0, binding = 0) uniform restrict writeonly image2D current_image;
+#endif
 
 // This shader is used to generate a "best fit normal texture" as described by:
 // https://advances.realtimerendering.com/s2010/Kaplanyan-CryEngine3(SIGGRAPH%202010%20Advanced%20RealTime%20Rendering%20Course).pdf
