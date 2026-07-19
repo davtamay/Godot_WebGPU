@@ -133,6 +133,12 @@ private:
 		// depth reflection formats); depth textures bound OUTSIDE these slots
 		// get a placeholder float texture (WebGPU validates sample types).
 		HashSet<uint64_t> depth_declared_bindings;
+		// Float texture bindings the WGSL only reads via textureLoad (no
+		// textureSample*/textureGather pairing). Their layout entries are
+		// UnfilterableFloat, which additionally admits depth-aspect views —
+		// e.g. the GI pass texelFetches the raw depth buffer through a plain
+		// texture2D, which tint types texture_2d<f32>.
+		HashSet<uint64_t> load_only_float_bindings;
 		// Arrayed uniforms whose WGSL was flattened to a single binding by
 		// the bake-time SPIR-V pass: the layout and bind groups use one
 		// entry at the original binding instead of the fan-out range.
