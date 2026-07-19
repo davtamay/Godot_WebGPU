@@ -80,6 +80,11 @@ Vector<uint8_t> lower_subgroup_ops_to_single_invocation(const Vector<uint8_t> &p
 // initialized to false (reproduces upstream's sc_use_helper_check-off mode).
 Vector<uint8_t> lower_helper_invocation_to_false(const Vector<uint8_t> &p_bytes);
 
+// Substitute storage image formats WGSL cannot express (r16f/r8/rg8-class)
+// with value-compatible legal ones (r32f/rgba8/...); the driver applies the
+// same substitution at texture creation.
+Vector<uint8_t> substitute_storage_image_formats(const Vector<uint8_t> &p_bytes);
+
 // Fan arrays of handle types out into one standalone variable per element at
 // binding p_binding_base + original_binding * p_binding_stride + element,
 // matching the layout the WebGPU driver builds for arrayed uniforms.
