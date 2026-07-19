@@ -131,6 +131,11 @@ const Engine = (function () {
 				'maxUniformBufferBindingSize',
 				'maxBufferSize',
 				'maxColorAttachmentBytesPerSample',
+				'maxComputeInvocationsPerWorkgroup',
+				'maxComputeWorkgroupSizeX',
+				'maxComputeWorkgroupSizeY',
+				'maxComputeWorkgroupSizeZ',
+				'maxComputeWorkgroupStorageSize',
 			].forEach((name) => {
 				if (adapter['limits'] && adapter['limits'][name] !== undefined) {
 					requiredLimits[name] = adapter['limits'][name];
