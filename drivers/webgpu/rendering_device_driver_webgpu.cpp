@@ -911,6 +911,32 @@ static bool _wgpu_format_supports_storage(WGPUTextureFormat p_format) {
 	}
 }
 
+// Storage-format substitution mirror of the bake-time SPIR-V pass: formats
+// WGSL cannot use for storage images are created as value-compatible legal
+// ones (the baked shaders declare the substituted format, so bindings and
+// layouts agree end to end).
+static WGPUTextureFormat _wgpu_storage_substitute(WGPUTextureFormat p_format) {
+	switch (p_format) {
+		case WGPUTextureFormat_R16Float:
+			return WGPUTextureFormat_R32Float;
+		case WGPUTextureFormat_RG16Float:
+			return WGPUTextureFormat_RGBA16Float;
+		case WGPUTextureFormat_RG11B10Ufloat:
+			return WGPUTextureFormat_RGBA16Float;
+		case WGPUTextureFormat_R8Unorm:
+			// r32f rather than rgba8: read_write access stays legal.
+			return WGPUTextureFormat_R32Float;
+		case WGPUTextureFormat_RG8Unorm:
+			return WGPUTextureFormat_RGBA8Unorm;
+		case WGPUTextureFormat_RG16Sint:
+			return WGPUTextureFormat_RG32Sint;
+		case WGPUTextureFormat_R16Uint:
+			return WGPUTextureFormat_R32Uint;
+		default:
+			return p_format;
+	}
+}
+
 static WGPUTextureFormat _wgpu_srgb_sibling(WGPUTextureFormat p_format) {
 	switch (p_format) {
 		case WGPUTextureFormat_RGBA8Unorm:
@@ -949,7 +975,7 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 			ERR_FAIL_V_MSG(TextureID(), vformat("Unsupported texture swizzle (%d,%d,%d,%d) for format %d on WebGPU.", p_view.swizzle_r, p_view.swizzle_g, p_view.swizzle_b, p_view.swizzle_a, p_format.format));
 		}
 	}
-	const WGPUTextureFormat wgpu_format = swizzle_expand != TextureInfo::SWIZZLE_EXPAND_NONE ? WGPUTextureFormat_RGBA8Unorm : _data_format_to_wgpu(p_format.format);
+	WGPUTextureFormat wgpu_format = swizzle_expand != TextureInfo::SWIZZLE_EXPAND_NONE ? WGPUTextureFormat_RGBA8Unorm : _data_format_to_wgpu(p_format.format);
 	ERR_FAIL_COND_V_MSG(wgpu_format == WGPUTextureFormat_Undefined, TextureID(), vformat("Unsupported texture format %d on the WebGPU driver.", p_format.format));
 	ERR_FAIL_COND_V_MSG(p_format.samples != TEXTURE_SAMPLES_1 && p_format.samples != TEXTURE_SAMPLES_4, TextureID(), "WebGPU only supports 1 or 4 samples per texture.");
 
@@ -963,6 +989,11 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 		// rejects at the descriptor level. The texture only breaks if a
 		// shader actually reads it as a storage image, which Dawn validates
 		// at bind group creation.
+		if (!_wgpu_format_supports_storage(wgpu_format)) {
+			// Mirror of the bake-time SPIR-V substitution: the shaders
+			// declare the substituted format, so the texture must be it.
+			wgpu_format = _wgpu_storage_substitute(wgpu_format);
+		}
 		if (_wgpu_format_supports_storage(wgpu_format)) {
 			usage |= WGPUTextureUsage_StorageBinding;
 		}
@@ -1107,6 +1138,11 @@ BitField<RenderingDeviceDriver::TextureUsageBits> RenderingDeviceDriverWebGPU::t
 			break;
 		default:
 			break;
+	}
+	if (_wgpu_storage_substitute(format) != format) {
+		// Delivered through the storage-format substitution (the texture is
+		// created as the substituted format; baked shaders declare it too).
+		supported.set_flag(TEXTURE_USAGE_STORAGE_BIT);
 	}
 	if (format == WGPUTextureFormat_R32Uint || format == WGPUTextureFormat_R32Sint) {
 		supported.set_flag(TEXTURE_USAGE_STORAGE_ATOMIC_BIT);
