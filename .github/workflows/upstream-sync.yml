@@ -13,6 +13,9 @@
 # - A conflicted rebase or failed verification opens/updates the tracking
 #   issue (label: upstream-sync) naming the failing patch; a fresh candidate
 #   updates the same issue with a promotion checklist.
+# - The tracking label is created idempotently every run, and reporting is
+#   non-fatal: an informational report can never turn a clean rebase red
+#   (a real rebase/verify failure still fails the run).
 # - The workflow re-enables itself every run (GitHub disables schedules
 #   after 60 days of repo inactivity).
 # - Old candidates/backup tags are pruned (newest 3 kept).
@@ -51,6 +54,13 @@ jobs:
       - name: Keep the schedule alive
         run: |
           gh api -X PUT "repos/${{ github.repository }}/actions/workflows/upstream-sync.yml/enable" || true
+
+      - name: Ensure the tracking label exists
+        run: |
+          gh label create upstream-sync \
+            --color 1d76db \
+            --description "Automated upstream rebase status" \
+            --force || echo "::warning::could not ensure the upstream-sync label; issue reporting may be skipped"
 
       - name: Fetch upstream
         run: |
@@ -119,8 +129,12 @@ jobs:
             echo "pruning tag $t"; git push origin --delete "$t" || true
           done
 
+      # Reporting is informational and must never fail the run: continue-on-error
+      # keeps a clean rebase green even if the GitHub issue API hiccups, and the
+      # guards keep the step itself green in the normal case.
       - name: Report candidate ready
         if: success() && steps.fresh.outputs.count != '0'
+        continue-on-error: true
         run: |
           STAMP=${{ steps.rebase.outputs.stamp }}
           COUNT=${{ steps.fresh.outputs.count }}
@@ -128,23 +142,24 @@ jobs:
           L1="Candidate \`auto-rebase/$STAMP\` is pushed ($COUNT new upstream commits; clean replay, check-stack OK). Baseline CI builds it automatically."
           L2="Promote locally with \`bash misc/webgpu_scripts/promote-candidate.sh $STAMP\` and run the local gates (tint bake, strict probe, headset spot-check) before force-with-lease pushing."
           BODY=$(printf '%s\n\n%s\n\n%s' "$L1" "$L2" "$DRIFT")
-          N=$(gh issue list --label upstream-sync --state open --json number --jq length)
+          N=$(gh issue list --label upstream-sync --state open --json number --jq length 2>/dev/null || echo 0)
           if [ "$N" = "0" ]; then
-            gh issue create --title "Upstream sync: candidate ready" --label upstream-sync --body "$BODY"
+            gh issue create --title "Upstream sync: candidate ready" --label upstream-sync --body "$BODY" || echo "::warning::could not create the tracking issue (rebase result is unaffected)"
           else
-            NUM=$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number')
-            gh issue comment "$NUM" --body "$BODY"
+            NUM=$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number' 2>/dev/null || echo "")
+            [ -n "$NUM" ] && gh issue comment "$NUM" --body "$BODY" || echo "::warning::could not update the tracking issue (rebase result is unaffected)"
           fi
 
       - name: Report failure
         if: failure()
+        continue-on-error: true
         run: |
           L1="The scheduled upstream rebase FAILED (run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}). Either a patch conflicted with new upstream changes or stack verification failed - see the log for the offending patch. The stack itself is untouched; resolve locally (backup tag was pushed if the rebase step ran)."
           BODY=$(printf '%s\n\n%s' "$L1" "${{ steps.empin.outputs.drift }}")
-          N=$(gh issue list --label upstream-sync --state open --json number --jq length)
+          N=$(gh issue list --label upstream-sync --state open --json number --jq length 2>/dev/null || echo 0)
           if [ "$N" = "0" ]; then
-            gh issue create --title "Upstream sync: FAILED - needs manual rebase" --label upstream-sync --body "$BODY"
+            gh issue create --title "Upstream sync: FAILED - needs manual rebase" --label upstream-sync --body "$BODY" || echo "::warning::could not create the tracking issue"
           else
-            NUM=$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number')
-            gh issue comment "$NUM" --body "$BODY"
+            NUM=$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number' 2>/dev/null || echo "")
+            [ -n "$NUM" ] && gh issue comment "$NUM" --body "$BODY" || echo "::warning::could not update the tracking issue"
           fi
