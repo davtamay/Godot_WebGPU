@@ -9,10 +9,27 @@
 # local-only gates (tint bakes, strict pixel probe on a real GPU, in-headset
 # checks). Run misc/webgpu_scripts/promote-candidate.sh to promote.
 #
+# A faithful replay carries upstream's own .github/workflows/ updates, and the
+# token GitHub hands to a workflow run is never allowed to push those. Pushing
+# candidates therefore needs a repository secret SYNC_PAT: a fine-grained
+# personal access token for this repository with Contents and Workflows set to
+# read and write.
+#
+# The run's verdict is the REPLAY, not the push: a clean rebase that cannot
+# publish its candidate warns and stays green, because the question this
+# workflow answers - do the patches still apply to upstream master? - has been
+# answered either way, and the replay reproduces locally byte for byte. Without
+# SYNC_PAT the only thing lost is the convenience branch (and the baseline
+# build of it) on weeks when upstream touched a workflow file.
+#
 # Resilience measures:
 # - A conflicted rebase or failed verification opens/updates the tracking
 #   issue (label: upstream-sync) naming the failing patch; a fresh candidate
 #   updates the same issue with a promotion checklist.
+# - GH_REPO pins every gh call to this fork. Once the upstream remote exists,
+#   gh's own remote ranking prefers a remote named "upstream", so unpinned
+#   calls resolve to godotengine/godot - which is where the reporting steps
+#   were looking for the label they could not find.
 # - The tracking label is created idempotently every run, and reporting is
 #   non-fatal: an informational report can never turn a clean rebase red
 #   (a real rebase/verify failure still fails the run).
@@ -44,12 +61,14 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Checkout stack
         uses: actions/checkout@v4
         with:
           ref: webgpu-stack
           fetch-depth: 0
+          token: ${{ secrets.SYNC_PAT || github.token }}
 
       - name: Keep the schedule alive
         run: |
@@ -95,7 +114,12 @@ jobs:
           git config user.email "upstream-sync[bot]@users.noreply.github.com"
           STAMP=$(date -u +%Y%m%d)
           echo "stamp=$STAMP" >> "$GITHUB_OUTPUT"
-          git tag "backup/auto-$STAMP" HEAD
+          # -f because the tag name is dated, not per-run: a second run on the
+          # same day (a re-run after a failure, which is exactly when this
+          # matters) would otherwise die on "tag already exists". The tag
+          # records the head this run rebased FROM, so moving it to the current
+          # head is what recovery wants.
+          git tag -f "backup/auto-$STAMP" HEAD
           if ! git rebase upstream/master; then
             echo "::error::Rebase conflicted on: $(git log -1 --format=%s REBASE_HEAD 2>/dev/null || echo '(unknown patch)')"
             git rebase --abort || true
@@ -112,15 +136,21 @@ jobs:
           bash misc/webgpu_scripts/check-stack.sh
 
       - name: Push candidate branch and backup tag
+        id: candidate
         if: steps.fresh.outputs.count != '0'
         run: |
           STAMP=${{ steps.rebase.outputs.stamp }}
-          git push origin "backup/auto-$STAMP"
-          git push --force origin "HEAD:auto-rebase/$STAMP"
-          echo "Candidate: auto-rebase/$STAMP (baseline CI builds it next)."
+          git push --force origin "backup/auto-$STAMP" || echo "::warning::could not push the backup tag"
+          if git push --force origin "HEAD:auto-rebase/$STAMP"; then
+            echo "pushed=yes" >> "$GITHUB_OUTPUT"
+            echo "Candidate: auto-rebase/$STAMP (baseline CI builds it next)."
+          else
+            echo "pushed=no" >> "$GITHUB_OUTPUT"
+            echo "::warning::The replay is clean but the candidate branch could not be pushed. A rejection naming 'workflows permission' means upstream changed a file under .github/workflows/ and this run's default token may not push those - add the SYNC_PAT secret described in the workflow header to restore automatic candidates. Rebase locally in the meantime: the replay is deterministic and reproduces exactly."
+          fi
 
       - name: Prune old candidates and backup tags (keep newest 3)
-        if: steps.fresh.outputs.count != '0'
+        if: steps.fresh.outputs.count != '0' && steps.candidate.outputs.pushed == 'yes'
         run: |
           git ls-remote --heads origin "auto-rebase/*" | awk '{print $2}' | sed 's|refs/heads/||' | sort | head -n -3 | while read -r b; do
             echo "pruning branch $b"; git push origin --delete "$b" || true
@@ -139,8 +169,13 @@ jobs:
           STAMP=${{ steps.rebase.outputs.stamp }}
           COUNT=${{ steps.fresh.outputs.count }}
           DRIFT="${{ steps.empin.outputs.drift }}"
-          L1="Candidate \`auto-rebase/$STAMP\` is pushed ($COUNT new upstream commits; clean replay, check-stack OK). Baseline CI builds it automatically."
-          L2="Promote locally with \`bash misc/webgpu_scripts/promote-candidate.sh $STAMP\` and run the local gates (tint bake, strict probe, headset spot-check) before force-with-lease pushing."
+          if [ "${{ steps.candidate.outputs.pushed }}" = "yes" ]; then
+            L1="Candidate \`auto-rebase/$STAMP\` is pushed ($COUNT new upstream commits; clean replay, check-stack OK). Baseline CI builds it automatically."
+            L2="Promote locally with \`bash misc/webgpu_scripts/promote-candidate.sh $STAMP\` and run the local gates (tint bake, strict probe, headset spot-check) before force-with-lease pushing."
+          else
+            L1="The stack replayed cleanly onto upstream ($COUNT new upstream commits, check-stack OK), but the candidate branch could not be pushed - see the run log for the rejection. Nothing is broken: the replay is deterministic and reproduces locally."
+            L2="Rebase locally (\`git fetch upstream && git rebase upstream/master\`) and run the local gates. To restore automatic candidates, add the SYNC_PAT secret described in the workflow header."
+          fi
           BODY=$(printf '%s\n\n%s\n\n%s' "$L1" "$L2" "$DRIFT")
           N=$(gh issue list --label upstream-sync --state open --json number --jq length 2>/dev/null || echo 0)
           if [ "$N" = "0" ]; then
