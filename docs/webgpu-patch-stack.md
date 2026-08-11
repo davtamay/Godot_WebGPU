@@ -132,6 +132,30 @@ browsers with no flags, from the same AOT-baked WGSL pipeline:
 Firefox (wgpu/naga) validates the same baked WGSL for boot, 2D, 3D,
 and compute.
 
+### Limitation ledger
+
+One row per thing that does not work, what it looks like from the
+outside, and what would lift it. "Whose fix" is the important column:
+most of what is visible in a console today is ours to remove and is not
+a capability limit at all.
+
+| Symptom | Feature affected | Root cause | Whose fix | Lifts when |
+| --- | --- | --- | --- | --- |
+| `Parameter "shader" is null` (compute_pipeline_create, uniform_set_create, pipeline_cache_rd) | none - cosmetic | a variant was excluded at bake and the effect builds pipelines from the null shader anyway | **ours** | the setup paths check the shader, or a capability stops those systems initialising. Pure noise; nothing behaves differently |
+| Dawn: read-write storage buffer with `ShaderStage::Vertex` (`VoxelGiDebugShaderRD`) | VoxelGI debug view | WebGPU forbids writable storage buffers in vertex stages | WebGPU spec, or a port | the debug shader moves its write to a fragment/compute stage. Debug visualisation only |
+| Dawn: 10 storage textures in the compute stage exceeds the limit of 8 (`SdfgiPreprocessShaderRD`) | SDFGI preprocess | the shader binds more storage textures than this adapter allows per stage | upstream, or hardware | the pass is split across dispatches, or an adapter reports a higher `maxStorageTexturesPerShaderStage`. Reported as a format error until patch 83 fixed the format mismatch that masked it |
+| bake: `SceneForwardClustered` x16 | SDFGI voxelization | image atomics; upstream ships a NO_IMAGE_ATOMICS fallback that only fog.cpp ever enables | **ours + upstream** | the existing fallback variant group is wired in scene_shader_forward_clustered.cpp |
+| bake: `VoxelGi` x3 (MODE_DYNAMIC) | dynamic-object VoxelGI relighting | rgba16f read-write storage images; WGSL allows read-write on r32 formats only | **ours** | split into a read+write pair, or pack through r32ui |
+| bake: `SdfgiIntegrate` x1 | SDFGI probe integration | rgba16i/rgba32i read-write accumulators | **ours** | the accumulators move to storage buffers |
+| bake: `FsrUpscale` / FSR2 | FSR2 upscaling | 16-bit integer math | browser + loader | the device exposes shader-f16 and the loader requests it |
+| bake: `Octmap*` x6 | compute octmap prefilter | rgb10a2 is not a WGSL storage format | already routed around | patch 68 takes the raster octmap path instead; nothing is missing at runtime |
+| bake: `TonemapMobile` x2 | subpass tonemapping | WebGPU has no subpass inputs at all | WebGPU spec | architectural - not expected to change. The non-subpass path is used and is equivalent |
+| no VRS | variable rate shading | WebGPU has no concept of it | WebGPU spec | a future spec addition |
+
+The bake census gate in CI enforces the middle of this table
+mechanically: a new exclusion class, or a growing count in an existing
+one, fails the build rather than quietly widening the list.
+
 ### Known exclusions (bake census: 45 variants)
 
 All remaining exclusions are the image-atomics / int16 / read-write
