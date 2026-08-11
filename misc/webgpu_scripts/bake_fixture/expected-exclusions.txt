@@ -1,0 +1,25 @@
+# Shader variants the WebGPU container is expected to refuse to translate when
+# baking the fixture project, as "<count> <ShaderRD class>".
+#
+# Every line here is a class WGSL genuinely cannot express, not a bug:
+#
+#   TonemapMobileShaderRD  the subpass-input variants. WebGPU has no subpass
+#                          inputs at all, so these fail with "invalid
+#                          dimension". The renderer takes the non-subpass path
+#                          (see the WEBGPU_ENABLED gate in tone_mapper.cpp),
+#                          which is why nothing requests them at runtime.
+#
+#   Octmap*ShaderRD        the rgb10a2 compute octmap variants: rgb10a2 is not
+#                          a WGSL storage format ("invalid image format").
+#                          Patch 68 makes any driver lacking rgb10a2 storage
+#                          take the raster octmap path instead, so these are
+#                          likewise never requested.
+#
+# A count that GROWS, or a class that appears here for the first time, means an
+# upstream shader change produced something WGSL cannot express - investigate
+# before promoting that base. A count that SHRINKS means we un-blocked
+# something: confirm it was deliberate and update this file.
+4 OctmapFilterShaderRD
+1 OctmapDownsamplerShaderRD
+1 OctmapRoughnessShaderRD
+2 TonemapMobileShaderRD
