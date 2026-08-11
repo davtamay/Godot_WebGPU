@@ -1,0 +1,43 @@
+# Shader variants the WebGPU container is expected to refuse when baking the
+# fixture with the clustered (Forward+) renderer, as "<count> <ShaderRD class>".
+#
+# The count differs from the full test project (which shows 45): variant
+# instantiation is partly content-driven, and the minimal fixture requests
+# fewer scene-shader and fog variants. Every blocked CLASS is represented,
+# which is what the gate exists to watch.
+#
+#   SceneForwardClustered   SDF voxelization variants: image atomics. Upstream
+#                           ships a NO_IMAGE_ATOMICS fallback in this very
+#                           shader but only the fog system enables the macro;
+#                           wiring it is the documented future fix.
+#   Octmap*                 rgb10a2 is not a WGSL storage format; the renderer
+#                           takes the raster octmap path instead (patch 68),
+#                           so nothing is missing at runtime.
+#   VoxelGi                 MODE_DYNAMIC relighting: rgba16f read-write
+#                           storage images (WGSL allows read-write on r32
+#                           formats only). Static VoxelGI works.
+#   VoxelGiDebug            writable storage buffer visible to the vertex
+#                           stage, which WebGPU forbids. Debug view only.
+#   Fsr2* / FsrUpscale      16-bit integer math; lifts if the loader requests
+#                           shader-f16 where the adapter offers it.
+#   VolumetricFog           FogVolume-node injection: image atomics. The
+#                           environmental fog fallback variants bake and run.
+#   SdfgiIntegrate          rgba16i/rgba32i read-write probe accumulators.
+#   BokehDof                read-write rgba16f storage; the raster depth of
+#                           field path is used instead (patch 72).
+10 SceneForwardClusteredShaderRD
+4 OctmapFilterShaderRD
+3 VoxelGiShaderRD
+3 VoxelGiDebugShaderRD
+3 Fsr2AccumulatePassShaderRD
+2 VolumetricFogShaderRD
+2 Fsr2ReconstructPreviousDepthPassShaderRD
+2 BokehDofShaderRD
+1 SdfgiIntegrateShaderRD
+1 OctmapRoughnessShaderRD
+1 OctmapDownsamplerShaderRD
+1 FsrUpscaleShaderRD
+1 Fsr2TcrAutogenPassShaderRD
+1 Fsr2RcasPassShaderRD
+1 Fsr2ComputeLuminancePyramidPassShaderRD
+1 Fsr2AutogenReactivePassShaderRD
