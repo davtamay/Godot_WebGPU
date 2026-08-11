@@ -244,6 +244,12 @@ private:
 		WGPURenderPipeline render_pipeline = nullptr;
 		WGPUComputePipeline compute_pipeline = nullptr;
 		const ShaderInfo *shader = nullptr;
+		// Compute pipelines are built on first bind. Creating one is where the
+		// browser compiles the shader for the native backend, and the renderer
+		// eagerly creates far more of them than a given scene ever dispatches.
+		bool compute_pending = false;
+		bool compute_failed = false;
+		LocalVector<PipelineSpecializationConstant> compute_constants;
 	};
 
 	struct SwapChainInfo {
@@ -377,6 +383,7 @@ public:
 	virtual void command_clear_depth_stencil_texture(CommandBufferID p_cmd_buffer, TextureID p_texture, TextureLayout p_texture_layout, float p_depth, uint8_t p_stencil, const TextureSubresourceRange &p_subresources) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual void command_copy_buffer_to_texture(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<BufferTextureCopyRegion> p_regions) override;
 	virtual void command_copy_texture_to_buffer(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, BufferID p_dst_buffer, VectorView<BufferTextureCopyRegion> p_regions) override;
+	bool _ensure_compute_pipeline(PipelineInfo *p_pipeline);
 	virtual void pipeline_free(PipelineID p_pipeline) override;
 	virtual void command_bind_push_constants(CommandBufferID p_cmd_buffer, ShaderID p_shader, uint32_t p_first_index, VectorView<uint32_t> p_data) override;
 	// The browser manages pipeline caching; declining makes the engine skip it.
