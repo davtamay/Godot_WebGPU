@@ -185,12 +185,29 @@ jobs:
           test -s "$RUNNER_TEMP/fixture.pck" || { echo "::error::the bake produced no pack"; exit 1; }
           bash misc/webgpu_scripts/check-bake-census.sh "$RUNNER_TEMP/bake.log"
 
-      - name: Upload bake log
+          # The clustered renderer bakes a different (larger) shader family
+          # with its own exclusion census; without this leg, an upstream
+          # change could break a Forward+ shader and only surface at the next
+          # local promotion. Same fixture, renderer flipped for the bake.
+          sed -i 's/"mobile"/"forward_plus"/g' "$FIXTURE/project.godot"
+          rm -rf "$FIXTURE/.godot/exported" "$FIXTURE/.godot/shader_cache"
+          xvfb-run -a "$EDITOR" --path "$FIXTURE" \
+            --export-pack "Web" "$RUNNER_TEMP/fixture-fplus.pck" \
+            --rendering-method forward_plus --rendering-driver vulkan --verbose \
+            2>&1 | tee "$RUNNER_TEMP/bake-fplus.log"
+
+          test -s "$RUNNER_TEMP/fixture-fplus.pck" || { echo "::error::the Forward+ bake produced no pack"; exit 1; }
+          bash misc/webgpu_scripts/check-bake-census.sh "$RUNNER_TEMP/bake-fplus.log" \
+            misc/webgpu_scripts/bake_fixture/expected-exclusions-forward-plus.txt
+
+      - name: Upload bake logs
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: bake-log-${{ github.sha }}
-          path: ${{ runner.temp }}/bake.log
+          name: bake-logs-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/bake.log
+            ${{ runner.temp }}/bake-fplus.log
           if-no-files-found: ignore
 
       - name: Save SCons cache
