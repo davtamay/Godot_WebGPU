@@ -250,6 +250,22 @@ private:
 		bool compute_pending = false;
 		bool compute_failed = false;
 		LocalVector<PipelineSpecializationConstant> compute_constants;
+		// Render pipelines are deferred for the same reason, keeping the state
+		// needed to build one. The render pass and vertex format are held by
+		// id: the rendering device caches both for the device's lifetime.
+		bool render_pending = false;
+		bool render_failed = false;
+		VertexFormatID render_vertex_format;
+		RenderPrimitive render_primitive = RENDER_PRIMITIVE_TRIANGLES;
+		PipelineRasterizationState render_rasterization;
+		PipelineMultisampleState render_multisample;
+		PipelineDepthStencilState render_depth_stencil;
+		PipelineColorBlendState render_blend;
+		LocalVector<int32_t> render_color_attachments;
+		BitField<PipelineDynamicStateFlags> render_dynamic_state;
+		RenderPassID render_pass;
+		uint32_t render_subpass = 0;
+		LocalVector<PipelineSpecializationConstant> render_constants;
 	};
 
 	struct SwapChainInfo {
@@ -383,6 +399,8 @@ public:
 	virtual void command_clear_depth_stencil_texture(CommandBufferID p_cmd_buffer, TextureID p_texture, TextureLayout p_texture_layout, float p_depth, uint8_t p_stencil, const TextureSubresourceRange &p_subresources) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual void command_copy_buffer_to_texture(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<BufferTextureCopyRegion> p_regions) override;
 	virtual void command_copy_texture_to_buffer(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, BufferID p_dst_buffer, VectorView<BufferTextureCopyRegion> p_regions) override;
+	WGPURenderPipeline _build_render_pipeline(const ShaderInfo *shader, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, PipelineRasterizationState p_rasterization_state, PipelineMultisampleState p_multisample_state, PipelineDepthStencilState p_depth_stencil_state, PipelineColorBlendState p_blend_state, VectorView<int32_t> p_color_attachments, BitField<PipelineDynamicStateFlags> p_dynamic_state, RenderPassID p_render_pass, uint32_t p_render_subpass, VectorView<PipelineSpecializationConstant> p_specialization_constants);
+	bool _ensure_render_pipeline(PipelineInfo *p_pipeline);
 	bool _ensure_compute_pipeline(PipelineInfo *p_pipeline);
 	virtual void pipeline_free(PipelineID p_pipeline) override;
 	virtual void command_bind_push_constants(CommandBufferID p_cmd_buffer, ShaderID p_shader, uint32_t p_first_index, VectorView<uint32_t> p_data) override;
