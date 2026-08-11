@@ -3446,10 +3446,40 @@ RenderingDeviceDriver::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_
 	const ShaderInfo *shader = (const ShaderInfo *)p_shader.id;
 	ERR_FAIL_COND_V(shader->modules.is_empty(), PipelineID());
 
+	// Deferred until the pipeline is first bound: creating it is what makes
+	// the browser compile the shader for the native backend, and the renderer
+	// builds a pipeline for every effect it supports whether or not the scene
+	// dispatches it. Nothing is given up - the pipeline is built the moment
+	// something actually uses it.
+	PipelineInfo *pipeline = memnew(PipelineInfo);
+	pipeline->shader = shader;
+	pipeline->compute_pending = true;
+	pipeline->compute_constants.resize(p_specialization_constants.size());
+	for (uint32_t i = 0; i < p_specialization_constants.size(); i++) {
+		pipeline->compute_constants[i] = p_specialization_constants[i];
+	}
+	return PipelineID(pipeline);
+}
+
+bool RenderingDeviceDriverWebGPU::_ensure_compute_pipeline(PipelineInfo *p_pipeline) {
+	if (p_pipeline->compute_pipeline != nullptr) {
+		return true;
+	}
+	if (p_pipeline->compute_failed) {
+		return false; // Reported once already; do not retry every bind.
+	}
+
+	const ShaderInfo *shader = p_pipeline->shader;
+	ERR_FAIL_NULL_V(shader, false);
+	if (shader->modules.is_empty()) {
+		p_pipeline->compute_failed = true;
+		ERR_FAIL_V_MSG(false, "Compute pipeline has no shader modules.");
+	}
+
 	LocalVector<CharString> constant_keys;
 	LocalVector<WGPUConstantEntry> constants;
 	if (shader->module_override_ids.size() > 0) {
-		_specialization_constants_to_wgpu(shader->module_override_ids[0], p_specialization_constants, constant_keys, constants);
+		_specialization_constants_to_wgpu(shader->module_override_ids[0], VectorView<PipelineSpecializationConstant>(p_pipeline->compute_constants.ptr(), p_pipeline->compute_constants.size()), constant_keys, constants);
 	}
 
 	WGPUComputePipelineDescriptor pipeline_desc = WGPU_COMPUTE_PIPELINE_DESCRIPTOR_INIT;
@@ -3460,13 +3490,13 @@ RenderingDeviceDriver::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_
 	pipeline_desc.compute.constantCount = constants.size();
 	pipeline_desc.compute.constants = constants.ptr();
 
-	WGPUComputePipeline compute_pipeline = wgpuDeviceCreateComputePipeline(device, &pipeline_desc);
-	ERR_FAIL_NULL_V_MSG(compute_pipeline, PipelineID(), "Failed to create a WebGPU compute pipeline.");
-
-	PipelineInfo *pipeline = memnew(PipelineInfo);
-	pipeline->compute_pipeline = compute_pipeline;
-	pipeline->shader = shader;
-	return PipelineID(pipeline);
+	p_pipeline->compute_pipeline = wgpuDeviceCreateComputePipeline(device, &pipeline_desc);
+	if (p_pipeline->compute_pipeline == nullptr) {
+		p_pipeline->compute_failed = true;
+		ERR_FAIL_V_MSG(false, "Failed to create a WebGPU compute pipeline.");
+	}
+	p_pipeline->compute_pending = false;
+	return true;
 }
 
 void RenderingDeviceDriverWebGPU::pipeline_free(PipelineID p_pipeline) {
@@ -3490,6 +3520,9 @@ void RenderingDeviceDriverWebGPU::command_bind_compute_pipeline(CommandBufferID 
 		// it before any encoder-level command (copies, render passes, end).
 		cb_info->compute_pass_encoder = wgpuCommandEncoderBeginComputePass(cb_info->encoder, nullptr);
 		ERR_FAIL_NULL(cb_info->compute_pass_encoder);
+	}
+	if (!_ensure_compute_pipeline(pipeline)) {
+		return;
 	}
 	wgpuComputePassEncoderSetPipeline(cb_info->compute_pass_encoder, pipeline->compute_pipeline);
 	cb_info->current_shader = pipeline->shader;
