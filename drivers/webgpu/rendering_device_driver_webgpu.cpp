@@ -3174,6 +3174,9 @@ void RenderingDeviceDriverWebGPU::_end_compute_pass(CommandBufferInfo *p_cb_info
 void RenderingDeviceDriverWebGPU::command_bind_render_pipeline(CommandBufferID p_cmd_buffer, PipelineID p_pipeline) {
 	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	PipelineInfo *pipeline = (PipelineInfo *)p_pipeline.id;
+	if (!_ensure_render_pipeline(pipeline)) {
+		return;
+	}
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
 	wgpuRenderPassEncoderSetPipeline(cb_info->render_pass_encoder, pipeline->render_pipeline);
 	cb_info->current_shader = pipeline->shader;
@@ -3294,9 +3297,9 @@ static void _specialization_constants_to_wgpu(const HashSet<uint32_t> &p_module_
 	}
 }
 
-RenderingDeviceDriver::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(ShaderID p_shader, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, PipelineRasterizationState p_rasterization_state, PipelineMultisampleState p_multisample_state, PipelineDepthStencilState p_depth_stencil_state, PipelineColorBlendState p_blend_state, VectorView<int32_t> p_color_attachments, BitField<PipelineDynamicStateFlags> p_dynamic_state, RenderPassID p_render_pass, uint32_t p_render_subpass, VectorView<PipelineSpecializationConstant> p_specialization_constants) {
-	WEBGPU_MAIN_THREAD_GUARD(render_pipeline_create(p_shader, p_vertex_format, p_render_primitive, p_rasterization_state, p_multisample_state, p_depth_stencil_state, p_blend_state, p_color_attachments, p_dynamic_state, p_render_pass, p_render_subpass, p_specialization_constants));
-	const ShaderInfo *shader = (const ShaderInfo *)p_shader.id;
+// Builds the pipeline object. Split out from render_pipeline_create so the
+// work can happen at first bind instead of at creation.
+WGPURenderPipeline RenderingDeviceDriverWebGPU::_build_render_pipeline(const ShaderInfo *shader, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, PipelineRasterizationState p_rasterization_state, PipelineMultisampleState p_multisample_state, PipelineDepthStencilState p_depth_stencil_state, PipelineColorBlendState p_blend_state, VectorView<int32_t> p_color_attachments, BitField<PipelineDynamicStateFlags> p_dynamic_state, RenderPassID p_render_pass, uint32_t p_render_subpass, VectorView<PipelineSpecializationConstant> p_specialization_constants) {
 	const RenderPassInfo *pass = (const RenderPassInfo *)p_render_pass.id;
 
 	WGPUPrimitiveTopology topology;
@@ -3318,7 +3321,7 @@ RenderingDeviceDriver::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_c
 			topology = WGPUPrimitiveTopology_TriangleStrip;
 			break;
 		default:
-			ERR_FAIL_V_MSG(PipelineID(), vformat("Unsupported render primitive %d on WebGPU.", p_render_primitive));
+			ERR_FAIL_V_MSG(nullptr, vformat("Unsupported render primitive %d on WebGPU.", p_render_primitive));
 	}
 
 	LocalVector<CharString> vertex_constant_keys;
@@ -3343,7 +3346,7 @@ RenderingDeviceDriver::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_c
 			has_fragment = true;
 		}
 	}
-	ERR_FAIL_NULL_V_MSG(vertex_state.module, PipelineID(), "Render pipelines require a vertex stage.");
+	ERR_FAIL_NULL_V_MSG(vertex_state.module, nullptr, "Render pipelines require a vertex stage.");
 	vertex_state.entryPoint = { SHADER_ENTRY_POINT, WGPU_STRLEN };
 	vertex_state.constantCount = vertex_constants.size();
 	vertex_state.constants = vertex_constants.ptr();
@@ -3433,12 +3436,63 @@ RenderingDeviceDriver::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_c
 	}
 
 	WGPURenderPipeline render_pipeline = wgpuDeviceCreateRenderPipeline(device, &pipeline_desc);
-	ERR_FAIL_NULL_V_MSG(render_pipeline, PipelineID(), "Failed to create a WebGPU render pipeline.");
+	ERR_FAIL_NULL_V_MSG(render_pipeline, nullptr, "Failed to create a WebGPU render pipeline.");
 
+	return render_pipeline;
+}
+
+RenderingDeviceDriver::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_create(ShaderID p_shader, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, PipelineRasterizationState p_rasterization_state, PipelineMultisampleState p_multisample_state, PipelineDepthStencilState p_depth_stencil_state, PipelineColorBlendState p_blend_state, VectorView<int32_t> p_color_attachments, BitField<PipelineDynamicStateFlags> p_dynamic_state, RenderPassID p_render_pass, uint32_t p_render_subpass, VectorView<PipelineSpecializationConstant> p_specialization_constants) {
+	WEBGPU_MAIN_THREAD_GUARD(render_pipeline_create(p_shader, p_vertex_format, p_render_primitive, p_rasterization_state, p_multisample_state, p_depth_stencil_state, p_blend_state, p_color_attachments, p_dynamic_state, p_render_pass, p_render_subpass, p_specialization_constants));
+
+	// Deferred to first bind, like compute pipelines: creating one is what
+	// makes the browser compile the shader, and about a third of the render
+	// pipelines a scene builds are never drawn with. The render pass and
+	// vertex format are referenced by id, which the rendering device keeps
+	// for the lifetime of the device in its format caches.
 	PipelineInfo *pipeline = memnew(PipelineInfo);
-	pipeline->render_pipeline = render_pipeline;
-	pipeline->shader = shader;
+	pipeline->shader = (const ShaderInfo *)p_shader.id;
+	pipeline->render_pending = true;
+	pipeline->render_vertex_format = p_vertex_format;
+	pipeline->render_primitive = p_render_primitive;
+	pipeline->render_rasterization = p_rasterization_state;
+	pipeline->render_multisample = p_multisample_state;
+	pipeline->render_depth_stencil = p_depth_stencil_state;
+	pipeline->render_blend = p_blend_state;
+	pipeline->render_dynamic_state = p_dynamic_state;
+	pipeline->render_pass = p_render_pass;
+	pipeline->render_subpass = p_render_subpass;
+	pipeline->render_color_attachments.resize(p_color_attachments.size());
+	for (uint32_t i = 0; i < p_color_attachments.size(); i++) {
+		pipeline->render_color_attachments[i] = p_color_attachments[i];
+	}
+	pipeline->render_constants.resize(p_specialization_constants.size());
+	for (uint32_t i = 0; i < p_specialization_constants.size(); i++) {
+		pipeline->render_constants[i] = p_specialization_constants[i];
+	}
 	return PipelineID(pipeline);
+}
+
+bool RenderingDeviceDriverWebGPU::_ensure_render_pipeline(PipelineInfo *p_pipeline) {
+	if (p_pipeline->render_pipeline != nullptr) {
+		return true;
+	}
+	if (p_pipeline->render_failed) {
+		return false; // Reported once already; do not retry every bind.
+	}
+	ERR_FAIL_NULL_V(p_pipeline->shader, false);
+
+	p_pipeline->render_pipeline = _build_render_pipeline(p_pipeline->shader, p_pipeline->render_vertex_format,
+			p_pipeline->render_primitive, p_pipeline->render_rasterization, p_pipeline->render_multisample,
+			p_pipeline->render_depth_stencil, p_pipeline->render_blend,
+			VectorView<int32_t>(p_pipeline->render_color_attachments.ptr(), p_pipeline->render_color_attachments.size()),
+			p_pipeline->render_dynamic_state, p_pipeline->render_pass, p_pipeline->render_subpass,
+			VectorView<PipelineSpecializationConstant>(p_pipeline->render_constants.ptr(), p_pipeline->render_constants.size()));
+	if (p_pipeline->render_pipeline == nullptr) {
+		p_pipeline->render_failed = true;
+		return false;
+	}
+	p_pipeline->render_pending = false;
+	return true;
 }
 
 RenderingDeviceDriver::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_create(ShaderID p_shader, VectorView<PipelineSpecializationConstant> p_specialization_constants) {
