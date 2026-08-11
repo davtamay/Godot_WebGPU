@@ -2320,8 +2320,12 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 					} else {
 						const Pair<WGPUTextureFormat, WGPUStorageTextureAccess> *decl = storage_texture_decls.getptr(((uint64_t)set_index << 32) | remapped_binding);
 						single_entry.storageTexture.access = decl != nullptr ? decl->second : (uniform.writable ? WGPUStorageTextureAccess_ReadWrite : WGPUStorageTextureAccess_ReadOnly);
+						// Storage textures are created with the substituted format
+						// (see texture_create); the layout has to agree, or the
+						// binding is both a format mismatch and - for formats that
+						// are not storage-capable at all - invalid on its own.
 						const WGPUTextureFormat sf = decl != nullptr ? decl->first : _data_format_to_wgpu(uniform.texture_format);
-						single_entry.storageTexture.format = sf != WGPUTextureFormat_Undefined ? sf : WGPUTextureFormat_RGBA8Unorm;
+						single_entry.storageTexture.format = _wgpu_storage_substitute(sf != WGPUTextureFormat_Undefined ? sf : WGPUTextureFormat_RGBA8Unorm);
 						single_entry.storageTexture.viewDimension = _texture_type_to_wgpu_view_dimension(uniform.texture_type);
 					}
 					entries.push_back(single_entry);
@@ -2340,7 +2344,7 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 						const Pair<WGPUTextureFormat, WGPUStorageTextureAccess> *decl = storage_texture_decls.getptr(((uint64_t)set_index << 32) | element_entry.binding);
 						element_entry.storageTexture.access = decl != nullptr ? decl->second : (uniform.writable ? WGPUStorageTextureAccess_ReadWrite : WGPUStorageTextureAccess_ReadOnly);
 						const WGPUTextureFormat ef = decl != nullptr ? decl->first : _data_format_to_wgpu(uniform.texture_format);
-						element_entry.storageTexture.format = ef != WGPUTextureFormat_Undefined ? ef : WGPUTextureFormat_RGBA8Unorm;
+						element_entry.storageTexture.format = _wgpu_storage_substitute(ef != WGPUTextureFormat_Undefined ? ef : WGPUTextureFormat_RGBA8Unorm);
 						element_entry.storageTexture.viewDimension = _texture_type_to_wgpu_view_dimension(uniform.texture_type);
 					}
 					entries.push_back(element_entry);
@@ -2384,7 +2388,7 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 					// placeholder (r32float read + a substitute texture at
 					// bind time) so the layout stays valid.
 					const Pair<WGPUTextureFormat, WGPUStorageTextureAccess> *decl = storage_texture_decls.getptr(((uint64_t)set_index << 32) | entry.binding);
-					WGPUTextureFormat storage_format = decl != nullptr ? decl->first : _data_format_to_wgpu(uniform.texture_format);
+					WGPUTextureFormat storage_format = _wgpu_storage_substitute(decl != nullptr ? decl->first : _data_format_to_wgpu(uniform.texture_format));
 					if (decl == nullptr && (!_wgpu_format_supports_storage(storage_format) || (uniform.writable == 0 && storage_format != WGPUTextureFormat_R32Float && storage_format != WGPUTextureFormat_R32Uint && storage_format != WGPUTextureFormat_R32Sint))) {
 						shader->dead_storage_bindings.insert(((uint64_t)set_index << 32) | entry.binding);
 						entry.storageTexture.access = WGPUStorageTextureAccess_ReadOnly;
