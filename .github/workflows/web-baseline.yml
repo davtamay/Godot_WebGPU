@@ -145,6 +145,54 @@ jobs:
         run: |
           scons platform=linuxbsd target=editor dev_mode=yes "cache_path=${{ env.SCONS_CACHE }}" redirect_build_objects=no
 
+      # The bake is where SPIR-V becomes WGSL, so it is the only place an
+      # upstream shader change shows up as something WebGPU cannot express.
+      # Translation failures are not fatal by design - the variant is excluded
+      # and the renderer takes another path - so nothing notices unless the
+      # exclusions are counted against a baseline. That is this gate.
+      - name: Fetch tint
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Published by the tint-builder workflow; the latest release is that
+          # build. Pinning the pattern rather than the tag keeps this working
+          # across tint refreshes.
+          gh release download --repo "$GITHUB_REPOSITORY" --pattern 'tint-linux-x86_64' --dir "$RUNNER_TEMP" --clobber
+          chmod +x "$RUNNER_TEMP/tint-linux-x86_64"
+
+      - name: Bake the fixture project
+        env:
+          GODOT_TINT_PATH: ${{ runner.temp }}/tint-linux-x86_64
+        run: |
+          set -o pipefail
+          sudo apt-get install -y xvfb
+          EDITOR=$(ls bin/godot.linuxbsd.editor.* | grep -v '\.console' | head -1)
+          echo "editor: $EDITOR"
+          FIXTURE=misc/webgpu_scripts/bake_fixture
+
+          # Import first so the export is not also the first resource scan.
+          "$EDITOR" --headless --path "$FIXTURE" --import || true
+
+          # The shader baker only runs under a real RenderingDevice renderer,
+          # so this must NOT be headless: a dummy renderer silently bakes
+          # nothing and still reports success. lavapipe (mesa-vulkan-drivers)
+          # provides the Vulkan device and xvfb the display.
+          xvfb-run -a "$EDITOR" --path "$FIXTURE" \
+            --export-pack "Web" "$RUNNER_TEMP/fixture.pck" \
+            --rendering-method mobile --rendering-driver vulkan --verbose \
+            2>&1 | tee "$RUNNER_TEMP/bake.log"
+
+          test -s "$RUNNER_TEMP/fixture.pck" || { echo "::error::the bake produced no pack"; exit 1; }
+          bash misc/webgpu_scripts/check-bake-census.sh "$RUNNER_TEMP/bake.log"
+
+      - name: Upload bake log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bake-log-${{ github.sha }}
+          path: ${{ runner.temp }}/bake.log
+          if-no-files-found: ignore
+
       - name: Save SCons cache
         uses: actions/cache/save@v5
         if: always()
