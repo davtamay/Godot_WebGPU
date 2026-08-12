@@ -52,6 +52,10 @@ const GodotWebXR = {
 		// or OCULUS_multiview). Android XR's browser has neither: stereo then
 		// renders one pass per view into a shared side-by-side layer texture.
 		gl_multiview: null,
+		// Requested fixed foveation level (0.0 = off, 1.0 = maximum). The
+		// compositor applies it when rendering the projection layer, so it
+		// costs the engine nothing; runtimes without support ignore it.
+		fixed_foveation: 0.0,
 		space: null,
 		frame: null,
 		pose: null,
@@ -112,6 +116,15 @@ const GodotWebXR = {
 			return GodotWebXR.gl_multiview;
 		},
 
+		applyFixedFoveation: (layer) => {
+			// fixedFoveation is an optional attribute of XRCompositionLayer;
+			// only assign when the runtime exposes it and a level was
+			// requested, so unsupporting browsers see no behavior change.
+			if (layer && GodotWebXR.fixed_foveation > 0.0 && 'fixedFoveation' in layer) {
+				layer.fixedFoveation = GodotWebXR.fixed_foveation;
+			}
+		},
+
 		getLayer: () => {
 			// XPERIMENT (strip or productize): immersive sessions are stereo;
 			// defaulting the pre-pose count to 2 makes the eagerly created
@@ -151,7 +164,9 @@ const GodotWebXR = {
 			} else {
 				return null;
 			}
+			GodotWebXR.applyFixedFoveation(layer);
 			GodotWebXR.session.updateRenderState({ layers: [layer] });
+
 
 			GodotWebXR.layer = layer;
 			GodotWebXR.layer_generation++;
@@ -956,6 +971,27 @@ const GodotWebXR = {
 			return 0;
 		}
 		return GodotWebXR.session.frameRate;
+	},
+
+	godot_webxr_set_fixed_foveation__proxy: 'sync',
+	godot_webxr_set_fixed_foveation__sig: 'vf',
+	godot_webxr_set_fixed_foveation: function (p_level) {
+		// Clamp and remember the request; it is applied to the current layer
+		// immediately (the attribute is mutable mid-session) and re-applied
+		// whenever the layer is recreated.
+		GodotWebXR.fixed_foveation = Math.min(Math.max(p_level, 0.0), 1.0);
+		GodotWebXR.applyFixedFoveation(GodotWebXR.layer);
+	},
+
+	godot_webxr_get_fixed_foveation__proxy: 'sync',
+	godot_webxr_get_fixed_foveation__sig: 'f',
+	godot_webxr_get_fixed_foveation: function () {
+		const layer = GodotWebXR.layer;
+		if (layer && 'fixedFoveation' in layer && typeof layer.fixedFoveation === 'number') {
+			// The runtime may clamp the requested level; report its value.
+			return layer.fixedFoveation;
+		}
+		return GodotWebXR.fixed_foveation;
 	},
 
 	godot_webxr_update_target_frame_rate__proxy: 'sync',
