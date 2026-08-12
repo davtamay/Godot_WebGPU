@@ -50,6 +50,11 @@ cd "$REPO" || exit 2
 
 TESTBED=${GODOT_WEBGPU_TESTBED:-C:/tmp/godot-webgpu-testbed}
 EMSDK_ROOT=${EMSDK_ROOT:-C:/Users/davta/emsdk}
+
+# node is not always on PATH (fresh machines); fall back to the emsdk copy,
+# which the web builds require anyway.
+NODE=$(command -v node || ls -d "$EMSDK_ROOT"/node/*/bin/node.exe 2>/dev/null | head -1)
+[ -n "$NODE" ] || { echo "node not found on PATH or under $EMSDK_ROOT" >&2; exit 1; }
 LOGDIR="$TESTBED/gate-logs"
 BAKETEST="$TESTBED/baketest"
 OUTDIR="$TESTBED/gate_out"
@@ -199,7 +204,7 @@ run_probe() {
 	# Run from the testbed: the harness resolves playwright through the
 	# package.json of the current working directory.
 	if ( cd "$TESTBED" && PROBE_REQUIRE_PIXELS=1 PROBE_CHANNEL=chrome \
-		node "$REPO/misc/webgpu_scripts/loader-smoke.mjs" "$dir" probe ) > "$log" 2>&1; then
+		"$NODE" "$REPO/misc/webgpu_scripts/loader-smoke.mjs" "$dir" probe ) > "$log" 2>&1; then
 		pass "strict probe ($label)" "$(grep -ao 'corner=\[[^]]*\]' "$log" | head -1)"
 	else
 		fail "strict probe ($label)" "see $log"
@@ -223,7 +228,7 @@ fi
 
 phase "Loader smoke"
 LOADER_LOG="$LOGDIR/loader-smoke.log"
-if ( cd "$TESTBED" && node "$REPO/misc/webgpu_scripts/loader-smoke.mjs" "$LOGDIR/probebin-threaded" ) > "$LOADER_LOG" 2>&1; then
+if ( cd "$TESTBED" && "$NODE" "$REPO/misc/webgpu_scripts/loader-smoke.mjs" "$LOGDIR/probebin-threaded" ) > "$LOADER_LOG" 2>&1; then
 	pass "loader smoke" "(off/on/xr)"
 else
 	fail "loader smoke" "see $LOADER_LOG"
@@ -263,7 +268,7 @@ export_and_boot() {
 	# rate an order of magnitude below its settled one - a reading that looks
 	# exactly like a performance regression and is not one.
 	local blog="$png.stream.log"
-	( cd "$TESTBED" && node boot-noflag.mjs "$OUTDIR" "$png" "${BOOT_WAIT_MS:-40000}" ) > "$LOGDIR/boot-$label.log" 2>&1
+	( cd "$TESTBED" && "$NODE" boot-noflag.mjs "$OUTDIR" "$png" "${BOOT_WAIT_MS:-40000}" ) > "$LOGDIR/boot-$label.log" 2>&1
 	if [ ! -f "$blog" ]; then
 		fail "boot ($label)" "harness produced no console log"
 		return 1
