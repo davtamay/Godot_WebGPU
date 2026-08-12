@@ -147,6 +147,11 @@ const Engine = (function () {
 			if (adapter['features'] && adapter['features'].has('float32-filterable')) {
 				requiredFeatures.push('float32-filterable');
 			}
+			// Half-precision shader math: the engine selects its baked FP16
+			// shader variants only when the device reports this feature.
+			if (adapter['features'] && adapter['features'].has('shader-f16')) {
+				requiredFeatures.push('shader-f16');
+			}
 			return adapter['requestDevice']({ 'requiredLimits': requiredLimits, 'requiredFeatures': requiredFeatures });
 		}).catch(function () {
 			return null;
