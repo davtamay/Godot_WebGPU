@@ -656,6 +656,11 @@ XRCompositionLayer.prototype.mipLevels;
 XRCompositionLayer.prototype.needsRedraw;
 
 /**
+ * @type {?number}
+ */
+XRCompositionLayer.prototype.fixedFoveation;
+
+/**
  * @return {void}
  */
 XRCompositionLayer.prototype.destroy = function () {};
