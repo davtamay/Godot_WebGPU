@@ -282,6 +282,9 @@ private:
 	WGPUDevice device = nullptr;
 	WGPUQueue queue = nullptr;
 	WGPULimits device_limits = {};
+	// Whether the loader obtained the device with the shader-f16 feature;
+	// gates SUPPORTS_HALF_FLOAT and acceptance of `enable f16` modules.
+	bool device_has_shader_f16 = false;
 	uint32_t frame_count = 1;
 	WGPUSampler nonfiltering_substitute_sampler = nullptr;
 	HashSet<uint64_t> comparison_samplers;
@@ -476,12 +479,19 @@ public:
 	virtual uint64_t get_lazily_memory_used() override { return 0; }
 	virtual uint64_t limit_get(Limit p_limit) override;
 	virtual bool has_feature(Features p_feature) override {
-		// Half float needs the shader-f16 device feature (tint emits
-		// enable f16), which the loader does not request yet.
-		// SUPPORTS_FRAGMENT_SHADER_WITH_ONLY_SIDE_EFFECTS must stay false:
-		// WebGPU render pipelines require at least one attachment, so the
-		// cluster builder has to take its USE_ATTACHMENT variant.
-		return false;
+		switch (p_feature) {
+			case SUPPORTS_HALF_FLOAT:
+				// True only when the loader obtained the device with the
+				// shader-f16 feature; the runtime then selects the baked
+				// FP16 variant groups (tint emits `enable f16`).
+				return device_has_shader_f16;
+			default:
+				// SUPPORTS_FRAGMENT_SHADER_WITH_ONLY_SIDE_EFFECTS must stay
+				// false: WebGPU render pipelines require at least one
+				// attachment, so the cluster builder has to take its
+				// USE_ATTACHMENT variant.
+				return false;
+		}
 	}
 	virtual const MultiviewCapabilities &get_multiview_capabilities() override { return multiview_capabilities; }
 	virtual const FragmentShadingRateCapabilities &get_fragment_shading_rate_capabilities() override { return fragment_shading_rate_capabilities; }
