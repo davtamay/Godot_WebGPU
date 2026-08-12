@@ -54,6 +54,7 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	if (wgpuDeviceGetLimits(device, &device_limits) != WGPUStatus_Success) {
 		ERR_FAIL_V_MSG(ERR_CANT_CREATE, "Failed to query WebGPU device limits.");
 	}
+	device_has_shader_f16 = wgpuDeviceHasFeature(device, WGPUFeatureName_ShaderF16);
 
 	frame_count = MAX(1u, p_frame_count);
 
@@ -2079,10 +2080,11 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 				}
 			}
 		}
-		if (strstr((const char *)wgsl.ptr(), "enable f16;") != nullptr) {
-			// The device was not requested with shader-f16; a module that
-			// enables it would be an error object that poisons every frame
-			// command buffer it touches. Fail cleanly instead.
+		if (!device_has_shader_f16 && strstr((const char *)wgsl.ptr(), "enable f16;") != nullptr) {
+			// Without the shader-f16 device feature, a module that enables
+			// it would be an error object that poisons every frame command
+			// buffer it touches. Fail cleanly instead. (Reachable only if
+			// the capability report and the baked group selection disagree.)
 			shader_free(ShaderID(shader));
 			ERR_FAIL_V_MSG(ShaderID(), "Shader requires f16, which the WebGPU device does not have enabled.");
 		}
