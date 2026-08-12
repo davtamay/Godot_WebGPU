@@ -64,15 +64,16 @@ bool ShaderBakerExportPluginPlatformWebGPU::matches_driver(const String &p_drive
 }
 
 bool ShaderBakerExportPluginPlatformWebGPU::skips_variant(const Vector<String> &p_stage_sources) const {
-	// The WebGPU runtime can never select these variant groups, so baking
-	// them only inflates the exported cache (the load path tolerates the
-	// resulting holes):
-	// - Multiview: WGSL has no ViewIndex/multiview; stereo will use the
-	//   regular variants with one pass per view.
-	// - FP16: the driver reports SUPPORTS_HALF_FLOAT = false because the
-	//   loader does not request the shader-f16 device feature.
+	// The WebGPU runtime can never select multiview variant groups (WGSL has
+	// no ViewIndex; stereo renders one pass per view), so baking them only
+	// inflates the exported cache - the load path tolerates the holes.
+	// FP16 groups ARE baked: the loader requests the shader-f16 device
+	// feature where the adapter offers it and the driver then reports
+	// SUPPORTS_HALF_FLOAT, so the runtime selects the FP16 group on capable
+	// devices and falls back to the FP32 group elsewhere - which is why both
+	// groups must be present in the cache.
 	for (const String &source : p_stage_sources) {
-		if (source.contains("#define USE_MULTIVIEW") || source.contains("#define EXPLICIT_FP16")) {
+		if (source.contains("#define USE_MULTIVIEW")) {
 			return true;
 		}
 	}
