@@ -234,6 +234,14 @@ Array WebXRInterfaceJS::get_available_display_refresh_rates() const {
 	return ret;
 }
 
+float WebXRInterfaceJS::get_fixed_foveation() const {
+	return godot_webxr_get_fixed_foveation();
+}
+
+void WebXRInterfaceJS::set_fixed_foveation(float p_level) {
+	godot_webxr_set_fixed_foveation(CLAMP(p_level, 0.0f, 1.0f));
+}
+
 Array WebXRInterfaceJS::get_supported_environment_blend_modes() {
 	Array blend_modes;
 	// The blend mode can't be changed, so return the current blend mode as the only supported one.

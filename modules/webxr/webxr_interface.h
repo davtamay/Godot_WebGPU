@@ -74,6 +74,8 @@ public:
 	virtual float get_display_refresh_rate() const = 0;
 	virtual void set_display_refresh_rate(float p_refresh_rate) = 0;
 	virtual Array get_available_display_refresh_rates() const = 0;
+	virtual float get_fixed_foveation() const = 0;
+	virtual void set_fixed_foveation(float p_level) = 0;
 };
 
 VARIANT_ENUM_CAST(WebXRInterface::TargetRayMode);
