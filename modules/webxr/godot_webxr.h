@@ -101,6 +101,9 @@ extern float godot_webxr_get_frame_rate();
 extern void godot_webxr_update_target_frame_rate(float p_frame_rate);
 extern int godot_webxr_get_supported_frame_rates(float **r_frame_rates);
 
+extern void godot_webxr_set_fixed_foveation(float p_level);
+extern float godot_webxr_get_fixed_foveation();
+
 #ifdef __cplusplus
 }
 #endif
