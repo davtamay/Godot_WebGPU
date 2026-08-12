@@ -141,6 +141,9 @@ public:
 	virtual void set_display_refresh_rate(float p_refresh_rate) override;
 	virtual Array get_available_display_refresh_rates() const override;
 
+	virtual float get_fixed_foveation() const override;
+	virtual void set_fixed_foveation(float p_level) override;
+
 	virtual Array get_supported_environment_blend_modes() override;
 	virtual XRInterface::EnvironmentBlendMode get_environment_blend_mode() const override;
 	virtual bool set_environment_blend_mode(EnvironmentBlendMode p_new_environment_blend_mode) override;

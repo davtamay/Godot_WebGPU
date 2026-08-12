@@ -157,6 +157,11 @@
 		</method>
 	</methods>
 	<members>
+		<member name="fixed_foveation" type="float" setter="set_fixed_foveation" getter="get_fixed_foveation">
+			The level of fixed foveation applied by the compositor when rendering the projection layer, from [code]0.0[/code] (no foveation, full resolution everywhere) to [code]1.0[/code] (maximum foveation, lowest resolution at the periphery).
+			Foveated rendering reduces the resolution towards the edges of the view, where the eye perceives less detail, which can significantly improve performance and reduce power consumption on standalone headsets at no cost to the engine.
+			[b]Note:[/b] This is only supported on browsers implementing the WebXR Layers API with fixed foveation (for example, Meta Quest Browser); it is silently ignored elsewhere. The runtime may clamp the requested level, in which case the getter reports the value actually in effect.
+		</member>
 		<member name="enabled_features" type="String" setter="" getter="get_enabled_features">
 			A comma-separated list of features that were successfully enabled by [method XRInterface.initialize] when setting up the WebXR session.
 			This may include features requested by setting [member required_features] and [member optional_features], and will only be available after [signal session_started] has been emitted.
