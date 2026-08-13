@@ -30,6 +30,7 @@
 
 #include "shader_baker_export_plugin_platform_webgpu.h"
 
+#include "core/config/project_settings.h"
 #include "core/io/file_access.h"
 #include "core/os/os.h"
 #include "drivers/webgpu/rendering_shader_container_webgpu.h"
@@ -67,13 +68,20 @@ bool ShaderBakerExportPluginPlatformWebGPU::skips_variant(const Vector<String> &
 	// The WebGPU runtime can never select multiview variant groups (WGSL has
 	// no ViewIndex; stereo renders one pass per view), so baking them only
 	// inflates the exported cache - the load path tolerates the holes.
-	// FP16 groups ARE baked: the loader requests the shader-f16 device
-	// feature where the adapter offers it and the driver then reports
+	// FP16 groups are baked by default: the loader requests the shader-f16
+	// device feature where the adapter offers it and the driver then reports
 	// SUPPORTS_HALF_FLOAT, so the runtime selects the FP16 group on capable
 	// devices and falls back to the FP32 group elsewhere - which is why both
-	// groups must be present in the cache.
+	// groups must be present in the cache. Projects that care more about
+	// download size than shader speed can opt out through the setting below
+	// (surfaced as an export option by the godot_webgpu addon); devices then
+	// use the FP32 group everywhere, exactly the pre-FP16 behavior.
+	const bool bake_fp16 = ProjectSettings::get_singleton()->get_setting("rendering/webgpu/bake_fp16_shader_variants", true);
 	for (const String &source : p_stage_sources) {
 		if (source.contains("#define USE_MULTIVIEW")) {
+			return true;
+		}
+		if (!bake_fp16 && source.contains("#define EXPLICIT_FP16")) {
 			return true;
 		}
 	}
