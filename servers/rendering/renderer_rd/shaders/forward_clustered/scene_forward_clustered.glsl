@@ -1093,7 +1093,13 @@ vec4 volumetric_fog_process(vec2 screen_uv, float z) {
 		fog_pos.z = pow(fog_pos.z, implementation_data.volumetric_fog_detail_spread);
 	}
 
-	return texture(sampler3D(volumetric_fog_texture, SAMPLER_LINEAR_CLAMP), fog_pos);
+	// SAMPLER_LINEAR_CLAMP is also used for raw depth reads from the shadow
+	// atlases. Backends that forbid filtering depth textures (WebGPU) must
+	// declare such a sampler non-filtering, which silently point-samples
+	// every other texture it serves - here the low-resolution froxel
+	// volume, which then shows its cells. This sampler has identical
+	// filter/clamp settings but no depth pairing.
+	return texture(sampler3D(volumetric_fog_texture, SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), fog_pos);
 }
 
 vec4 fog_process(vec3 vertex) {
