@@ -110,9 +110,16 @@ const Engine = (function () {
 				return initWebGPUDevice(config, rtenv);
 			});
 		}
-		// XRGPUBinding refuses devices whose adapter was not requested as
-		// XR-compatible; harmless elsewhere (unknown members are ignored).
-		const adapterOptions = config.requiresWebXR ? { 'xrCompatible': true } : {};
+		// Ask for the discrete GPU. Without a preference the browser is free
+		// to pick the power-saving adapter, which on a hybrid-graphics
+		// laptop means the integrated chip renders the whole game - a large
+		// silent performance loss. XRGPUBinding additionally refuses devices
+		// whose adapter was not requested as XR-compatible; both members are
+		// harmless where unsupported (unknown members are ignored).
+		const adapterOptions = { 'powerPreference': 'high-performance' };
+		if (config.requiresWebXR) {
+			adapterOptions['xrCompatible'] = true;
+		}
 		return navigator['gpu']['requestAdapter'](adapterOptions).then(function (adapter) {
 			if (!adapter) {
 				return null;
