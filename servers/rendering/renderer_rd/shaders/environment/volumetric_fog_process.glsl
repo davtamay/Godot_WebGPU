@@ -340,7 +340,13 @@ void main() {
 		if (all(greaterThan(prev_view, vec3(0.0))) && all(lessThan(prev_view, vec3(1.0)))) {
 			//reprojectinon fits
 
-			reprojected_density = textureLod(sampler3D(prev_density_texture, linear_sampler), prev_view, 0.0);
+			// linear_sampler is also used for raw depth reads from the shadow
+			// atlases in this shader; backends that forbid filtering depth
+			// textures must declare it non-filtering, which would point-sample
+			// the previous frame here and stop the temporal accumulation from
+			// averaging the per-frame jitter away. Same filter settings, no
+			// depth pairing.
+			reprojected_density = textureLod(sampler3D(prev_density_texture, linear_sampler_with_mipmaps), prev_view, 0.0);
 			reproject_amount = params.temporal_blend;
 
 			// Since we can reproject, now we must jitter the current view pos.
