@@ -99,6 +99,14 @@ const GodotWebGPU = {
 		if (!device) {
 			return 0;
 		}
+		// These are emdawnwebgpu port internals, not standardized API, and
+		// the device key is already deprecated upstream. When an Emscripten
+		// upgrade renames one, the failure otherwise surfaces as "undefined
+		// is not a function" from inside generated glue, several layers away
+		// from the cause.
+		if (typeof WebGPU.importJsDevice !== 'function' || typeof WebGPU.importJsTexture !== 'function') {
+			throw new Error('The emdawnwebgpu bindings changed: importJsDevice/importJsTexture are missing. This build needs updating for the current Emscripten port.');
+		}
 		// While an immersive WebXR session owns the compositor, the canvas
 		// returns null from getCurrentTexture() WITHOUT throwing; the
 		// emdawnwebgpu glue would wrap that null as a successful acquire and
