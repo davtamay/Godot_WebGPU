@@ -133,6 +133,7 @@ public:
 	virtual String get_enabled_features() const override;
 	virtual bool is_input_source_active(int p_input_source_id) const override;
 	virtual Ref<XRControllerTracker> get_input_source_tracker(int p_input_source_id) const override;
+	virtual void offer_session() override;
 	virtual TargetRayMode get_input_source_target_ray_mode(int p_input_source_id) const override;
 	virtual String get_visibility_state() const override;
 	virtual PackedVector3Array get_play_area() const override;
