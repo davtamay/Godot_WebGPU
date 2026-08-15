@@ -62,6 +62,10 @@ const GodotWebXR = {
 		// compositor applies it when rendering the projection layer, so it
 		// costs the engine nothing; runtimes without support ignore it.
 		fixed_foveation: 0.0,
+		// A session granted through navigator.xr.offerSession(), held until
+		// the app's normal start path calls initialize() to consume it.
+		offered_session: null,
+		offered_session_mode: null,
 		space: null,
 		frame: null,
 		pose: null,
@@ -387,6 +391,32 @@ const GodotWebXR = {
 		}
 	},
 
+	godot_webxr_offer_session__proxy: 'sync',
+	godot_webxr_offer_session__sig: 'viiiii',
+	godot_webxr_offer_session: function (p_use_webgpu_binding, p_session_mode, p_required_features, p_optional_features, p_on_accepted) {
+		if (!navigator.xr || !navigator.xr.offerSession) {
+			// Browsers without offerSession keep the page-button flow.
+			return;
+		}
+		const session_mode = GodotRuntime.parseString(p_session_mode);
+		const required_features = GodotRuntime.parseString(p_required_features).split(',').map((s) => s.trim()).filter((s) => s !== '');
+		const optional_features = GodotRuntime.parseString(p_optional_features).split(',').map((s) => s.trim()).filter((s) => s !== '');
+		const use_webgpu_binding = !!(p_use_webgpu_binding && Module['preinitializedWebGPUDevice'] && Module['GodotWebGPUXR']);
+		if (use_webgpu_binding && !required_features.includes('webgpu')) {
+			required_features.push('webgpu');
+		}
+		const onaccepted = GodotRuntime.get_func(p_on_accepted);
+		const session_init = GodotWebXR.buildSessionInit(required_features, optional_features, use_webgpu_binding);
+		navigator.xr.offerSession(session_mode, session_init).then(function (session) {
+			GodotWebXR.offered_session = session;
+			GodotWebXR.offered_session_mode = session_mode;
+			onaccepted();
+		}).catch(function (e) {
+			// A replaced offer or an unsupported mode; stay quiet - the
+			// page-button flow still works.
+		});
+	},
+
 	godot_webxr_initialize__deps: ['emscripten_webgl_get_current_context'],
 	godot_webxr_initialize__proxy: 'sync',
 	godot_webxr_initialize__sig: 'viiiiiiiiii',
@@ -420,7 +450,21 @@ const GodotWebXR = {
 		// DOM-button-driven apps (Unity, the samples) request sessions.
 		// Transient user activation survives a zero-delay timer.
 		setTimeout(function () {
-		navigator.xr.requestSession(session_mode, session_init).then(function (session) {
+		let session_promise;
+		if (GodotWebXR.offered_session && GodotWebXR.offered_session_mode === session_mode) {
+			// The browser already granted this session through offerSession();
+			// requesting another would fail without fresh user activation.
+			session_promise = Promise.resolve(GodotWebXR.offered_session);
+		} else {
+			if (GodotWebXR.offered_session) {
+				// Offered for a different mode than the app is starting.
+				GodotWebXR.offered_session.end().catch(function (e) { });
+			}
+			session_promise = navigator.xr.requestSession(session_mode, session_init);
+		}
+		GodotWebXR.offered_session = null;
+		GodotWebXR.offered_session_mode = null;
+		session_promise.then(function (session) {
 			GodotWebXR.session = session;
 
 			session.addEventListener('end', function (evt) {
