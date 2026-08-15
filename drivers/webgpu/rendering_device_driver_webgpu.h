@@ -286,6 +286,24 @@ private:
 	// gates SUPPORTS_HALF_FLOAT and acceptance of `enable f16` modules.
 	bool device_has_shader_f16 = false;
 	bool device_has_depth_clip_control = false;
+	bool device_has_timestamp_query = false;
+
+	struct TimestampPoolInfo {
+		WGPUQuerySet query_set = nullptr;
+		WGPUBuffer resolve = nullptr; // QueryResolve | CopySrc
+		WGPUBuffer readback = nullptr; // MapRead | CopyDst
+		uint32_t count = 0;
+		// Highest index written this frame: only that prefix is resolved, and
+		// only it is meaningful in the results.
+		uint32_t written = 0;
+		bool map_in_flight = false;
+		// Last completed readback. Served to the engine as-is; a profiling
+		// number one frame late is still a useful profiling number.
+		LocalVector<uint64_t> values;
+	};
+	LocalVector<TimestampPoolInfo *> timestamp_pools;
+	void _resolve_timestamp_pools(CommandBufferInfo *p_cb_info);
+	void _map_timestamp_pools();
 	uint32_t frame_count = 1;
 	WGPUSampler nonfiltering_substitute_sampler = nullptr;
 	HashSet<uint64_t> comparison_samplers;
@@ -453,19 +471,24 @@ public:
 	virtual void command_bind_raytracing_pipeline(CommandBufferID p_cmd_buffer, RaytracingPipelineID p_pipeline) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual void command_bind_raytracing_uniform_set(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual void command_trace_rays(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
-	// Timestamp queries are unsupported so far (WebGPU gates them behind the
-	// 'timestamp-query' feature); benign tokens and zeroed results keep the
-	// engine's per-frame profiling scaffolding alive.
-	virtual QueryPoolID timestamp_query_pool_create(uint32_t p_query_count) override { return QueryPoolID(1); }
-	virtual void timestamp_query_pool_free(QueryPoolID p_pool_id) override {}
-	virtual void timestamp_query_pool_get_results(QueryPoolID p_pool_id, uint32_t p_query_count, uint64_t *r_results) override {
-		for (uint32_t i = 0; i < p_query_count; i++) {
-			r_results[i] = 0;
-		}
-	}
-	virtual uint64_t timestamp_query_result_to_time(uint64_t p_result) override { return 0; }
+	// Timestamp queries. WebGPU has no encoder-level writeTimestamp: timestamps
+	// may only be written at pass boundaries. The engine always captures
+	// BETWEEN passes (capture_timestamp refuses to run inside an open list), so
+	// each capture rides its own empty compute pass, which costs nothing and
+	// lands exactly where the engine asked for it.
+	//
+	// Results are read back asynchronously (the web has no synchronous buffer
+	// map), so get_results serves the most recent completed readback - profiling
+	// numbers a frame or two old, which is what they are used for.
+	virtual QueryPoolID timestamp_query_pool_create(uint32_t p_query_count) override;
+	virtual void timestamp_query_pool_free(QueryPoolID p_pool_id) override;
+	virtual void timestamp_query_pool_get_results(QueryPoolID p_pool_id, uint32_t p_query_count, uint64_t *r_results) override;
+	// WebGPU timestamps are already nanoseconds, which is the unit the engine
+	// expects back (the Vulkan driver scales its ticks by timestampPeriod).
+	virtual uint64_t timestamp_query_result_to_time(uint64_t p_result) override { return p_result; }
+	// Nothing to reset: a WebGPU query set is overwritten in place.
 	virtual void command_timestamp_query_pool_reset(CommandBufferID p_cmd_buffer, QueryPoolID p_pool_id, uint32_t p_query_count) override {}
-	virtual void command_timestamp_write(CommandBufferID p_cmd_buffer, QueryPoolID p_pool_id, uint32_t p_index) override {}
+	virtual void command_timestamp_write(CommandBufferID p_cmd_buffer, QueryPoolID p_pool_id, uint32_t p_index) override;
 	// Debug labels and breadcrumbs are diagnostics, not functionality:
 	// no-ops rather than errors so engine paths that always emit them
 	// (object naming, RenderDoc-style regions) run silently.

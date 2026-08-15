@@ -159,6 +159,13 @@ const Engine = (function () {
 			if (adapter['features'] && adapter['features'].has('shader-f16')) {
 				requiredFeatures.push('shader-f16');
 			}
+			// GPU timing. Without this the engine's per-viewport render-time
+			// profiling reads zero on the web. Note browsers quantize the
+			// values for security unless launched with developer flags, so
+			// they are useful for development rather than on user devices.
+			if (adapter['features'] && adapter['features'].has('timestamp-query')) {
+				requiredFeatures.push('timestamp-query');
+			}
 			// Depth clamping. Renderers that rasterize proxy volumes (the
 			// clustered light/decal/probe builder) rely on geometry crossing
 			// the near plane being clamped rather than clipped away.
