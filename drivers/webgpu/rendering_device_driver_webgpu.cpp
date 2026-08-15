@@ -1034,14 +1034,36 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 	texture_desc.usage = usage;
 	texture_desc.format = wgpu_format;
 	const WGPUTextureFormat srgb_sibling = _wgpu_srgb_sibling(wgpu_format);
+	// A view may only use a format the texture declared up front, and an sRGB
+	// view may not carry storage usage. WebGPU lets a view name its own usage
+	// to resolve that, but the pinned emdawnwebgpu bindings do not marshal
+	// WGPUTextureViewDescriptor::usage, so a view always inherits the
+	// texture's - which means a texture cannot be both storage-capable and
+	// readable as sRGB here, and one of the two has to give.
+	//
+	// The engine says which it wants: a texture that lists the sRGB sibling
+	// in shareable_formats is going to be read through an sRGB view. That is
+	// the decal atlas, which is filled by raster draws and never bound as a
+	// storage image, so its storage usage is the safe thing to drop. Skipping
+	// the declaration instead is what made decals sample without the
+	// sRGB->linear conversion, roughly doubling their mid-tones until they
+	// saturated into a hard-edged block.
+	bool srgb_sibling_shareable = false;
+	for (uint32_t i = 0; i < (uint32_t)p_format.shareable_formats.size(); i++) {
+		if (_data_format_to_wgpu(p_format.shareable_formats[i]) == srgb_sibling) {
+			srgb_sibling_shareable = true;
+			break;
+		}
+	}
+	if (srgb_sibling_shareable && (usage & WGPUTextureUsage_StorageBinding)) {
+		usage &= ~(WGPUTextureUsage)WGPUTextureUsage_StorageBinding;
+		texture_desc.usage = usage;
+		print_verbose("WebGPU: dropped storage usage from a texture that is read as sRGB (a view cannot have both).");
+	}
+	// Declaring a view format can cost a driver's lossless compression, so
+	// only ask when the sibling can actually be used.
 	const bool declare_srgb_sibling = srgb_sibling != WGPUTextureFormat_Undefined && (usage & WGPUTextureUsage_StorageBinding) == 0;
 	if (declare_srgb_sibling) {
-		// The pinned Dawn ignores per-view usage, so an sRGB view of a
-		// storage-capable texture is unavoidably invalid. Storage textures
-		// (compute-written LUTs and effect buffers) never need sRGB
-		// reinterpretation, so keep their storage usage and only declare
-		// the sibling for non-storage textures (render targets); sibling
-		// views of storage textures degrade to the texture's own format.
 		texture_desc.viewFormatCount = 1;
 		texture_desc.viewFormats = &srgb_sibling;
 	}
@@ -1167,6 +1189,27 @@ BitField<RenderingDeviceDriver::TextureUsageBits> RenderingDeviceDriverWebGPU::t
 	return supported;
 }
 
+// An sRGB view may not carry storage usage, so it names its usage explicitly
+// rather than inheriting the texture's. Applies to views of views too, since
+// the recorded format may already be the sibling.
+//
+// NOTE: the pinned emdawnwebgpu bindings do not marshal this field, so it has
+// no effect today - texture_create keeps storage off any texture that will be
+// viewed as sRGB, which is what actually makes these views valid. Setting it
+// is still correct per the API, and becomes the real fix once the port
+// forwards it.
+void RenderingDeviceDriverWebGPU::_apply_srgb_view_usage(WGPUTextureViewDescriptor &r_view_desc, const TextureInfo *p_original) {
+	if (r_view_desc.format != WGPUTextureFormat_RGBA8UnormSrgb && r_view_desc.format != WGPUTextureFormat_BGRA8UnormSrgb) {
+		return;
+	}
+	if (p_original->usage == WGPUTextureUsage_None) {
+		// Unknown source usage: assume the common render-target set.
+		r_view_desc.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst;
+		return;
+	}
+	r_view_desc.usage = p_original->usage & ~(WGPUTextureUsage)WGPUTextureUsage_StorageBinding;
+}
+
 RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create_shared(TextureID p_original_texture, const TextureView &p_view) {
 	WEBGPU_MAIN_THREAD_GUARD(texture_create_shared(p_original_texture, p_view));
 	const TextureInfo *original = (const TextureInfo *)p_original_texture.id;
@@ -1180,24 +1223,7 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create_sha
 		view_desc.format = original->wgpu_format;
 	}
 	view_desc.dimension = original->view_dimension;
-	if (view_desc.format == WGPUTextureFormat_RGBA8UnormSrgb || view_desc.format == WGPUTextureFormat_BGRA8UnormSrgb) {
-		// sRGB views cannot carry storage usage; this must hold for views of
-		// views too (the recorded format may already be the sRGB sibling).
-		view_desc.usage = original->usage & ~(WGPUTextureUsage)WGPUTextureUsage_StorageBinding;
-		if (original->usage == WGPUTextureUsage_None) {
-			// Unknown source usage: assume the common RT set minus storage.
-			view_desc.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst;
-		}
-	}
-	if (view_desc.format == WGPUTextureFormat_RGBA8UnormSrgb || view_desc.format == WGPUTextureFormat_BGRA8UnormSrgb) {
-		// sRGB views cannot carry storage usage; this must hold for views of
-		// views too (the recorded format may already be the sRGB sibling).
-		view_desc.usage = original->usage & ~(WGPUTextureUsage)WGPUTextureUsage_StorageBinding;
-		if (original->usage == WGPUTextureUsage_None) {
-			// Unknown source usage: assume the common RT set minus storage.
-			view_desc.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst;
-		}
-	}
+	_apply_srgb_view_usage(view_desc, original);
 	WGPUTextureView view = wgpuTextureCreateView(original->texture, &view_desc);
 	ERR_FAIL_NULL_V(view, TextureID());
 
@@ -1221,6 +1247,7 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create_sha
 	if (view_desc.format != original->wgpu_format && (view_desc.format != _wgpu_srgb_sibling(original->wgpu_format) || !original->srgb_sibling_declared)) {
 		view_desc.format = original->wgpu_format;
 	}
+	_apply_srgb_view_usage(view_desc, original);
 	view_desc.baseMipLevel = p_mipmap;
 	view_desc.mipLevelCount = p_mipmaps;
 	view_desc.baseArrayLayer = p_layer;
