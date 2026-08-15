@@ -318,45 +318,47 @@ uint32_t WebXRInterfaceJS::get_capabilities() const {
 	return XRInterface::XR_STEREO | XRInterface::XR_MONO | XRInterface::XR_VR | XRInterface::XR_AR;
 }
 
-uint32_t WebXRInterfaceJS::get_view_count() {
+bool WebXRInterfaceJS::_uses_per_view_passes() const {
 #ifdef WEBGPU_ENABLED
-	if (RenderingDevice::get_singleton() != nullptr || gl_per_view_passes) {
-		// No multiview available (WebGPU, or a WebGL context without the
-		// extension): the renderer sees a single view and the viewport is
-		// drawn once per WebXR view instead (the active draw pass selects
-		// which view the "view 0" data comes from).
-		return 1;
+	// The WebGPU backend never has multiview: WGSL cannot express it.
+	if (RenderingDevice::get_singleton() != nullptr) {
+		return true;
 	}
 #endif
+	return gl_per_view_passes;
+}
+
+uint32_t WebXRInterfaceJS::get_view_count() {
+	if (_uses_per_view_passes()) {
+		// The renderer sees a single view and the viewport is drawn once per
+		// WebXR view instead (the active draw pass selects which view the
+		// "view 0" data comes from).
+		return 1;
+	}
 	return godot_webxr_get_view_count();
 }
 
 uint32_t WebXRInterfaceJS::get_draw_pass_count() {
-#ifdef WEBGPU_ENABLED
-	if (RenderingDevice::get_singleton() != nullptr || gl_per_view_passes) {
-		return godot_webxr_get_view_count();
-	}
-#endif
-	return 1;
+	return _uses_per_view_passes() ? godot_webxr_get_view_count() : 1;
 }
 
 void WebXRInterfaceJS::_update_pass_mode() {
 #ifdef WEBGPU_ENABLED
+	// The WebGPU path is per-view unconditionally; there is no WebGL context
+	// to ask about multiview.
 	if (RenderingDevice::get_singleton() != nullptr) {
 		return;
 	}
+#endif
 	const bool was_active = gl_per_view_passes;
 	gl_per_view_passes = godot_webxr_get_view_count() > 1 && !godot_webxr_uses_multiview();
 	if (gl_per_view_passes && !was_active) {
 		print_line("WebXR: WebGL multiview is unavailable on this browser; rendering one pass per view.");
 	}
-#endif
 }
 
 void WebXRInterfaceJS::set_current_draw_pass(uint32_t p_pass) {
-#ifdef WEBGPU_ENABLED
 	current_draw_pass = p_pass;
-#endif
 }
 
 bool WebXRInterfaceJS::is_initialized() const {
@@ -373,18 +375,10 @@ bool WebXRInterfaceJS::initialize() {
 			return false;
 		}
 
-#ifdef WEBGPU_ENABLED
-		if (RenderingDevice::get_singleton() != nullptr) {
-			// The WebGPU backend has no multiview (WGSL cannot express it);
-			// stereo renders one pass per view instead, so there is nothing
-			// to check here. Note that GLES3::Config does not exist on this
-			// boot path.
-		} else
-#endif
-		if (session_mode == "immersive-vr" && !GLES3::Config::get_singleton()->multiview_supported) {
-			emit_signal("session_failed", "Stereo rendering in Godot requires multiview, but this web browser doesn't support it.");
-			return false;
-		}
+		// Multiview is no longer required for stereo: a browser without it
+		// renders one pass per view instead (see _update_pass_mode). This
+		// used to refuse immersive-vr on exactly the browsers the per-view
+		// path was written for.
 
 		if (requested_reference_space_types.is_empty()) {
 			emit_signal("session_failed", "No reference spaces were requested.");
@@ -479,13 +473,13 @@ void WebXRInterfaceJS::uninitialize() {
 
 		texture_cache.clear();
 		frame_matrix_view_count = 0;
-#ifdef WEBGPU_ENABLED
 		gl_per_view_passes = false;
 		if (gl_blit_fbos[0] != 0 && GLES3::TextureStorage::get_singleton() != nullptr) {
 			glDeleteFramebuffers(2, gl_blit_fbos);
 			gl_blit_fbos[0] = 0;
 			gl_blit_fbos[1] = 0;
 		}
+#ifdef WEBGPU_ENABLED
 		depth_sensing_texture = RID();
 		depth_sensing_status = 0;
 #endif
@@ -585,12 +579,10 @@ Transform3D WebXRInterfaceJS::get_transform_for_view(uint32_t p_view, const Tran
 	ERR_FAIL_NULL_V(xr_server, p_cam_transform);
 	ERR_FAIL_COND_V(!initialized, p_cam_transform);
 
-#ifdef WEBGPU_ENABLED
-	if (RenderingDevice::get_singleton() != nullptr || gl_per_view_passes) {
+	if (_uses_per_view_passes()) {
 		// Per-view draw passes: view 0 of the active pass is the pass's view.
 		p_view += current_draw_pass;
 	}
-#endif
 	float js_matrix[16];
 	if (p_view < frame_matrix_view_count) {
 		memcpy(js_matrix, frame_matrices + 16 + p_view * 32, sizeof(js_matrix));
@@ -607,12 +599,10 @@ Transform3D WebXRInterfaceJS::get_transform_for_view(uint32_t p_view, const Tran
 }
 
 Projection WebXRInterfaceJS::get_projection_for_view(uint32_t p_view, double p_aspect, double p_z_near, double p_z_far) {
-#ifdef WEBGPU_ENABLED
-	if (RenderingDevice::get_singleton() != nullptr || gl_per_view_passes) {
+	if (_uses_per_view_passes()) {
 		// Per-view draw passes: view 0 of the active pass is the pass's view.
 		p_view += current_draw_pass;
 	}
-#endif
 	Projection view;
 
 	ERR_FAIL_COND_V(!initialized, view);
@@ -668,7 +658,6 @@ bool WebXRInterfaceJS::pre_draw_viewport(RID p_render_target) {
 		return true;
 	}
 #endif
-#ifdef WEBGPU_ENABLED
 	if (gl_per_view_passes) {
 		// Non-multiview stereo: the viewport renders into its own target and
 		// post_draw blits it into this pass's eye viewport - no override.
@@ -676,7 +665,6 @@ bool WebXRInterfaceJS::pre_draw_viewport(RID p_render_target) {
 		depth_texture = RID();
 		return true;
 	}
-#endif
 	GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
 	if (texture_storage == nullptr) {
 		return false;
@@ -714,18 +702,15 @@ Vector<RenderingServerTypes::BlitToScreen> WebXRInterfaceJS::post_draw_viewport(
 		return blit_to_screen;
 	}
 
-#ifdef WEBGPU_ENABLED
 	if (gl_per_view_passes) {
 		_gl_blit_pass_to_layer(p_render_target);
 		return blit_to_screen;
 	}
-#endif
 	texture_storage->render_target_set_reattach_textures(p_render_target, false);
 
 	return blit_to_screen;
 }
 
-#ifdef WEBGPU_ENABLED
 void WebXRInterfaceJS::_gl_blit_pass_to_layer(RID p_render_target) {
 	GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
 	if (texture_storage == nullptr) {
@@ -760,7 +745,6 @@ void WebXRInterfaceJS::_gl_blit_pass_to_layer(RID p_render_target) {
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, prev_read_fbo);
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prev_draw_fbo);
 }
-#endif
 
 #ifdef WEBGPU_ENABLED
 void WebXRInterfaceJS::_free_rd_layer_textures() {
@@ -1001,7 +985,6 @@ void WebXRInterfaceJS::_update_input_source(int p_input_source_id) {
 			xr_server->remove_tracker(input_source.tracker);
 			input_source.tracker.unref();
 		}
-#ifdef WEBGPU_ENABLED
 		if (p_input_source_id < 2 && hand_trackers[p_input_source_id].is_valid() && hand_trackers[p_input_source_id]->get_has_tracking_data()) {
 			// The browser dropped this hand's input source (it does so while
 			// the hand tracker re-acquires, e.g. at session start): without
@@ -1010,7 +993,6 @@ void WebXRInterfaceJS::_update_input_source(int p_input_source_id) {
 			hand_trackers[p_input_source_id]->set_has_tracking_data(false);
 			hand_trackers[p_input_source_id]->invalidate_pose("default");
 		}
-#endif
 		return;
 	}
 
