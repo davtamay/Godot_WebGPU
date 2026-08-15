@@ -130,6 +130,17 @@ const GodotWebGPU = {
 	},
 
 	/**
+	 * Whether render-bundle caching is enabled. `?nobundles` in the page URL
+	 * disables it, so the same export can be A/B benchmarked.
+	 *
+	 * @returns {number} 1 to use render bundles, 0 to encode directly.
+	 */
+	godot_js_webgpu_use_bundles__sig: 'i',
+	godot_js_webgpu_use_bundles: function () {
+		return window.location.search.indexOf('nobundles') >= 0 ? 0 : 1;
+	},
+
+	/**
 	 * Creates the hidden probe canvas (see drivers/webgpu/webgpu_probe.cpp).
 	 * A canvas is permanently locked to its first context type, so the probe
 	 * never uses the main canvas.
