@@ -44,6 +44,10 @@ const GodotWebXR = {
 		// Recreating the layer (resize, view-count change) invalidates every
 		// texture wrapped from it; the engine watches this counter to evict.
 		layer_generation: 0,
+		// Layer generation whose sub-image layout has been verified.
+		subimage_checked_generation: -1,
+		// Color formats the engine can map to a RenderingDevice format.
+		SUPPORTED_COLOR_FORMATS: ['rgba8unorm', 'rgba8unorm-srgb', 'bgra8unorm', 'bgra8unorm-srgb'],
 		// getViewSubImage() is only valid once per frame per view; several
 		// engine calls need it, so it is computed once per animation frame.
 		frame_subimage: null,
@@ -70,6 +74,8 @@ const GodotWebXR = {
 		frame: null,
 		pose: null,
 		view_count: 1,
+		// One-shot latch so a joint-count mismatch reports once, not per frame.
+		hand_joint_overflow_reported: false,
 		input_sources: new Array(16),
 		touches: new Array(5),
 		onsimpleevent: null,
@@ -132,6 +138,28 @@ const GodotWebXR = {
 			// requested, so unsupporting browsers see no behavior change.
 			if (layer && GodotWebXR.fixed_foveation > 0.0 && 'fixedFoveation' in layer) {
 				layer.fixedFoveation = GodotWebXR.fixed_foveation;
+			}
+		},
+
+		// Depth options are preferences: an unknown or renamed dictionary
+		// member is ignored silently and the session falls back to browser
+		// defaults. Comparing what was granted against what was asked for is
+		// the only way to notice, and the difference matters (temporally
+		// fused depth erases the moving objects occlusion needs).
+		reportDepthSensingMismatch: (session, session_init) => {
+			const wanted = session_init['depthSensing'];
+			if (!wanted) {
+				return;
+			}
+			const granted = [
+				['usage', session.depthUsage, wanted.usagePreference],
+				['data format', session.depthDataFormat, wanted.dataFormatPreference],
+				['depth type', session.depthType, wanted.depthTypeRequest],
+			];
+			for (const [label, got, preferences] of granted) {
+				if (got !== undefined && preferences && preferences.indexOf(got) < 0) {
+					GodotRuntime.print(`WebXR: depth ${label} '${got}' was not among the requested ${preferences.join(', ')} - this runtime may have changed its depth options.`);
+				}
 			}
 		},
 
@@ -267,12 +295,42 @@ const GodotWebXR = {
 				}
 			}
 
-			// Because we always use "texture-array" for multiview and "texture"
-			// when there is only 1 view, it should be safe to only grab the
-			// subimage for the first view.
+			// Multiview layers are texture arrays and single-view layers are
+			// plain textures, so in both cases view 0's sub-image covers the
+			// whole layer. Verified once per layer: were a runtime to hand
+			// out per-view textures or side-by-side viewports instead, this
+			// would render only the left eye and report nothing.
 			const binding = GodotWebXR.gpu_binding || GodotWebXR.gl_binding;
 			GodotWebXR.frame_subimage = binding.getViewSubImage(layer, GodotWebXR.pose.views[0]);
+			GodotWebXR.verifySharedSubImage(binding, layer);
 			return GodotWebXR.frame_subimage;
+		},
+
+		// Runs once per layer generation: compares view 1's sub-image with
+		// view 0's. They must share one texture and start at the same
+		// origin for the single-sub-image path above to be correct.
+		verifySharedSubImage: (binding, layer) => {
+			if (GodotWebXR.subimage_checked_generation === GodotWebXR.layer_generation
+					|| !GodotWebXR.pose || GodotWebXR.pose.views.length < 2) {
+				return;
+			}
+			GodotWebXR.subimage_checked_generation = GodotWebXR.layer_generation;
+			try {
+				const first = GodotWebXR.frame_subimage;
+				const second = binding.getViewSubImage(layer, GodotWebXR.pose.views[1]);
+				if (!first || !second) {
+					return;
+				}
+				const same_texture = first.colorTexture === second.colorTexture;
+				const same_origin = !first.viewport || !second.viewport
+					|| (first.viewport.x === second.viewport.x && first.viewport.y === second.viewport.y);
+				if (!same_texture || !same_origin) {
+					GodotRuntime.error('WebXR: this runtime gives each view its own sub-image, which the renderer does not expect - only one eye will be rendered. Please report this with your browser and device.');
+				}
+			} catch (e) {
+				// A runtime that refuses a second query in one frame is fine;
+				// the check is diagnostic only.
+			}
 		},
 
 		getTextureHandle: (texture) => {
@@ -470,6 +528,7 @@ const GodotWebXR = {
 		GodotWebXR.offered_session_mode = null;
 		session_promise.then(function (session) {
 			GodotWebXR.session = session;
+			GodotWebXR.reportDepthSensingMismatch(session, session_init);
 
 			session.addEventListener('end', function (evt) {
 				onended();
@@ -560,9 +619,19 @@ const GodotWebXR = {
 					if (!GodotWebXR.gpu_binding) {
 						throw new Error('This browser cannot bind WebXR sessions to WebGPU (XRGPUBinding is unavailable).');
 					}
-					GodotWebXR.gpu_color_format = GodotWebXR.gpu_binding.getPreferredColorFormat
+					const preferred = GodotWebXR.gpu_binding.getPreferredColorFormat
 						? GodotWebXR.gpu_binding.getPreferredColorFormat()
 						: 'rgba8unorm';
+					// The engine maps a fixed set of formats to its own; a layer
+					// created in anything else would be wrapped as the wrong
+					// format and produce garbage with no error, so an unknown
+					// preference is reported and a supported format is used.
+					if (GodotWebXR.SUPPORTED_COLOR_FORMATS.indexOf(preferred) < 0) {
+						GodotRuntime.error(`WebXR: unsupported preferred color format '${preferred}'; using rgba8unorm.`);
+						GodotWebXR.gpu_color_format = 'rgba8unorm';
+					} else {
+						GodotWebXR.gpu_color_format = preferred;
+					}
 
 					// This will trigger the layer to get created.
 					const layer = GodotWebXR.getLayer();
@@ -1001,9 +1070,21 @@ const GodotWebXR = {
 		// Hand tracking data.
 		let has_hand_data = false;
 		if (input_source.hand && r_hand_joints !== 0 && r_hand_radii !== 0) {
+			// The engine's arrays are sized for the 25 joints the hand-input
+			// module defines. fillPoses throws when handed an array too small
+			// for the collection, so a runtime reporting more joints must be
+			// trimmed rather than allowed to kill hand tracking every frame.
+			let joints = input_source.hand.values();
+			if (input_source.hand.size > 25) {
+				if (!GodotWebXR.hand_joint_overflow_reported) {
+					GodotWebXR.hand_joint_overflow_reported = true;
+					GodotRuntime.print(`WebXR: this runtime reports ${input_source.hand.size} hand joints; using the first 25.`);
+				}
+				joints = Array.from(joints).slice(0, 25);
+			}
 			const hand_joint_array = new Float32Array(25 * 16);
 			const hand_radii_array = new Float32Array(25);
-			if (frame.fillPoses(input_source.hand.values(), space, hand_joint_array) && frame.fillJointRadii(input_source.hand.values(), hand_radii_array)) {
+			if (frame.fillPoses(joints, space, hand_joint_array) && frame.fillJointRadii(joints, hand_radii_array)) {
 				GodotRuntime.heapCopy(HEAPF32, hand_joint_array, r_hand_joints);
 				GodotRuntime.heapCopy(HEAPF32, hand_radii_array, r_hand_radii);
 				has_hand_data = true;
