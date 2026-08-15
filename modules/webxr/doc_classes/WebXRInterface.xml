@@ -299,5 +299,8 @@
 		<constant name="TARGET_RAY_MODE_SCREEN" value="3" enum="TargetRayMode">
 			Target ray from touch screen, mouse or other tactile input device.
 		</constant>
+		<constant name="TARGET_RAY_MODE_TRANSIENT_POINTER" value="4" enum="TargetRayMode">
+			The input source is a transient pointer: a targeting ray that exists only for the duration of a user gesture, revealed at the moment of activation. Used by visionOS Safari for its privacy-preserving gaze-and-pinch "natural input", where the gaze ray is only exposed while the user pinches.
+		</constant>
 	</constants>
 </class>
