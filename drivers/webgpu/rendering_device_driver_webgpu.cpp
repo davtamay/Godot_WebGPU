@@ -30,6 +30,8 @@
 
 #include "rendering_device_driver_webgpu.h"
 
+
+
 #include "core/string/print_string.h"
 
 // See platform/web/js/libs/library_godot_webgpu.js.
@@ -56,6 +58,7 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	}
 	device_has_shader_f16 = wgpuDeviceHasFeature(device, WGPUFeatureName_ShaderF16);
 	device_has_depth_clip_control = wgpuDeviceHasFeature(device, WGPUFeatureName_DepthClipControl);
+	device_has_timestamp_query = wgpuDeviceHasFeature(device, WGPUFeatureName_TimestampQuery);
 
 	frame_count = MAX(1u, p_frame_count);
 
@@ -109,6 +112,10 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 			}
 		}
 		wgpuQueueSubmit(queue, wgpu_buffers.size(), wgpu_buffers.ptr());
+		// Request the timestamp readback only after submission: mapping a
+		// buffer the queue is still writing is invalid.
+		_resolve_timestamp_pools(nullptr);
+		_map_timestamp_pools();
 		for (uint32_t i = 0; i < p_cmd_buffers.size(); i++) {
 			CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffers[i].id;
 			wgpuCommandBufferRelease(cb_info->command_buffer);
@@ -249,6 +256,93 @@ void RenderingDeviceDriverWebGPU::command_clear_color_texture(CommandBufferID p_
 			wgpuRenderPassEncoderRelease(pass);
 			wgpuTextureViewRelease(view);
 		}
+	}
+}
+
+void RenderingDeviceDriverWebGPU::timestamp_query_pool_get_results(QueryPoolID p_pool_id, uint32_t p_query_count, uint64_t *r_results) {
+	const TimestampPoolInfo *pool = (const TimestampPoolInfo *)p_pool_id.id;
+	for (uint32_t i = 0; i < p_query_count; i++) {
+		r_results[i] = (pool && i < pool->values.size()) ? pool->values[i] : 0;
+	}
+}
+
+void RenderingDeviceDriverWebGPU::command_timestamp_write(CommandBufferID p_cmd_buffer, QueryPoolID p_pool_id, uint32_t p_index) {
+	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	TimestampPoolInfo *pool = (TimestampPoolInfo *)p_pool_id.id;
+	if (!cb_info || !cb_info->encoder || !pool || !pool->query_set || p_index >= pool->count) {
+		return;
+	}
+	// An empty compute pass exists purely to carry the timestamp: WebGPU can
+	// only write one at a pass boundary, and a pass with no dispatches costs
+	// nothing. Any open pass must be closed first, or the encoder rejects it.
+	_end_compute_pass(cb_info);
+	WGPUPassTimestampWrites writes = WGPU_PASS_TIMESTAMP_WRITES_INIT;
+	writes.querySet = pool->query_set;
+	writes.beginningOfPassWriteIndex = p_index;
+	writes.endOfPassWriteIndex = pool->count; // scratch slot, never read
+	WGPUComputePassDescriptor desc = WGPU_COMPUTE_PASS_DESCRIPTOR_INIT;
+	desc.timestampWrites = &writes;
+	WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(cb_info->encoder, &desc);
+	if (pass) {
+		wgpuComputePassEncoderEnd(pass);
+		wgpuComputePassEncoderRelease(pass);
+		pool->written = MAX(pool->written, p_index + 1);
+	}
+}
+
+// Resolve every pool that was written this frame onto the same encoder that
+// wrote it, then stage it for readback.
+void RenderingDeviceDriverWebGPU::_resolve_timestamp_pools(CommandBufferInfo *p_cb_info) {
+	// Resolving must happen after EVERY write for the frame, and the engine
+	// submits several command buffers per frame - resolving on each one's end
+	// captured queries that had not been written yet, and read back zeros.
+	// One dedicated encoder submitted after the frame's work is unambiguous.
+	WGPUCommandEncoder enc = nullptr;
+	for (TimestampPoolInfo *pool : timestamp_pools) {
+		if (!pool->query_set || pool->written == 0 || pool->map_in_flight) {
+			continue;
+		}
+		if (!enc) {
+			enc = wgpuDeviceCreateCommandEncoder(device, nullptr);
+			ERR_FAIL_NULL(enc);
+		}
+		wgpuCommandEncoderResolveQuerySet(enc, pool->query_set, 0, pool->written, pool->resolve, 0);
+		wgpuCommandEncoderCopyBufferToBuffer(enc, pool->resolve, 0, pool->readback, 0,
+				(uint64_t)pool->written * sizeof(uint64_t));
+	}
+	if (enc) {
+		WGPUCommandBuffer cb = wgpuCommandEncoderFinish(enc, nullptr);
+		wgpuQueueSubmit(queue, 1, &cb);
+		wgpuCommandBufferRelease(cb);
+		wgpuCommandEncoderRelease(enc);
+	}
+}
+
+// Kick the async readback after submission. There is no synchronous map on the
+// web, so results land a frame or two later; the engine only displays them.
+void RenderingDeviceDriverWebGPU::_map_timestamp_pools() {
+	for (TimestampPoolInfo *pool : timestamp_pools) {
+		if (!pool->query_set || pool->written == 0 || pool->map_in_flight) {
+			continue;
+		}
+		pool->map_in_flight = true;
+		WGPUBufferMapCallbackInfo cb = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
+		cb.mode = WGPUCallbackMode_AllowSpontaneous;
+		cb.userdata1 = pool;
+		cb.callback = [](WGPUMapAsyncStatus p_status, WGPUStringView, void *p_user1, void *) {
+			TimestampPoolInfo *p = (TimestampPoolInfo *)p_user1;
+			if (p_status == WGPUMapAsyncStatus_Success) {
+				const uint64_t *src = (const uint64_t *)wgpuBufferGetConstMappedRange(p->readback, 0, (size_t)p->written * sizeof(uint64_t));
+				if (src) {
+					for (uint32_t i = 0; i < p->written && i < p->values.size(); i++) {
+						p->values[i] = src[i];
+					}
+				}
+				wgpuBufferUnmap(p->readback);
+			}
+			p->map_in_flight = false;
+		};
+		wgpuBufferMapAsync(pool->readback, WGPUMapMode_Read, 0, (size_t)pool->written * sizeof(uint64_t), cb);
 	}
 }
 
@@ -729,6 +823,60 @@ static uint32_t _data_format_texel_size(RenderingDeviceCommons::DataFormat p_for
 		default:
 			return 0;
 	}
+}
+
+RenderingDeviceDriver::QueryPoolID RenderingDeviceDriverWebGPU::timestamp_query_pool_create(uint32_t p_query_count) {
+	WEBGPU_MAIN_THREAD_GUARD(timestamp_query_pool_create(p_query_count));
+	TimestampPoolInfo *pool = memnew(TimestampPoolInfo);
+	pool->count = p_query_count;
+	pool->values.resize(p_query_count);
+	for (uint32_t i = 0; i < p_query_count; i++) {
+		pool->values[i] = 0;
+	}
+	// Without the feature the pool stays a benign token: the engine's profiling
+	// scaffolding keeps working and simply reads zeros, as it did before.
+	if (device_has_timestamp_query && p_query_count > 0) {
+		WGPUQuerySetDescriptor qs_desc = WGPU_QUERY_SET_DESCRIPTOR_INIT;
+		qs_desc.type = WGPUQueryType_Timestamp;
+		// One extra slot as a scratch target. The pinned emdawnwebgpu bindings
+		// marshal BOTH write indices unconditionally, so WGPU_QUERY_SET_INDEX_
+		// UNDEFINED reaches JS as a literal 0xFFFFFFFF index and invalidates the
+		// pass - the port cannot express "no end-of-pass timestamp". Pointing
+		// the unwanted end write at a throwaway slot is the way to say it.
+		qs_desc.count = p_query_count + 1;
+		pool->query_set = wgpuDeviceCreateQuerySet(device, &qs_desc);
+
+		WGPUBufferDescriptor rb = WGPU_BUFFER_DESCRIPTOR_INIT;
+		rb.size = (uint64_t)p_query_count * sizeof(uint64_t);
+		rb.usage = WGPUBufferUsage_QueryResolve | WGPUBufferUsage_CopySrc;
+		pool->resolve = wgpuDeviceCreateBuffer(device, &rb);
+
+		WGPUBufferDescriptor mb = WGPU_BUFFER_DESCRIPTOR_INIT;
+		mb.size = rb.size;
+		mb.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
+		pool->readback = wgpuDeviceCreateBuffer(device, &mb);
+	}
+	timestamp_pools.push_back(pool);
+	return QueryPoolID(pool);
+}
+
+void RenderingDeviceDriverWebGPU::timestamp_query_pool_free(QueryPoolID p_pool_id) {
+	WEBGPU_MAIN_THREAD_GUARD(timestamp_query_pool_free(p_pool_id));
+	TimestampPoolInfo *pool = (TimestampPoolInfo *)p_pool_id.id;
+	ERR_FAIL_NULL(pool);
+	timestamp_pools.erase(pool);
+	if (pool->query_set) {
+		wgpuQuerySetRelease(pool->query_set);
+	}
+	if (pool->resolve) {
+		wgpuBufferRelease(pool->resolve);
+	}
+	if (pool->readback) {
+		// A map may still be in flight; releasing is safe, the callback holds
+		// no reference to the pool beyond the id it was given.
+		wgpuBufferRelease(pool->readback);
+	}
+	memdelete(pool);
 }
 
 RenderingDeviceDriver::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint64_t p_size, BitField<BufferUsageBits> p_usage, MemoryAllocationType p_allocation_type, uint64_t p_frames_drawn) {
