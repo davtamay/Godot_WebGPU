@@ -38,6 +38,8 @@
 extern "C" {
 // Returns 1 for bgra8unorm, 2 for rgba8unorm.
 int godot_js_webgpu_preferred_format();
+// 0 when the page URL carries ?nobundles (benchmark A/B switch).
+int godot_js_webgpu_use_bundles();
 }
 
 // WebGPU exposes a single, implicitly synchronized queue: queue family and
@@ -52,6 +54,10 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	ERR_FAIL_NULL_V(device, ERR_UNAVAILABLE);
 	queue = wgpuDeviceGetQueue(device);
 	ERR_FAIL_NULL_V(queue, ERR_CANT_CREATE);
+	use_render_bundles = godot_js_webgpu_use_bundles() != 0;
+	if (!use_render_bundles) {
+		print_line("WebGPU: render-bundle caching disabled (?nobundles).");
+	}
 
 	if (wgpuDeviceGetLimits(device, &device_limits) != WGPUStatus_Success) {
 		ERR_FAIL_V_MSG(ERR_CANT_CREATE, "Failed to query WebGPU device limits.");
@@ -431,14 +437,181 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 		cb_info->pending_bind_groups[i] = nullptr;
 		cb_info->pending_dynamic_offsets[i].clear();
 	}
+	// The swap-chain pass builds its pass info outside render_pass_create;
+	// its single blit draw is not worth the bundle bookkeeping.
+	cb_info->render_bundleable = use_render_bundles && !pass->from_swap_chain;
+	cb_info->render_records.clear();
+	cb_info->render_records_hash = 0xcbf29ce484222325ULL; // FNV-1a basis.
+	cb_info->render_pass_info = pass;
+	cb_info->render_framebuffer = framebuffer;
+}
+
+static _FORCE_INLINE_ uint64_t _fnv1a64_append(uint64_t p_hash, const void *p_data, size_t p_size) {
+	const uint8_t *bytes = (const uint8_t *)p_data;
+	for (size_t i = 0; i < p_size; i++) {
+		p_hash = (p_hash ^ bytes[i]) * 0x100000001b3ULL;
+	}
+	return p_hash;
+}
+
+void RenderingDeviceDriverWebGPU::_record_render_command(CommandBufferInfo *p_cb_info, const RenderCommandRecord &p_record) {
+	p_cb_info->render_records.push_back(p_record);
+	p_cb_info->render_records_hash = _fnv1a64_append(p_cb_info->render_records_hash, &p_record, sizeof(RenderCommandRecord));
+}
+
+void RenderingDeviceDriverWebGPU::_render_pass_flush_records(CommandBufferInfo *p_cb_info) {
+	// Pass-encoder-only state (viewport/scissor/blend constant) arrived
+	// after draw-side commands: bundles cannot express it, so the capture is
+	// encoded directly and bundling ends for this pass.
+	_replay_render_records(p_cb_info, p_cb_info->render_pass_encoder, nullptr);
+	p_cb_info->render_records.clear();
+	p_cb_info->render_bundleable = false;
+}
+
+void RenderingDeviceDriverWebGPU::_replay_render_records(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass_encoder, WGPURenderBundleEncoder p_bundle_encoder) {
+	for (const RenderCommandRecord &rec : p_cb_info->render_records) {
+		switch (rec.type) {
+			case RenderCommandRecord::TYPE_SET_PIPELINE: {
+				if (p_bundle_encoder != nullptr) {
+					wgpuRenderBundleEncoderSetPipeline(p_bundle_encoder, rec.set_pipeline.pipeline);
+				} else {
+					wgpuRenderPassEncoderSetPipeline(p_pass_encoder, rec.set_pipeline.pipeline);
+				}
+			} break;
+			case RenderCommandRecord::TYPE_SET_BIND_GROUP: {
+				const uint32_t *offsets = rec.set_bind_group.offset_count == 0 ? nullptr : rec.set_bind_group.offsets;
+				if (p_bundle_encoder != nullptr) {
+					wgpuRenderBundleEncoderSetBindGroup(p_bundle_encoder, rec.set_bind_group.index, rec.set_bind_group.group, rec.set_bind_group.offset_count, offsets);
+				} else {
+					wgpuRenderPassEncoderSetBindGroup(p_pass_encoder, rec.set_bind_group.index, rec.set_bind_group.group, rec.set_bind_group.offset_count, offsets);
+				}
+			} break;
+			case RenderCommandRecord::TYPE_SET_VERTEX_BUFFER: {
+				if (p_bundle_encoder != nullptr) {
+					wgpuRenderBundleEncoderSetVertexBuffer(p_bundle_encoder, rec.set_vertex_buffer.slot, rec.set_vertex_buffer.buffer, rec.set_vertex_buffer.offset, WGPU_WHOLE_SIZE);
+				} else {
+					wgpuRenderPassEncoderSetVertexBuffer(p_pass_encoder, rec.set_vertex_buffer.slot, rec.set_vertex_buffer.buffer, rec.set_vertex_buffer.offset, WGPU_WHOLE_SIZE);
+				}
+			} break;
+			case RenderCommandRecord::TYPE_SET_INDEX_BUFFER: {
+				if (p_bundle_encoder != nullptr) {
+					wgpuRenderBundleEncoderSetIndexBuffer(p_bundle_encoder, rec.set_index_buffer.buffer, rec.set_index_buffer.format, rec.set_index_buffer.offset, WGPU_WHOLE_SIZE);
+				} else {
+					wgpuRenderPassEncoderSetIndexBuffer(p_pass_encoder, rec.set_index_buffer.buffer, rec.set_index_buffer.format, rec.set_index_buffer.offset, WGPU_WHOLE_SIZE);
+				}
+			} break;
+			case RenderCommandRecord::TYPE_DRAW: {
+				if (p_bundle_encoder != nullptr) {
+					wgpuRenderBundleEncoderDraw(p_bundle_encoder, rec.draw.vertex_count, rec.draw.instance_count, rec.draw.first_vertex, rec.draw.first_instance);
+				} else {
+					wgpuRenderPassEncoderDraw(p_pass_encoder, rec.draw.vertex_count, rec.draw.instance_count, rec.draw.first_vertex, rec.draw.first_instance);
+				}
+			} break;
+			case RenderCommandRecord::TYPE_DRAW_INDEXED: {
+				if (p_bundle_encoder != nullptr) {
+					wgpuRenderBundleEncoderDrawIndexed(p_bundle_encoder, rec.draw_indexed.index_count, rec.draw_indexed.instance_count, rec.draw_indexed.first_index, rec.draw_indexed.vertex_offset, rec.draw_indexed.first_instance);
+				} else {
+					wgpuRenderPassEncoderDrawIndexed(p_pass_encoder, rec.draw_indexed.index_count, rec.draw_indexed.instance_count, rec.draw_indexed.first_index, rec.draw_indexed.vertex_offset, rec.draw_indexed.first_instance);
+				}
+			} break;
+			case RenderCommandRecord::TYPE_DRAW_INDIRECT: {
+				if (p_bundle_encoder != nullptr) {
+					wgpuRenderBundleEncoderDrawIndirect(p_bundle_encoder, rec.draw_indirect.buffer, rec.draw_indirect.offset);
+				} else {
+					wgpuRenderPassEncoderDrawIndirect(p_pass_encoder, rec.draw_indirect.buffer, rec.draw_indirect.offset);
+				}
+			} break;
+			case RenderCommandRecord::TYPE_DRAW_INDEXED_INDIRECT: {
+				if (p_bundle_encoder != nullptr) {
+					wgpuRenderBundleEncoderDrawIndexedIndirect(p_bundle_encoder, rec.draw_indirect.buffer, rec.draw_indirect.offset);
+				} else {
+					wgpuRenderPassEncoderDrawIndexedIndirect(p_pass_encoder, rec.draw_indirect.buffer, rec.draw_indirect.offset);
+				}
+			} break;
+		}
+	}
 }
 
 void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_buffer) {
 	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
+	if (cb_info->render_bundleable && cb_info->render_records.size() > 0) {
+		FramebufferInfo *framebuffer = cb_info->render_framebuffer;
+		WGPURenderBundle bundle = nullptr;
+		for (const BundleCacheEntry &entry : framebuffer->bundle_cache) {
+			if (entry.bundle != nullptr && entry.hash == cb_info->render_records_hash && entry.epoch == resource_epoch) {
+				bundle = entry.bundle;
+				break;
+			}
+		}
+		bool build_bundle = false;
+		if (bundle == nullptr) {
+			// Build a bundle only for a stream seen before: a first sighting
+			// encodes directly and just notes the hash, so passes that never
+			// repeat (per-frame transparent sort order, one-off passes) cost
+			// nothing beyond the capture itself.
+			for (const uint64_t recent : framebuffer->recent_hashes) {
+				if (recent == cb_info->render_records_hash) {
+					build_bundle = true;
+					break;
+				}
+			}
+			if (!build_bundle) {
+				framebuffer->recent_hashes[framebuffer->recent_hash_next] = cb_info->render_records_hash;
+				framebuffer->recent_hash_next = (framebuffer->recent_hash_next + 1) % (sizeof(framebuffer->recent_hashes) / sizeof(uint64_t));
+			}
+		}
+		if (build_bundle) {
+			// Second sighting: record it into a bundle so subsequent
+			// identical frames replay it with a single call.
+			WGPUTextureFormat color_formats[8];
+			uint32_t color_format_count = 0;
+			WGPURenderBundleEncoderDescriptor bundle_desc = WGPU_RENDER_BUNDLE_ENCODER_DESCRIPTOR_INIT;
+			for (const RenderPassAttachment &attachment : cb_info->render_pass_info->attachments) {
+				if (attachment.is_resolve_target) {
+					continue;
+				}
+				bundle_desc.sampleCount = attachment.texture_samples;
+				if (attachment.is_depth_stencil) {
+					bundle_desc.depthStencilFormat = attachment.format;
+				} else if (color_format_count < 8) {
+					color_formats[color_format_count++] = attachment.format;
+				}
+			}
+			bundle_desc.colorFormatCount = color_format_count;
+			bundle_desc.colorFormats = color_formats;
+			WGPURenderBundleEncoder bundle_encoder = wgpuDeviceCreateRenderBundleEncoder(device, &bundle_desc);
+			if (bundle_encoder != nullptr) {
+				_replay_render_records(cb_info, nullptr, bundle_encoder);
+				bundle = wgpuRenderBundleEncoderFinish(bundle_encoder, nullptr);
+				wgpuRenderBundleEncoderRelease(bundle_encoder);
+			}
+			if (bundle != nullptr) {
+				BundleCacheEntry &evict = framebuffer->bundle_cache[framebuffer->bundle_cache_evict];
+				framebuffer->bundle_cache_evict = (framebuffer->bundle_cache_evict + 1) % (sizeof(framebuffer->bundle_cache) / sizeof(BundleCacheEntry));
+				if (evict.bundle != nullptr) {
+					wgpuRenderBundleRelease(evict.bundle);
+				}
+				evict.hash = cb_info->render_records_hash;
+				evict.epoch = resource_epoch;
+				evict.bundle = bundle;
+			}
+		}
+		if (bundle != nullptr) {
+			wgpuRenderPassEncoderExecuteBundles(cb_info->render_pass_encoder, 1, &bundle);
+		} else {
+			// First sighting of this stream (or bundle creation failed):
+			// encode the capture directly - the cost of the old path.
+			_replay_render_records(cb_info, cb_info->render_pass_encoder, nullptr);
+		}
+	}
 	wgpuRenderPassEncoderEnd(cb_info->render_pass_encoder);
 	wgpuRenderPassEncoderRelease(cb_info->render_pass_encoder);
 	cb_info->render_pass_encoder = nullptr;
+	cb_info->render_bundleable = false;
+	cb_info->render_records.clear();
+	cb_info->render_pass_info = nullptr;
+	cb_info->render_framebuffer = nullptr;
 }
 
 /*******************/
@@ -968,6 +1141,7 @@ RenderingDeviceDriver::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint6
 
 void RenderingDeviceDriverWebGPU::buffer_free(BufferID p_buffer) {
 	WEBGPU_MAIN_THREAD_GUARD(buffer_free(p_buffer));
+	resource_epoch++; // Invalidates cached render bundles (see BundleCacheEntry).
 	{
 		BufferInfo *freed = (BufferInfo *)p_buffer.id;
 		if (freed->dynamic) {
@@ -1439,6 +1613,7 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create_sha
 
 void RenderingDeviceDriverWebGPU::texture_free(TextureID p_texture) {
 	WEBGPU_MAIN_THREAD_GUARD(texture_free(p_texture));
+	resource_epoch++; // Invalidates cached render bundles (see BundleCacheEntry).
 	TextureInfo *texture = (TextureInfo *)p_texture.id;
 	wgpuTextureViewRelease(texture->view);
 	if (texture->depth_only_view != nullptr) {
@@ -1539,6 +1714,7 @@ RenderingDeviceDriver::SamplerID RenderingDeviceDriverWebGPU::sampler_create(con
 void RenderingDeviceDriverWebGPU::sampler_free(SamplerID p_sampler) {
 	comparison_samplers.erase((uint64_t)p_sampler.id);
 	WEBGPU_MAIN_THREAD_GUARD(sampler_free(p_sampler));
+	resource_epoch++; // Invalidates cached render bundles (see BundleCacheEntry).
 	wgpuSamplerRelease((WGPUSampler)p_sampler.id);
 }
 
@@ -2722,6 +2898,7 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 
 void RenderingDeviceDriverWebGPU::shader_free(ShaderID p_shader) {
 	WEBGPU_MAIN_THREAD_GUARD(shader_free(p_shader));
+	resource_epoch++; // Invalidates cached render bundles (see BundleCacheEntry).
 	ShaderInfo *shader = (ShaderInfo *)p_shader.id;
 	shader_destroy_modules(p_shader);
 	for (WGPUBindGroupLayout layout : shader->bind_group_layouts) {
@@ -2968,6 +3145,7 @@ RenderingDeviceDriver::RenderPassID RenderingDeviceDriverWebGPU::render_pass_cre
 			pass_attachment.format = WGPUTextureFormat_RG8Uint;
 		}
 		pass_attachment.is_depth_stencil = _is_depth_stencil_format(attachment.format);
+		pass_attachment.texture_samples = 1u << attachment.samples;
 		pass_attachment.load_op = attachment.load_op == ATTACHMENT_LOAD_OP_LOAD ? WGPULoadOp_Load : WGPULoadOp_Clear;
 		pass_attachment.store_op = attachment.store_op == ATTACHMENT_STORE_OP_STORE ? WGPUStoreOp_Store : WGPUStoreOp_Discard;
 		pass_attachment.stencil_load_op = attachment.stencil_load_op == ATTACHMENT_LOAD_OP_LOAD ? WGPULoadOp_Load : WGPULoadOp_Clear;
@@ -3019,8 +3197,14 @@ RenderingDeviceDriver::FramebufferID RenderingDeviceDriverWebGPU::framebuffer_cr
 
 void RenderingDeviceDriverWebGPU::framebuffer_free(FramebufferID p_framebuffer) {
 	WEBGPU_MAIN_THREAD_GUARD(framebuffer_free(p_framebuffer));
+	FramebufferInfo *framebuffer = (FramebufferInfo *)p_framebuffer.id;
+	for (BundleCacheEntry &entry : framebuffer->bundle_cache) {
+		if (entry.bundle != nullptr) {
+			wgpuRenderBundleRelease(entry.bundle);
+		}
+	}
 	// Views are owned by their textures.
-	memdelete((FramebufferInfo *)p_framebuffer.id);
+	memdelete(framebuffer);
 }
 
 WGPUTextureView RenderingDeviceDriverWebGPU::_get_placeholder_float_view() {
@@ -3267,6 +3451,7 @@ RenderingDeviceDriver::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_cre
 
 void RenderingDeviceDriverWebGPU::uniform_set_free(UniformSetID p_uniform_set) {
 	WEBGPU_MAIN_THREAD_GUARD(uniform_set_free(p_uniform_set));
+	resource_epoch++; // Invalidates cached render bundles (see BundleCacheEntry).
 	UniformSetInfo *uniform_set = (UniformSetInfo *)p_uniform_set.id;
 	for (const KeyValue<void *, WGPUBindGroup> &kv : uniform_set->layout_groups) {
 		wgpuBindGroupRelease(kv.value);
@@ -3339,7 +3524,20 @@ void RenderingDeviceDriverWebGPU::_flush_bind_groups(CommandBufferInfo *p_cb_inf
 			offsets[offset_count++] = p_cb_info->push_constant_offset;
 		}
 		if (p_cb_info->render_pass_encoder != nullptr) {
-			wgpuRenderPassEncoderSetBindGroup(p_cb_info->render_pass_encoder, i, bind_group, offset_count, offset_count == 0 ? nullptr : offsets);
+			if (p_cb_info->render_bundleable) {
+				RenderCommandRecord rec;
+				memset(&rec, 0, sizeof(rec));
+				rec.type = RenderCommandRecord::TYPE_SET_BIND_GROUP;
+				rec.set_bind_group.index = i;
+				rec.set_bind_group.group = bind_group;
+				rec.set_bind_group.offset_count = offset_count;
+				for (uint32_t j = 0; j < offset_count; j++) {
+					rec.set_bind_group.offsets[j] = offsets[j];
+				}
+				_record_render_command(p_cb_info, rec);
+			} else {
+				wgpuRenderPassEncoderSetBindGroup(p_cb_info->render_pass_encoder, i, bind_group, offset_count, offset_count == 0 ? nullptr : offsets);
+			}
 		} else if (p_cb_info->compute_pass_encoder != nullptr) {
 			wgpuComputePassEncoderSetBindGroup(p_cb_info->compute_pass_encoder, i, bind_group, offset_count, offset_count == 0 ? nullptr : offsets);
 		}
@@ -3365,7 +3563,15 @@ void RenderingDeviceDriverWebGPU::command_bind_render_pipeline(CommandBufferID p
 		return;
 	}
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
-	wgpuRenderPassEncoderSetPipeline(cb_info->render_pass_encoder, pipeline->render_pipeline);
+	if (cb_info->render_bundleable) {
+		RenderCommandRecord rec;
+		memset(&rec, 0, sizeof(rec));
+		rec.type = RenderCommandRecord::TYPE_SET_PIPELINE;
+		rec.set_pipeline.pipeline = pipeline->render_pipeline;
+		_record_render_command(cb_info, rec);
+	} else {
+		wgpuRenderPassEncoderSetPipeline(cb_info->render_pass_encoder, pipeline->render_pipeline);
+	}
 	cb_info->current_shader = pipeline->shader;
 	cb_info->bind_group_dirty_mask = (1u << MAX_BIND_GROUPS) - 1;
 }
@@ -3392,6 +3598,17 @@ void RenderingDeviceDriverWebGPU::command_render_draw(CommandBufferID p_cmd_buff
 	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
 	_flush_bind_groups(cb_info);
+	if (cb_info->render_bundleable) {
+		RenderCommandRecord rec;
+		memset(&rec, 0, sizeof(rec));
+		rec.type = RenderCommandRecord::TYPE_DRAW;
+		rec.draw.vertex_count = p_vertex_count;
+		rec.draw.instance_count = p_instance_count;
+		rec.draw.first_vertex = p_base_vertex;
+		rec.draw.first_instance = p_first_instance;
+		_record_render_command(cb_info, rec);
+		return;
+	}
 	wgpuRenderPassEncoderDraw(cb_info->render_pass_encoder, p_vertex_count, p_instance_count, p_base_vertex, p_first_instance);
 }
 
@@ -3399,6 +3616,18 @@ void RenderingDeviceDriverWebGPU::command_render_draw_indexed(CommandBufferID p_
 	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
 	_flush_bind_groups(cb_info);
+	if (cb_info->render_bundleable) {
+		RenderCommandRecord rec;
+		memset(&rec, 0, sizeof(rec));
+		rec.type = RenderCommandRecord::TYPE_DRAW_INDEXED;
+		rec.draw_indexed.index_count = p_index_count;
+		rec.draw_indexed.instance_count = p_instance_count;
+		rec.draw_indexed.first_index = p_first_index;
+		rec.draw_indexed.vertex_offset = p_vertex_offset;
+		rec.draw_indexed.first_instance = p_first_instance;
+		_record_render_command(cb_info, rec);
+		return;
+	}
 	wgpuRenderPassEncoderDrawIndexed(cb_info->render_pass_encoder, p_index_count, p_instance_count, p_first_index, p_vertex_offset, p_first_instance);
 }
 
@@ -3407,7 +3636,16 @@ void RenderingDeviceDriverWebGPU::command_render_draw_indirect(CommandBufferID p
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
 	_flush_bind_groups(cb_info);
 	for (uint32_t i = 0; i < p_draw_count; i++) {
-		wgpuRenderPassEncoderDrawIndirect(cb_info->render_pass_encoder, ((BufferInfo *)p_indirect_buffer.id)->buffer, p_offset + i * p_stride);
+		if (cb_info->render_bundleable) {
+			RenderCommandRecord rec;
+			memset(&rec, 0, sizeof(rec));
+			rec.type = RenderCommandRecord::TYPE_DRAW_INDIRECT;
+			rec.draw_indirect.buffer = ((BufferInfo *)p_indirect_buffer.id)->buffer;
+			rec.draw_indirect.offset = p_offset + i * p_stride;
+			_record_render_command(cb_info, rec);
+		} else {
+			wgpuRenderPassEncoderDrawIndirect(cb_info->render_pass_encoder, ((BufferInfo *)p_indirect_buffer.id)->buffer, p_offset + i * p_stride);
+		}
 	}
 }
 
@@ -3424,20 +3662,45 @@ void RenderingDeviceDriverWebGPU::command_render_bind_vertex_buffers(CommandBuff
 			shift += 2u;
 			offset += frame_idx * buffer->slice_stride;
 		}
-		wgpuRenderPassEncoderSetVertexBuffer(cb_info->render_pass_encoder, i, buffer->buffer, offset, WGPU_WHOLE_SIZE);
+		if (cb_info->render_bundleable) {
+			RenderCommandRecord rec;
+			memset(&rec, 0, sizeof(rec));
+			rec.type = RenderCommandRecord::TYPE_SET_VERTEX_BUFFER;
+			rec.set_vertex_buffer.slot = i;
+			rec.set_vertex_buffer.buffer = buffer->buffer;
+			rec.set_vertex_buffer.offset = offset;
+			_record_render_command(cb_info, rec);
+		} else {
+			wgpuRenderPassEncoderSetVertexBuffer(cb_info->render_pass_encoder, i, buffer->buffer, offset, WGPU_WHOLE_SIZE);
+		}
 	}
 }
 
 void RenderingDeviceDriverWebGPU::command_render_bind_index_buffer(CommandBufferID p_cmd_buffer, BufferID p_buffer, IndexBufferFormat p_format, uint64_t p_offset) {
 	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
-	wgpuRenderPassEncoderSetIndexBuffer(cb_info->render_pass_encoder, ((BufferInfo *)p_buffer.id)->buffer, p_format == INDEX_BUFFER_FORMAT_UINT16 ? WGPUIndexFormat_Uint16 : WGPUIndexFormat_Uint32, p_offset, WGPU_WHOLE_SIZE);
+	const WGPUIndexFormat format = p_format == INDEX_BUFFER_FORMAT_UINT16 ? WGPUIndexFormat_Uint16 : WGPUIndexFormat_Uint32;
+	if (cb_info->render_bundleable) {
+		RenderCommandRecord rec;
+		memset(&rec, 0, sizeof(rec));
+		rec.type = RenderCommandRecord::TYPE_SET_INDEX_BUFFER;
+		rec.set_index_buffer.buffer = ((BufferInfo *)p_buffer.id)->buffer;
+		rec.set_index_buffer.format = format;
+		rec.set_index_buffer.offset = p_offset;
+		_record_render_command(cb_info, rec);
+		return;
+	}
+	wgpuRenderPassEncoderSetIndexBuffer(cb_info->render_pass_encoder, ((BufferInfo *)p_buffer.id)->buffer, format, p_offset, WGPU_WHOLE_SIZE);
 }
 
 void RenderingDeviceDriverWebGPU::command_render_set_viewport(CommandBufferID p_cmd_buffer, VectorView<Rect2i> p_viewports) {
 	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
 	ERR_FAIL_COND(p_viewports.size() == 0);
+	if (cb_info->render_bundleable && cb_info->render_records.size() > 0) {
+		// Mid-pass viewport changes cannot live inside a bundle.
+		_render_pass_flush_records(cb_info);
+	}
 	const Rect2i &viewport = p_viewports[0];
 	wgpuRenderPassEncoderSetViewport(cb_info->render_pass_encoder, viewport.position.x, viewport.position.y, viewport.size.width, viewport.size.height, 0.0f, 1.0f);
 }
@@ -3446,6 +3709,10 @@ void RenderingDeviceDriverWebGPU::command_render_set_scissor(CommandBufferID p_c
 	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
 	ERR_FAIL_COND(p_scissors.size() == 0);
+	if (cb_info->render_bundleable && cb_info->render_records.size() > 0) {
+		// Mid-pass scissor changes (2D canvas clips) cannot live in a bundle.
+		_render_pass_flush_records(cb_info);
+	}
 	const Rect2i &scissor = p_scissors[0];
 	wgpuRenderPassEncoderSetScissorRect(cb_info->render_pass_encoder, scissor.position.x, scissor.position.y, scissor.size.width, scissor.size.height);
 }
@@ -3453,6 +3720,10 @@ void RenderingDeviceDriverWebGPU::command_render_set_scissor(CommandBufferID p_c
 void RenderingDeviceDriverWebGPU::command_render_set_blend_constants(CommandBufferID p_cmd_buffer, const Color &p_constants) {
 	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
+	if (cb_info->render_bundleable && cb_info->render_records.size() > 0) {
+		// Blend constants are pass-encoder state; a bundle cannot set them.
+		_render_pass_flush_records(cb_info);
+	}
 	WGPUColor color = { p_constants.r, p_constants.g, p_constants.b, p_constants.a };
 	wgpuRenderPassEncoderSetBlendConstant(cb_info->render_pass_encoder, &color);
 }
@@ -3876,6 +4147,7 @@ bool RenderingDeviceDriverWebGPU::_ensure_compute_pipeline(PipelineInfo *p_pipel
 
 void RenderingDeviceDriverWebGPU::pipeline_free(PipelineID p_pipeline) {
 	WEBGPU_MAIN_THREAD_GUARD(pipeline_free(p_pipeline));
+	resource_epoch++; // Invalidates cached render bundles (see BundleCacheEntry).
 	PipelineInfo *pipeline = (PipelineInfo *)p_pipeline.id;
 	if (pipeline->async_ticket != nullptr) {
 		// A background compile is in flight: orphan the ticket so its
