@@ -55,6 +55,7 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 		ERR_FAIL_V_MSG(ERR_CANT_CREATE, "Failed to query WebGPU device limits.");
 	}
 	device_has_shader_f16 = wgpuDeviceHasFeature(device, WGPUFeatureName_ShaderF16);
+	device_has_depth_clip_control = wgpuDeviceHasFeature(device, WGPUFeatureName_DepthClipControl);
 
 	frame_count = MAX(1u, p_frame_count);
 
@@ -3455,6 +3456,14 @@ WGPURenderPipeline RenderingDeviceDriverWebGPU::_build_render_pipeline(const Sha
 	pipeline_desc.primitive.topology = topology;
 	pipeline_desc.primitive.frontFace = p_rasterization_state.front_face == POLYGON_FRONT_FACE_CLOCKWISE ? WGPUFrontFace_CW : WGPUFrontFace_CCW;
 	pipeline_desc.primitive.cullMode = p_rasterization_state.cull_mode == POLYGON_CULL_FRONT ? WGPUCullMode_Front : (p_rasterization_state.cull_mode == POLYGON_CULL_BACK ? WGPUCullMode_Back : WGPUCullMode_None);
+	// Depth clamping keeps geometry that crosses the near or far plane
+	// rasterizing over its full screen extent instead of being clipped
+	// against it. The clustered builder rasterizes light, decal and probe
+	// proxy volumes and depends on it: without clamping, every proxy the
+	// camera sits inside loses the part in front of the near plane, so those
+	// elements go unrecorded in the clusters that plane crosses and their
+	// contribution ends at a straight line on screen.
+	pipeline_desc.primitive.unclippedDepth = p_rasterization_state.enable_depth_clamp && device_has_depth_clip_control;
 	pipeline_desc.multisample.count = p_multisample_state.sample_count == TEXTURE_SAMPLES_4 ? 4 : 1;
 	pipeline_desc.multisample.mask = p_multisample_state.sample_mask.is_empty() ? 0xFFFFFFFF : p_multisample_state.sample_mask[0];
 	pipeline_desc.multisample.alphaToCoverageEnabled = p_multisample_state.enable_alpha_to_coverage;
