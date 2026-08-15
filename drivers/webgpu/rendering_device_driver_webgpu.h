@@ -336,6 +336,7 @@ public:
 	virtual void buffer_flush(BufferID p_buffer) override;
 	virtual uint64_t buffer_get_dynamic_offsets(Span<BufferID> p_buffers) override;
 	virtual uint64_t buffer_get_device_address(BufferID p_buffer) override { ERR_FAIL_V_MSG(0, UNIMPLEMENTED); }
+	static void _apply_srgb_view_usage(WGPUTextureViewDescriptor &r_view_desc, const TextureInfo *p_original);
 	virtual TextureID texture_create(const TextureFormat &p_format, const TextureView &p_view) override;
 	virtual TextureID texture_create_from_extension(uint64_t p_native_texture, TextureType p_type, DataFormat p_format, uint32_t p_array_layers, bool p_depth_stencil, uint32_t p_mipmaps) override;
 	virtual TextureID texture_create_shared(TextureID p_original_texture, const TextureView &p_view) override;
