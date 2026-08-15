@@ -54,6 +54,7 @@ public:
 		TARGET_RAY_MODE_GAZE,
 		TARGET_RAY_MODE_TRACKED_POINTER,
 		TARGET_RAY_MODE_SCREEN,
+		TARGET_RAY_MODE_TRANSIENT_POINTER,
 	};
 
 	virtual void is_session_supported(const String &p_session_mode) = 0;
