@@ -61,6 +61,16 @@ void _emwebxr_on_session_supported(char *p_session_mode, int p_supported) {
 	interface->emit_signal(SNAME("session_supported"), session_mode, p_supported ? true : false);
 }
 
+extern "C" EMSCRIPTEN_KEEPALIVE void _emwebxr_on_session_offer_accepted() {
+	XRServer *xr_server = XRServer::get_singleton();
+	ERR_FAIL_NULL(xr_server);
+
+	Ref<WebXRInterfaceJS> interface = xr_server->find_interface("WebXR");
+	ERR_FAIL_COND(interface.is_null());
+
+	interface->emit_signal(SNAME("session_offer_accepted"));
+}
+
 void _emwebxr_on_session_started(char *p_reference_space_type, char *p_enabled_features, char *p_environment_blend_mode) {
 	XRServer *xr_server = XRServer::get_singleton();
 	ERR_FAIL_NULL(xr_server);
@@ -172,6 +182,26 @@ bool WebXRInterfaceJS::is_input_source_active(int p_input_source_id) const {
 Ref<XRControllerTracker> WebXRInterfaceJS::get_input_source_tracker(int p_input_source_id) const {
 	ERR_FAIL_INDEX_V(p_input_source_id, input_source_count, Ref<XRControllerTracker>());
 	return input_sources[p_input_source_id].tracker;
+}
+
+void WebXRInterfaceJS::offer_session() {
+	// Asks the browser to surface its own native "enter XR" affordance for
+	// this page (navigator.xr.offerSession). When the user accepts, the
+	// granted session is held glue-side and session_offer_accepted is
+	// emitted; the app then drives its normal start path, and initialize()
+	// consumes the held session instead of requesting a new one (which
+	// would fail without fresh user activation). Browsers without
+	// offerSession ignore the call: the page-button flow is unaffected.
+	godot_webxr_offer_session(
+#ifdef WEBGPU_ENABLED
+			RenderingDevice::get_singleton() != nullptr ? 1 : 0,
+#else
+			0,
+#endif
+			session_mode.utf8().get_data(),
+			required_features.utf8().get_data(),
+			optional_features.utf8().get_data(),
+			&_emwebxr_on_session_offer_accepted);
 }
 
 WebXRInterface::TargetRayMode WebXRInterfaceJS::get_input_source_target_ray_mode(int p_input_source_id) const {
