@@ -159,6 +159,12 @@ const Engine = (function () {
 			if (adapter['features'] && adapter['features'].has('shader-f16')) {
 				requiredFeatures.push('shader-f16');
 			}
+			// Depth clamping. Renderers that rasterize proxy volumes (the
+			// clustered light/decal/probe builder) rely on geometry crossing
+			// the near plane being clamped rather than clipped away.
+			if (adapter['features'] && adapter['features'].has('depth-clip-control')) {
+				requiredFeatures.push('depth-clip-control');
+			}
 			return adapter['requestDevice']({ 'requiredLimits': requiredLimits, 'requiredFeatures': requiredFeatures });
 		}).catch(function () {
 			return null;
