@@ -72,6 +72,7 @@ public:
 	virtual bool get_disable_webxr_layers() const = 0;
 	virtual bool is_input_source_active(int p_input_source_id) const = 0;
 	virtual Ref<XRControllerTracker> get_input_source_tracker(int p_input_source_id) const = 0;
+	virtual void offer_session() = 0;
 	virtual TargetRayMode get_input_source_target_ray_mode(int p_input_source_id) const = 0;
 	virtual String get_visibility_state() const = 0;
 	virtual float get_display_refresh_rate() const = 0;
