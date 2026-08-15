@@ -47,6 +47,7 @@ void WebXRInterface::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_requested_reference_space_types"), &WebXRInterface::get_requested_reference_space_types);
 	ClassDB::bind_method(D_METHOD("is_input_source_active", "input_source_id"), &WebXRInterface::is_input_source_active);
 	ClassDB::bind_method(D_METHOD("get_input_source_tracker", "input_source_id"), &WebXRInterface::get_input_source_tracker);
+	ClassDB::bind_method(D_METHOD("offer_session"), &WebXRInterface::offer_session);
 	ClassDB::bind_method(D_METHOD("get_input_source_target_ray_mode", "input_source_id"), &WebXRInterface::get_input_source_target_ray_mode);
 	ClassDB::bind_method(D_METHOD("get_visibility_state"), &WebXRInterface::get_visibility_state);
 	ClassDB::bind_method(D_METHOD("get_display_refresh_rate"), &WebXRInterface::get_display_refresh_rate);
@@ -65,6 +66,7 @@ void WebXRInterface::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "visibility_state", PROPERTY_HINT_NONE), "", "get_visibility_state");
 
 	ADD_SIGNAL(MethodInfo("session_supported", PropertyInfo(Variant::STRING, "session_mode"), PropertyInfo(Variant::BOOL, "supported")));
+	ADD_SIGNAL(MethodInfo("session_offer_accepted"));
 	ADD_SIGNAL(MethodInfo("session_started"));
 	ADD_SIGNAL(MethodInfo("session_ended"));
 	ADD_SIGNAL(MethodInfo("session_failed", PropertyInfo(Variant::STRING, "message")));
