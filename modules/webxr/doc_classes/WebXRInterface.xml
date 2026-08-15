@@ -148,6 +148,13 @@
 				This method returns nothing, instead it emits the [signal session_supported] signal with the result.
 			</description>
 		</method>
+		<method name="offer_session">
+			<return type="void" />
+			<description>
+				Asks the browser to present its own native "enter XR" prompt for this page, using the session mode and features currently set on this interface. Set [member session_mode], [member required_features], and [member optional_features] first, exactly as for [method XRInterface.initialize].
+				When the user accepts, [signal session_offer_accepted] is emitted; call [method XRInterface.initialize] from that signal and the granted session is used directly (no additional prompt, and no user activation is needed). Browsers without [code]navigator.xr.offerSession()[/code] ignore this call, so a page button calling [method XRInterface.initialize] should remain as the fallback.
+			</description>
+		</method>
 		<method name="set_display_refresh_rate">
 			<return type="void" />
 			<param index="0" name="refresh_rate" type="float" />
@@ -244,6 +251,11 @@
 			<description>
 				Emitted by [method XRInterface.initialize] if the session fails to start.
 				[param message] may optionally contain an error message from WebXR, or an empty string if no message is available.
+			</description>
+		</signal>
+		<signal name="session_offer_accepted">
+			<description>
+				Emitted after [method offer_session] when the user accepts the browser's native "enter XR" prompt. The granted session is held for [method XRInterface.initialize], which should be called in response to this signal.
 			</description>
 		</signal>
 		<signal name="session_started">
