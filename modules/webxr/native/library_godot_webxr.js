@@ -902,6 +902,10 @@ const GodotWebXR = {
 			target_ray_mode = 3;
 			break;
 
+		case 'transient-pointer':
+			target_ray_mode = 4;
+			break;
+
 		default:
 		}
 		GodotRuntime.setHeapValue(r_target_ray_mode, target_ray_mode, 'i32');
