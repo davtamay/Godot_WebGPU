@@ -65,18 +65,24 @@ private:
 
 	Size2 render_targetsize;
 	RBMap<unsigned int, RID> texture_cache;
+	// Stereo without multiview: browsers that lack the WebGL multiview
+	// extension (Android XR, Cardboard-class viewers) render one pass per
+	// view into a shared side-by-side layer texture, Unity-export style.
+	// Renderer-independent - the WebGPU backend takes the same path for its
+	// own reason, since WGSL cannot express multiview either.
+	uint32_t current_draw_pass = 0;
+	bool gl_per_view_passes = false;
+	uint32_t gl_blit_fbos[2] = {};
+	void _gl_blit_pass_to_layer(RID p_render_target);
+	// True when the viewport is drawn once per view instead of once with
+	// multiview, for either reason.
+	bool _uses_per_view_passes() const;
 #ifdef WEBGPU_ENABLED
 	// Per-view slices of the wrapped layer texture, one per draw pass
 	// (freed before their owner in texture_cache).
 	RBMap<unsigned int, Vector<RID>> texture_slice_cache;
-	uint32_t current_draw_pass = 0;
 	uint32_t layer_generation = 0;
 	void _free_rd_layer_textures();
-	// Browsers without WebGL multiview (Android XR) render stereo one pass
-	// per view into a shared side-by-side layer texture, Unity-export style.
-	bool gl_per_view_passes = false;
-	uint32_t gl_blit_fbos[2] = {};
-	void _gl_blit_pass_to_layer(RID p_render_target);
 	RID depth_sensing_texture;
 	float depth_sensing_raw_to_meters = 1.0f;
 	Size2 depth_sensing_size;
