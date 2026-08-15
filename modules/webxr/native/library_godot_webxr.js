@@ -131,6 +131,44 @@ const GodotWebXR = {
 			}
 		},
 
+		buildSessionInit: (required_features, optional_features, use_webgpu_binding) => {
+			const session_init = {};
+			if (required_features.length > 0) {
+				session_init['requiredFeatures'] = required_features;
+			}
+			if (optional_features.length > 0) {
+				session_init['optionalFeatures'] = optional_features;
+			}
+			if (required_features.includes('depth-sensing') || optional_features.includes('depth-sensing')) {
+				// The depth-sensing feature is only granted when this init dict
+				// accompanies it; without it browsers silently drop the feature
+				// (Android XR grants depth to WebGL sessions too).
+				session_init['depthSensing'] = {
+					// Browsers honor the preference order. WebGL sessions prefer
+					// CPU depth: the GL render path does not consume the GPU
+					// texture, while cpu-optimized enables
+					// XRFrame.getDepthInformation() for script-side consumers.
+					// WebGPU sessions keep gpu-optimized first for the upcoming
+					// XRGPUBinding sensor-occlusion path.
+					usagePreference: use_webgpu_binding ? ['gpu-optimized', 'cpu-optimized'] : ['cpu-optimized', 'gpu-optimized'],
+					// luminance-alpha FIRST: it is the spec's guaranteed format
+					// (16-bit value packed L+A, storing millimeters) with a
+					// DOCUMENTED decode - raw = L + A*256, meters = raw *
+					// rawValueToMeters. unsigned-short's GPU encoding is
+					// undocumented and resisted every linearization we tried.
+					dataFormatPreference: ['luminance-alpha', 'float32', 'unsigned-short'],
+					// Prefer RAW depth: consumers use depth live (occlusion,
+					// per-frame view), where temporal 'smooth' fusion blends
+					// moving objects (a hand) into the background and erases
+					// exactly what dynamic occlusion needs. Smooth only helped a
+					// persistent accumulated scan, which is no longer the default.
+					// UAs predating depthTypeRequest ignore it (backward-safe).
+					depthTypeRequest: ['raw', 'smooth'],
+				};
+			}
+			return session_init;
+		},
+
 		getLayer: () => {
 			// XPERIMENT (strip or productize): immersive sessions are stereo;
 			// defaulting the pre-pose count to 2 makes the eagerly created
@@ -375,40 +413,7 @@ const GodotWebXR = {
 		const oninputevent = GodotRuntime.get_func(p_on_input_event);
 		const onsimpleevent = GodotRuntime.get_func(p_on_simple_event);
 
-		const session_init = {};
-		if (required_features.length > 0) {
-			session_init['requiredFeatures'] = required_features;
-		}
-		if (optional_features.length > 0) {
-			session_init['optionalFeatures'] = optional_features;
-		}
-		if (required_features.includes('depth-sensing') || optional_features.includes('depth-sensing')) {
-			// The depth-sensing feature is only granted when this init dict
-			// accompanies it; without it browsers silently drop the feature
-			// (Android XR grants depth to WebGL sessions too).
-			session_init['depthSensing'] = {
-				// Browsers honor the preference order. WebGL sessions prefer
-				// CPU depth: the GL render path does not consume the GPU
-				// texture, while cpu-optimized enables
-				// XRFrame.getDepthInformation() for script-side consumers.
-				// WebGPU sessions keep gpu-optimized first for the upcoming
-				// XRGPUBinding sensor-occlusion path.
-				usagePreference: use_webgpu_binding ? ['gpu-optimized', 'cpu-optimized'] : ['cpu-optimized', 'gpu-optimized'],
-				// luminance-alpha FIRST: it is the spec's guaranteed format
-				// (16-bit value packed L+A, storing millimeters) with a
-				// DOCUMENTED decode - raw = L + A*256, meters = raw *
-				// rawValueToMeters. unsigned-short's GPU encoding is
-				// undocumented and resisted every linearization we tried.
-				dataFormatPreference: ['luminance-alpha', 'float32', 'unsigned-short'],
-				// Prefer RAW depth: consumers use depth live (occlusion,
-				// per-frame view), where temporal 'smooth' fusion blends
-				// moving objects (a hand) into the background and erases
-				// exactly what dynamic occlusion needs. Smooth only helped a
-				// persistent accumulated scan, which is no longer the default.
-				// UAs predating depthTypeRequest ignore it (backward-safe).
-				depthTypeRequest: ['raw', 'smooth'],
-			};
-		}
+		const session_init = GodotWebXR.buildSessionInit(required_features, optional_features, use_webgpu_binding);
 
 		// XPERIMENT (strip or productize): move the session request out of the
 		// engine's requestAnimationFrame task into a timer task, matching how
