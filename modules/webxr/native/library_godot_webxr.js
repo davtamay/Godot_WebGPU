@@ -48,6 +48,12 @@ const GodotWebXR = {
 		// getViewSubImage() is only valid once per frame per view; several
 		// engine calls need it, so it is computed once per animation frame.
 		frame_subimage: null,
+		// The WebXR/WebGPU Binding spec (Aug 2026) releases layer textures
+		// after every animation frame, so conforming browsers hand out fresh
+		// GPUTexture objects each frame; earlier implementations (Quest
+		// Browser 148) cycle a small stable set instead. Detected at runtime
+		// from import-table growth; when true, imports are recycled per frame.
+		texture_lifecycle_per_frame: false,
 		// Requested fixed foveation level (0.0 = off, 1.0 = maximum). The
 		// compositor applies it when rendering the projection layer, so it
 		// costs the engine nothing; runtimes without support ignore it.
@@ -160,6 +166,12 @@ const GodotWebXR = {
 
 			GodotWebXR.layer = layer;
 			GodotWebXR.layer_generation++;
+			if (GodotWebXR.gpu_binding && Module['GodotWebGPUXR']) {
+				// The old layer's textures never come back: drop their import
+				// refs in lockstep with the generation bump that makes the
+				// engine evict its wrappers, so a resize does not leak them.
+				Module['GodotWebGPUXR'].clear();
+			}
 			GodotWebXR.frame_subimage = null;
 			GodotWebXR.view_count = new_view_count;
 			return layer;
@@ -184,6 +196,21 @@ const GodotWebXR = {
 			const active_layers = GodotWebXR.session.renderState.layers;
 			if (!active_layers || active_layers.indexOf(layer) < 0) {
 				return null;
+			}
+
+			if (GodotWebXR.gpu_binding && Module['GodotWebGPUXR']) {
+				if (GodotWebXR.texture_lifecycle_per_frame) {
+					// Per the binding spec, last frame's textures are already
+					// destroyed: release their import refs and bump the
+					// generation so the engine rewraps this frame's textures.
+					GodotWebXR.layer_generation++;
+					Module['GodotWebGPUXR'].clear();
+				} else if (Module['GodotWebGPUXR'].size() > 24) {
+					// A swap-chain style browser cycles a handful of stable
+					// texture objects; unbounded import-table growth means
+					// this one returns fresh textures every frame.
+					GodotWebXR.texture_lifecycle_per_frame = true;
+				}
 			}
 
 			// Because we always use "texture-array" for multiview and "texture"
@@ -766,6 +793,7 @@ const GodotWebXR = {
 		if (GodotWebXR.gpu_binding && Module['GodotWebGPUXR']) {
 			Module['GodotWebGPUXR'].clear();
 		}
+		GodotWebXR.texture_lifecycle_per_frame = false;
 
 		GodotWebXR.session = null;
 		GodotWebXR.gl_binding = null;
