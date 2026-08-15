@@ -285,6 +285,7 @@ private:
 	// Whether the loader obtained the device with the shader-f16 feature;
 	// gates SUPPORTS_HALF_FLOAT and acceptance of `enable f16` modules.
 	bool device_has_shader_f16 = false;
+	bool device_has_depth_clip_control = false;
 	uint32_t frame_count = 1;
 	WGPUSampler nonfiltering_substitute_sampler = nullptr;
 	HashSet<uint64_t> comparison_samplers;
