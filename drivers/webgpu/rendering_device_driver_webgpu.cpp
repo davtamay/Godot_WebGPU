@@ -136,6 +136,11 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 		// No wgpuSurfacePresent here: the browser presents when control
 		// returns to the event loop, and emdawnwebgpu aborts on the call.
 	}
+
+	// After the frame's submission, hand a few deferred pipelines to the
+	// browser for background compilation (runs on the main thread, where
+	// the spontaneous completion callbacks also fire).
+	_pump_pipeline_warm_queue();
 	return OK;
 }
 
@@ -3481,7 +3486,7 @@ static void _specialization_constants_to_wgpu(const HashSet<uint32_t> &p_module_
 
 // Builds the pipeline object. Split out from render_pipeline_create so the
 // work can happen at first bind instead of at creation.
-WGPURenderPipeline RenderingDeviceDriverWebGPU::_build_render_pipeline(const ShaderInfo *shader, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, PipelineRasterizationState p_rasterization_state, PipelineMultisampleState p_multisample_state, PipelineDepthStencilState p_depth_stencil_state, PipelineColorBlendState p_blend_state, VectorView<int32_t> p_color_attachments, BitField<PipelineDynamicStateFlags> p_dynamic_state, RenderPassID p_render_pass, uint32_t p_render_subpass, VectorView<PipelineSpecializationConstant> p_specialization_constants) {
+WGPURenderPipeline RenderingDeviceDriverWebGPU::_build_render_pipeline(const ShaderInfo *shader, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, PipelineRasterizationState p_rasterization_state, PipelineMultisampleState p_multisample_state, PipelineDepthStencilState p_depth_stencil_state, PipelineColorBlendState p_blend_state, VectorView<int32_t> p_color_attachments, BitField<PipelineDynamicStateFlags> p_dynamic_state, RenderPassID p_render_pass, uint32_t p_render_subpass, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket) {
 	const RenderPassInfo *pass = (const RenderPassInfo *)p_render_pass.id;
 
 	WGPUPrimitiveTopology topology;
@@ -3625,6 +3630,18 @@ WGPURenderPipeline RenderingDeviceDriverWebGPU::_build_render_pipeline(const Sha
 		pipeline_desc.fragment = &fragment_state;
 	}
 
+	if (p_async_ticket != nullptr) {
+		// Background warm: the descriptor is fully serialized during the
+		// call, so the stack-owned state above needs no extended lifetime.
+		WGPUCreateRenderPipelineAsyncCallbackInfo callback_info = WGPU_CREATE_RENDER_PIPELINE_ASYNC_CALLBACK_INFO_INIT;
+		callback_info.mode = WGPUCallbackMode_AllowSpontaneous;
+		callback_info.callback = _on_render_pipeline_async;
+		callback_info.userdata1 = p_async_ticket;
+		p_async_ticket->kicked = true;
+		wgpuDeviceCreateRenderPipelineAsync(device, &pipeline_desc, callback_info);
+		return nullptr;
+	}
+
 	WGPURenderPipeline render_pipeline = wgpuDeviceCreateRenderPipeline(device, &pipeline_desc);
 	ERR_FAIL_NULL_V_MSG(render_pipeline, nullptr, "Failed to create a WebGPU render pipeline.");
 
@@ -3659,7 +3676,105 @@ RenderingDeviceDriver::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_c
 	for (uint32_t i = 0; i < p_specialization_constants.size(); i++) {
 		pipeline->render_constants[i] = p_specialization_constants[i];
 	}
+	pipeline_warm_queue.push_back(pipeline);
 	return PipelineID(pipeline);
+}
+
+void RenderingDeviceDriverWebGPU::_on_render_pipeline_async(WGPUCreatePipelineAsyncStatus p_status, WGPURenderPipeline p_pipeline, WGPUStringView p_message, void *p_userdata1, void *p_userdata2) {
+	PipelineAsyncTicket *ticket = (PipelineAsyncTicket *)p_userdata1;
+	PipelineInfo *pipeline = ticket->pipeline;
+	const bool succeeded = p_status == WGPUCreatePipelineAsyncStatus_Success && p_pipeline != nullptr;
+	if (pipeline == nullptr || pipeline->render_pipeline != nullptr || pipeline->render_failed) {
+		// The owner was freed, or the bind-time sync path resolved it first.
+		if (succeeded) {
+			wgpuRenderPipelineRelease(p_pipeline);
+		}
+	} else if (succeeded) {
+		pipeline->render_pipeline = p_pipeline;
+		pipeline->render_pending = false;
+	}
+	// An async failure is deliberately not latched: if anything ever binds
+	// this pipeline, the sync path reports the error once with full context.
+	if (pipeline != nullptr) {
+		pipeline->async_ticket = nullptr;
+	}
+	memdelete(ticket);
+}
+
+void RenderingDeviceDriverWebGPU::_on_compute_pipeline_async(WGPUCreatePipelineAsyncStatus p_status, WGPUComputePipeline p_pipeline, WGPUStringView p_message, void *p_userdata1, void *p_userdata2) {
+	PipelineAsyncTicket *ticket = (PipelineAsyncTicket *)p_userdata1;
+	PipelineInfo *pipeline = ticket->pipeline;
+	const bool succeeded = p_status == WGPUCreatePipelineAsyncStatus_Success && p_pipeline != nullptr;
+	if (pipeline == nullptr || pipeline->compute_pipeline != nullptr || pipeline->compute_failed) {
+		if (succeeded) {
+			wgpuComputePipelineRelease(p_pipeline);
+		}
+	} else if (succeeded) {
+		pipeline->compute_pipeline = p_pipeline;
+		pipeline->compute_pending = false;
+	}
+	if (pipeline != nullptr) {
+		pipeline->async_ticket = nullptr;
+	}
+	memdelete(ticket);
+}
+
+void RenderingDeviceDriverWebGPU::_pump_pipeline_warm_queue() {
+	// Deferred pipelines (see render/compute_pipeline_create) are handed to
+	// the browser for BACKGROUND compilation a few per presented frame: the
+	// bind-time sync create stays the correctness fence, and by then the
+	// browser's pipeline cache has usually already done the work. Throttling
+	// keeps the warm from re-creating the create-burst that saturates the
+	// Dawn wire, which is what the deferral fixed in the first place.
+	const uint32_t warm_per_frame = 2;
+	uint32_t kicked = 0;
+	while (kicked < warm_per_frame && pipeline_warm_queue.size() > 0) {
+		PipelineInfo *pipeline = pipeline_warm_queue[0];
+		pipeline_warm_queue.remove_at(0);
+		if (pipeline->async_ticket != nullptr || pipeline->shader == nullptr || pipeline->shader->modules.is_empty()) {
+			continue;
+		}
+		const bool warm_render = pipeline->render_pending && pipeline->render_pipeline == nullptr && !pipeline->render_failed;
+		const bool warm_compute = !warm_render && pipeline->compute_pending && pipeline->compute_pipeline == nullptr && !pipeline->compute_failed;
+		if (warm_render) {
+			// The engine also creates render pipelines around null shader
+			// variants and never binds them; warming those would surface the
+			// vertex-stage error the deferral keeps silent. The warm stays
+			// quiet - the bind-time path is the designated reporter.
+			bool has_vertex = false;
+			for (uint32_t i = 0; i < pipeline->shader->module_stages.size(); i++) {
+				if (pipeline->shader->module_stages[i] == SHADER_STAGE_VERTEX) {
+					has_vertex = true;
+					break;
+				}
+			}
+			if (!has_vertex) {
+				continue;
+			}
+		} else if (!warm_compute) {
+			continue;
+		}
+		PipelineAsyncTicket *ticket = memnew(PipelineAsyncTicket);
+		ticket->pipeline = pipeline;
+		pipeline->async_ticket = ticket;
+		if (warm_render) {
+			_build_render_pipeline(pipeline->shader, pipeline->render_vertex_format,
+					pipeline->render_primitive, pipeline->render_rasterization, pipeline->render_multisample,
+					pipeline->render_depth_stencil, pipeline->render_blend,
+					VectorView<int32_t>(pipeline->render_color_attachments.ptr(), pipeline->render_color_attachments.size()),
+					pipeline->render_dynamic_state, pipeline->render_pass, pipeline->render_subpass,
+					VectorView<PipelineSpecializationConstant>(pipeline->render_constants.ptr(), pipeline->render_constants.size()), ticket);
+		} else {
+			_create_compute_pipeline(pipeline->shader, VectorView<PipelineSpecializationConstant>(pipeline->compute_constants.ptr(), pipeline->compute_constants.size()), ticket);
+		}
+		if (!ticket->kicked) {
+			// The build bailed before reaching the API; reclaim the ticket.
+			pipeline->async_ticket = nullptr;
+			memdelete(ticket);
+			continue;
+		}
+		kicked++;
+	}
 }
 
 bool RenderingDeviceDriverWebGPU::_ensure_render_pipeline(PipelineInfo *p_pipeline) {
@@ -3702,7 +3817,37 @@ RenderingDeviceDriver::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_
 	for (uint32_t i = 0; i < p_specialization_constants.size(); i++) {
 		pipeline->compute_constants[i] = p_specialization_constants[i];
 	}
+	pipeline_warm_queue.push_back(pipeline);
 	return PipelineID(pipeline);
+}
+
+WGPUComputePipeline RenderingDeviceDriverWebGPU::_create_compute_pipeline(const ShaderInfo *p_shader, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket) {
+	LocalVector<CharString> constant_keys;
+	LocalVector<WGPUConstantEntry> constants;
+	if (p_shader->module_override_ids.size() > 0) {
+		_specialization_constants_to_wgpu(p_shader->module_override_ids[0], p_specialization_constants, constant_keys, constants);
+	}
+
+	WGPUComputePipelineDescriptor pipeline_desc = WGPU_COMPUTE_PIPELINE_DESCRIPTOR_INIT;
+	pipeline_desc.label = { p_shader->name.get_data(), WGPU_STRLEN };
+	pipeline_desc.layout = p_shader->pipeline_layout;
+	pipeline_desc.compute.module = p_shader->modules[0];
+	pipeline_desc.compute.entryPoint = { SHADER_ENTRY_POINT, WGPU_STRLEN };
+	pipeline_desc.compute.constantCount = constants.size();
+	pipeline_desc.compute.constants = constants.ptr();
+
+	if (p_async_ticket != nullptr) {
+		// Background warm: the descriptor is serialized during the call.
+		WGPUCreateComputePipelineAsyncCallbackInfo callback_info = WGPU_CREATE_COMPUTE_PIPELINE_ASYNC_CALLBACK_INFO_INIT;
+		callback_info.mode = WGPUCallbackMode_AllowSpontaneous;
+		callback_info.callback = _on_compute_pipeline_async;
+		callback_info.userdata1 = p_async_ticket;
+		p_async_ticket->kicked = true;
+		wgpuDeviceCreateComputePipelineAsync(device, &pipeline_desc, callback_info);
+		return nullptr;
+	}
+
+	return wgpuDeviceCreateComputePipeline(device, &pipeline_desc);
 }
 
 bool RenderingDeviceDriverWebGPU::_ensure_compute_pipeline(PipelineInfo *p_pipeline) {
@@ -3720,21 +3865,7 @@ bool RenderingDeviceDriverWebGPU::_ensure_compute_pipeline(PipelineInfo *p_pipel
 		ERR_FAIL_V_MSG(false, "Compute pipeline has no shader modules.");
 	}
 
-	LocalVector<CharString> constant_keys;
-	LocalVector<WGPUConstantEntry> constants;
-	if (shader->module_override_ids.size() > 0) {
-		_specialization_constants_to_wgpu(shader->module_override_ids[0], VectorView<PipelineSpecializationConstant>(p_pipeline->compute_constants.ptr(), p_pipeline->compute_constants.size()), constant_keys, constants);
-	}
-
-	WGPUComputePipelineDescriptor pipeline_desc = WGPU_COMPUTE_PIPELINE_DESCRIPTOR_INIT;
-	pipeline_desc.label = { shader->name.get_data(), WGPU_STRLEN };
-	pipeline_desc.layout = shader->pipeline_layout;
-	pipeline_desc.compute.module = shader->modules[0];
-	pipeline_desc.compute.entryPoint = { SHADER_ENTRY_POINT, WGPU_STRLEN };
-	pipeline_desc.compute.constantCount = constants.size();
-	pipeline_desc.compute.constants = constants.ptr();
-
-	p_pipeline->compute_pipeline = wgpuDeviceCreateComputePipeline(device, &pipeline_desc);
+	p_pipeline->compute_pipeline = _create_compute_pipeline(shader, VectorView<PipelineSpecializationConstant>(p_pipeline->compute_constants.ptr(), p_pipeline->compute_constants.size()));
 	if (p_pipeline->compute_pipeline == nullptr) {
 		p_pipeline->compute_failed = true;
 		ERR_FAIL_V_MSG(false, "Failed to create a WebGPU compute pipeline.");
@@ -3746,6 +3877,15 @@ bool RenderingDeviceDriverWebGPU::_ensure_compute_pipeline(PipelineInfo *p_pipel
 void RenderingDeviceDriverWebGPU::pipeline_free(PipelineID p_pipeline) {
 	WEBGPU_MAIN_THREAD_GUARD(pipeline_free(p_pipeline));
 	PipelineInfo *pipeline = (PipelineInfo *)p_pipeline.id;
+	if (pipeline->async_ticket != nullptr) {
+		// A background compile is in flight: orphan the ticket so its
+		// callback releases the result instead of touching freed memory.
+		pipeline->async_ticket->pipeline = nullptr;
+		pipeline->async_ticket = nullptr;
+	}
+	// Freed before it was warmed: the pump validates entries, but removing
+	// here keeps the queue from holding a dangling pointer.
+	pipeline_warm_queue.erase(pipeline);
 	if (pipeline->render_pipeline != nullptr) {
 		wgpuRenderPipelineRelease(pipeline->render_pipeline);
 	}
