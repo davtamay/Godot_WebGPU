@@ -174,9 +174,11 @@ const GodotWebXR = {
 		},
 
 		getLayer: () => {
-			// XPERIMENT (strip or productize): immersive sessions are stereo;
-			// defaulting the pre-pose count to 2 makes the eagerly created
-			// layer the final one (no recreation + updateRenderState churn).
+			// Immersive sessions are stereo, so before the first pose arrives
+			// the view count is assumed to be 2: the eagerly created layer is
+			// then already the final one, avoiding a recreate plus a second
+			// updateRenderState on the first frame. A pose that later reports
+			// a different count still recreates the layer below.
 			const new_view_count = (GodotWebXR.pose) ? GodotWebXR.pose.views.length : 2;
 			let layer = GodotWebXR.layer;
 
@@ -445,10 +447,12 @@ const GodotWebXR = {
 
 		const session_init = GodotWebXR.buildSessionInit(required_features, optional_features, use_webgpu_binding);
 
-		// XPERIMENT (strip or productize): move the session request out of the
-		// engine's requestAnimationFrame task into a timer task, matching how
-		// DOM-button-driven apps (Unity, the samples) request sessions.
-		// Transient user activation survives a zero-delay timer.
+		// The request is made from a timer task rather than from inside the
+		// engine's requestAnimationFrame callback, which is where this call
+		// otherwise originates. Transient user activation survives a
+		// zero-delay timer, so the gesture still counts, and the request
+		// then reaches the browser the same way it does from a DOM button
+		// handler - the shape every other WebXR application uses.
 		setTimeout(function () {
 		let session_promise;
 		if (GodotWebXR.offered_session && GodotWebXR.offered_session_mode === session_mode) {
@@ -1082,6 +1086,11 @@ const GodotWebXR = {
 		}
 
 		GodotWebXR.session.updateTargetFrameRate(p_frame_rate).then(() => {
+			// The session can end while this is in flight, and teardown clears
+			// the callback - reporting then would call through a null pointer.
+			if (!GodotWebXR.onsimpleevent) {
+				return;
+			}
 			const c_str = GodotRuntime.allocString('display_refresh_rate_changed');
 			GodotWebXR.onsimpleevent(c_str);
 			GodotRuntime.free(c_str);
