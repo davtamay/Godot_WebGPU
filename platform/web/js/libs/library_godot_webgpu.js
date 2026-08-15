@@ -28,7 +28,7 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-/* global WebGPU, GodotWebGPUXR */ // WebGPU: emdawnwebgpu port; GodotWebGPUXR: emitted from the $-object below at link time.
+/* global WebGPU, GodotWebGPUXR, _wgpuTextureRelease */ // WebGPU + _wgpuTextureRelease: emdawnwebgpu port; GodotWebGPUXR: emitted from the $-object below at link time.
 
 const GodotWebGPU = {
 	/**
@@ -37,7 +37,7 @@ const GodotWebGPU = {
 	 * builds without the emdawnwebgpu port) can reach the WebGPU bindings
 	 * without a static dependency on them.
 	 */
-	$GodotWebGPUXR__deps: ['$WebGPU'],
+	$GodotWebGPUXR__deps: ['$WebGPU', 'wgpuTextureRelease'],
 	$GodotWebGPUXR__postset: 'Module["GodotWebGPUXR"] = GodotWebGPUXR;',
 	$GodotWebGPUXR: {
 		imported_textures: null,
@@ -51,8 +51,12 @@ const GodotWebGPU = {
 		},
 
 		/**
-		 * Maps a GPUTexture to a stable WGPUTexture handle; XR layers cycle
-		 * through a small set of opaque textures, so each is imported once.
+		 * Maps a GPUTexture to a stable WGPUTexture handle so each texture
+		 * object is imported once. This table owns the import references:
+		 * clear() releases them (the engine-side wrappers are non-owning).
+		 * The WebXR glue clears it on layer recreation, per frame when the
+		 * browser follows the spec's per-frame texture lifecycle, and at
+		 * session end.
 		 */
 		importTexture: function (texture) {
 			if (!GodotWebGPUXR.imported_textures) {
@@ -66,9 +70,18 @@ const GodotWebGPU = {
 			return handle;
 		},
 
+		size: function () {
+			return GodotWebGPUXR.imported_textures ? GodotWebGPUXR.imported_textures.size : 0;
+		},
+
 		clear: function () {
-			// The C++ side owns the handles' release; drop the JS map so a
-			// new session starts from a clean import table.
+			if (GodotWebGPUXR.imported_textures) {
+				// In-flight GPU work holds its own references, so releasing
+				// the import refs here never invalidates submitted frames.
+				GodotWebGPUXR.imported_textures.forEach(function (handle) {
+					_wgpuTextureRelease(handle);
+				});
+			}
 			GodotWebGPUXR.imported_textures = null;
 		},
 	},
