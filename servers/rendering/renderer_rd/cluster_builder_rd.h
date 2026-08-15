@@ -388,11 +388,25 @@ public:
 		Transform3D xform = view_xform * p_transform;
 
 		// Extract scale and scale the matrix by it, makes things simpler.
+		//
+		// The per-axis scale of a basis is the length of its COLUMNS. Row
+		// lengths only agree when no rotation is present, and xform is
+		// view_xform * p_transform, so a rotation is always present here: any
+		// decal or reflection probe scaled through its node transform (rather
+		// than through its size/extents property) got a mixture of its axes
+		// instead of its scale, and was clipped to the wrong box - shrinking
+		// view-dependently as the camera turned.
 		Vector3 scale = p_half_size;
 		for (uint32_t i = 0; i < 3; i++) {
-			float s = xform.basis.rows[i].length();
+			Vector3 column(xform.basis.rows[0][i], xform.basis.rows[1][i], xform.basis.rows[2][i]);
+			float s = column.length();
+			if (s < CMP_EPSILON) {
+				continue; // Degenerate axis; leave it alone rather than divide by zero.
+			}
 			scale[i] *= s;
-			xform.basis.rows[i] /= s;
+			xform.basis.rows[0][i] /= s;
+			xform.basis.rows[1][i] /= s;
+			xform.basis.rows[2][i] /= s;
 		};
 
 		float box_depth = Math::abs(xform.basis.xform_inv(Vector3(0, 0, -1)).dot(scale));
