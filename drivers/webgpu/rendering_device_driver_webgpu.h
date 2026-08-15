@@ -240,10 +240,29 @@ private:
 		bool has_push_constant_offset = false;
 	};
 
+	struct PipelineInfo;
+
+	// A deferred pipeline handed to the browser for background compilation.
+	// The ticket outlives its PipelineInfo when the pipeline is freed while
+	// the compile is still in flight: the callback then releases the result
+	// and the ticket instead of touching freed memory.
+	struct PipelineAsyncTicket {
+		PipelineInfo *pipeline = nullptr; // Null once the owner was freed.
+		// Set when an async creation was actually issued; a creation that
+		// bails before reaching the API leaves it false so the caller can
+		// reclaim the ticket.
+		bool kicked = false;
+	};
+
 	struct PipelineInfo {
 		WGPURenderPipeline render_pipeline = nullptr;
 		WGPUComputePipeline compute_pipeline = nullptr;
 		const ShaderInfo *shader = nullptr;
+		// Non-null while a background creation is in flight for this
+		// pipeline. All pipeline work happens on the main thread (creation
+		// is proxied there and spontaneous callbacks run there), so no
+		// synchronization is needed.
+		PipelineAsyncTicket *async_ticket = nullptr;
 		// Compute pipelines are built on first bind. Creating one is where the
 		// browser compiles the shader for the native backend, and the renderer
 		// eagerly creates far more of them than a given scene ever dispatches.
@@ -422,9 +441,16 @@ public:
 	virtual void command_clear_depth_stencil_texture(CommandBufferID p_cmd_buffer, TextureID p_texture, TextureLayout p_texture_layout, float p_depth, uint8_t p_stencil, const TextureSubresourceRange &p_subresources) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual void command_copy_buffer_to_texture(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<BufferTextureCopyRegion> p_regions) override;
 	virtual void command_copy_texture_to_buffer(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, BufferID p_dst_buffer, VectorView<BufferTextureCopyRegion> p_regions) override;
-	WGPURenderPipeline _build_render_pipeline(const ShaderInfo *shader, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, PipelineRasterizationState p_rasterization_state, PipelineMultisampleState p_multisample_state, PipelineDepthStencilState p_depth_stencil_state, PipelineColorBlendState p_blend_state, VectorView<int32_t> p_color_attachments, BitField<PipelineDynamicStateFlags> p_dynamic_state, RenderPassID p_render_pass, uint32_t p_render_subpass, VectorView<PipelineSpecializationConstant> p_specialization_constants);
+	WGPURenderPipeline _build_render_pipeline(const ShaderInfo *shader, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, PipelineRasterizationState p_rasterization_state, PipelineMultisampleState p_multisample_state, PipelineDepthStencilState p_depth_stencil_state, PipelineColorBlendState p_blend_state, VectorView<int32_t> p_color_attachments, BitField<PipelineDynamicStateFlags> p_dynamic_state, RenderPassID p_render_pass, uint32_t p_render_subpass, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket = nullptr);
+	WGPUComputePipeline _create_compute_pipeline(const ShaderInfo *p_shader, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket = nullptr);
 	bool _ensure_render_pipeline(PipelineInfo *p_pipeline);
 	bool _ensure_compute_pipeline(PipelineInfo *p_pipeline);
+	void _pump_pipeline_warm_queue();
+	static void _on_render_pipeline_async(WGPUCreatePipelineAsyncStatus p_status, WGPURenderPipeline p_pipeline, WGPUStringView p_message, void *p_userdata1, void *p_userdata2);
+	static void _on_compute_pipeline_async(WGPUCreatePipelineAsyncStatus p_status, WGPUComputePipeline p_pipeline, WGPUStringView p_message, void *p_userdata1, void *p_userdata2);
+	// Deferred pipelines waiting for a background warm; a few are handed to
+	// the browser per presented frame (see _pump_pipeline_warm_queue).
+	LocalVector<PipelineInfo *> pipeline_warm_queue;
 	virtual void pipeline_free(PipelineID p_pipeline) override;
 	virtual void command_bind_push_constants(CommandBufferID p_cmd_buffer, ShaderID p_shader, uint32_t p_first_index, VectorView<uint32_t> p_data) override;
 	// The browser manages pipeline caching; declining makes the engine skip it.
