@@ -902,13 +902,21 @@ const GodotWebXR = {
 			// module defines. fillPoses throws when handed an array too small
 			// for the collection, so a runtime reporting more joints must be
 			// trimmed rather than allowed to kill hand tracking every frame.
-			let joints = input_source.hand.values();
-			if (input_source.hand.size > 25) {
+			//
+			// Materialized as an ARRAY, never kept as the raw iterator:
+			// fillPoses consumes an iterator, so fillJointRadii would receive
+			// an exhausted one - zero spaces against a 25-length radii buffer
+			// - and throw "Buffer sizes must be equal" every frame. Uncaught
+			// in the animation-frame callback, that killed everything after
+			// it: on-device this presented as a session whose UI half-renders
+			// and responds to nothing, in VR and AR alike.
+			let joints = Array.from(input_source.hand.values());
+			if (joints.length > 25) {
 				if (!GodotWebXR.hand_joint_overflow_reported) {
 					GodotWebXR.hand_joint_overflow_reported = true;
-					GodotRuntime.print(`WebXR: this runtime reports ${input_source.hand.size} hand joints; using the first 25.`);
+					GodotRuntime.print(`WebXR: this runtime reports ${joints.length} hand joints; using the first 25.`);
 				}
-				joints = Array.from(joints).slice(0, 25);
+				joints = joints.slice(0, 25);
 			}
 			const hand_joint_array = new Float32Array(25 * 16);
 			const hand_radii_array = new Float32Array(25);
