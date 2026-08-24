@@ -154,10 +154,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Published by the tint-builder workflow; the latest release is that
-          # build. Pinning the pattern rather than the tag keeps this working
-          # across tint refreshes.
-          gh release download --repo "$GITHUB_REPOSITORY" --pattern 'tint-linux-x86_64' --dir "$RUNNER_TEMP" --clobber
+          # Published by the tint-builder workflow, pinned BY TAG: the newer
+          # tint built from Dawn v20260423 (the ref emsdk 6.0.1's emdawnwebgpu
+          # port pairs with) replaced the spirv-reader with a stricter IR
+          # reader that still refuses ~76 of the mobile renderer's variants
+          # (depth-image sampled-type mismatches, write-only SSBOs, an
+          # atomic-inference crash, MS sampled images). The failure map and
+          # adoption gate live in C:/ws/xr/testbed/tint-adoption-v20260423 on
+          # the dev machine; move this pin forward only together with that
+          # adoption (and GODOT_TINT_PATH locally).
+          gh release download tint-v20250531.224602 --repo "$GITHUB_REPOSITORY" --pattern 'tint-linux-x86_64' --dir "$RUNNER_TEMP" --clobber
           chmod +x "$RUNNER_TEMP/tint-linux-x86_64"
 
       - name: Bake the fixture project
