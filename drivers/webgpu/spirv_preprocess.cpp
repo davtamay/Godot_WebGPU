@@ -2133,21 +2133,32 @@ Vector<uint8_t> lower_helper_invocation_to_false(const Vector<uint8_t> &p_bytes)
 	return out;
 }
 
-// ---- strip_volatile_decorations ----
+// ---- strip_hint_decorations ----
 //
 // The volumetric fog's buffer-atomics fallback marks its map members
 // Volatile and Coherent as coherence hints; WGSL has no volatile and Tint
 // rejects the decoration. The atomic operations themselves provide the
 // ordering the shader relies on, so the hint is dropped.
+//
+// Restrict and Aliased are the matching aliasing hints: glslang decorates
+// every `restrict` buffer member and image with them, and while Tint's
+// original spirv-reader silently ignored the pair, the rewritten reader
+// shipped with Dawn v20260423 faults on member-level Restrict
+// (TINT_UNIMPLEMENTED unhandled member decoration: 19) - 277 of the
+// mobile renderer's variants at last census. WGSL has no aliasing
+// annotations at all (no-alias is its baseline assumption), so both are
+// pure hints with no semantic content to lose.
 
+static constexpr uint32_t SVD_DECO_RESTRICT = 19;
+static constexpr uint32_t SVD_DECO_ALIASED = 20;
 static constexpr uint32_t SVD_DECO_VOLATILE = 21;
 static constexpr uint32_t SVD_DECO_COHERENT = 23;
 
 static bool _is_stripped_hint(uint32_t p_decoration) {
-	return p_decoration == SVD_DECO_VOLATILE || p_decoration == SVD_DECO_COHERENT;
+	return p_decoration == SVD_DECO_RESTRICT || p_decoration == SVD_DECO_ALIASED || p_decoration == SVD_DECO_VOLATILE || p_decoration == SVD_DECO_COHERENT;
 }
 
-Vector<uint8_t> strip_volatile_decorations(const Vector<uint8_t> &p_bytes) {
+Vector<uint8_t> strip_hint_decorations(const Vector<uint8_t> &p_bytes) {
 	const int64_t len = p_bytes.size();
 	const uint32_t total_words = (uint32_t)(len / 4);
 	if (total_words < 5) {
