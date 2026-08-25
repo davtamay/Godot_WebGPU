@@ -147,6 +147,15 @@ void fragment() {
 	local_material->set_shader(local_shader);
 }
 
+Vector<Ref<Shader>> Trail3D::get_embedded_shaders() {
+	Vector<Ref<Shader>> shaders;
+	shaders.push_back(billboard_additive_shader);
+	shaders.push_back(billboard_shader);
+	shaders.push_back(local_additive_shader);
+	shaders.push_back(local_shader);
+	return shaders;
+}
+
 void Trail3D::finish_shaders() {
 	billboard_additive_material.unref();
 	billboard_material.unref();
