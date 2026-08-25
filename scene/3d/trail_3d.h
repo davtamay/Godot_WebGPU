@@ -50,6 +50,7 @@ protected:
 public:
 	static void init_shaders();
 	static void finish_shaders();
+	static Vector<Ref<Shader>> get_embedded_shaders();
 
 	void set_width(float p_width);
 	float get_width() const;
