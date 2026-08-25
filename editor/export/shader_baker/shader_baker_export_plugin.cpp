@@ -39,6 +39,7 @@
 #include "editor/editor_node.h"
 #include "scene/3d/label_3d.h"
 #include "scene/3d/sprite_3d.h"
+#include "scene/3d/trail_3d.h"
 #include "servers/rendering/renderer_rd/effects/copy_effects.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -210,6 +211,27 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	}
 
 	material_storage->shader_embedded_set_unlock();
+
+	// Engine-static scene shaders: Trail3D builds its spatial shaders from
+	// code strings at engine startup through shader_create_from_code, which
+	// is not part of any embedded set and belongs to no exported resource,
+	// so none of the enumerations above reach it and the versions are never
+	// baked - fatal on platforms that cannot compile shaders at runtime.
+	// Bake them explicitly, the same shape as the raster octmap block above.
+	// (The general upstream gap - a channel for engine-static scene shaders -
+	// is worth its own fix; this covers the shaders that exist today.)
+	for (const Ref<Shader> &embedded_shader : Trail3D::get_embedded_shaders()) {
+		if (embedded_shader.is_null()) {
+			continue;
+		}
+		RendererRD::MaterialStorage::ShaderData *shader_data = material_storage->shader_get_data(embedded_shader->get_rid());
+		if (shader_data != nullptr) {
+			Pair<ShaderRD *, RID> shader_version_pair = shader_data->get_native_shader_and_version();
+			if (shader_version_pair.first != nullptr) {
+				_customize_shader_version(shader_version_pair.first, shader_version_pair.second);
+			}
+		}
+	}
 
 	return true;
 }
