@@ -166,6 +166,13 @@ const Engine = (function () {
 			if (adapter['features'] && adapter['features'].has('timestamp-query')) {
 				requiredFeatures.push('timestamp-query');
 			}
+			// Native texture view swizzles (stable since Chrome 143). With
+			// this the engine's swizzled textures (font atlases and other
+			// luminance/alpha layouts) keep their real formats instead of
+			// being promoted to RGBA8 and expanded texel-by-texel at upload.
+			if (adapter['features'] && adapter['features'].has('texture-component-swizzle')) {
+				requiredFeatures.push('texture-component-swizzle');
+			}
 			// Depth clamping. Renderers that rasterize proxy volumes (the
 			// clustered light/decal/probe builder) rely on geometry crossing
 			// the near plane being clamped rather than clipped away.
