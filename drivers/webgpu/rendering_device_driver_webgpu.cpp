@@ -43,6 +43,9 @@ int godot_js_webgpu_use_bundles();
 // 1 when the browser understands GPUTextureUsage.TRANSIENT_ATTACHMENT
 // (core in Chromium 149+, no adapter feature to request).
 int godot_js_webgpu_has_transient_attachments();
+// 0 when the page URL carries ?noswizzle (benchmark A/B switch for the
+// native view-swizzle path).
+int godot_js_webgpu_use_native_swizzle();
 }
 
 // WebGPU exposes a single, implicitly synchronized queue: queue family and
@@ -69,7 +72,7 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	device_has_shader_f16 = wgpuDeviceHasFeature(device, WGPUFeatureName_ShaderF16);
 	device_has_depth_clip_control = wgpuDeviceHasFeature(device, WGPUFeatureName_DepthClipControl);
 	device_has_timestamp_query = wgpuDeviceHasFeature(device, WGPUFeatureName_TimestampQuery);
-	device_has_texture_swizzle = wgpuDeviceHasFeature(device, WGPUFeatureName_TextureComponentSwizzle);
+	device_has_texture_swizzle = wgpuDeviceHasFeature(device, WGPUFeatureName_TextureComponentSwizzle) && godot_js_webgpu_use_native_swizzle() != 0;
 	print_verbose(device_has_texture_swizzle ? "WebGPU: texture swizzles served by native view swizzles." : "WebGPU: texture swizzles emulated by texel expansion at upload.");
 
 	frame_count = MAX(1u, p_frame_count);
