@@ -65,6 +65,8 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	device_has_shader_f16 = wgpuDeviceHasFeature(device, WGPUFeatureName_ShaderF16);
 	device_has_depth_clip_control = wgpuDeviceHasFeature(device, WGPUFeatureName_DepthClipControl);
 	device_has_timestamp_query = wgpuDeviceHasFeature(device, WGPUFeatureName_TimestampQuery);
+	device_has_texture_swizzle = wgpuDeviceHasFeature(device, WGPUFeatureName_TextureComponentSwizzle);
+	print_verbose(device_has_texture_swizzle ? "WebGPU: texture swizzles served by native view swizzles." : "WebGPU: texture swizzles emulated by texel expansion at upload.");
 
 	frame_count = MAX(1u, p_frame_count);
 
@@ -818,6 +820,27 @@ static WGPUTextureFormat _wgsl_storage_format_to_wgpu(const String &p_format) {
 	return WGPUTextureFormat_Undefined;
 }
 
+static WGPUComponentSwizzle _texture_swizzle_to_wgpu(RenderingDeviceCommons::TextureSwizzle p_swizzle, WGPUComponentSwizzle p_identity) {
+	switch (p_swizzle) {
+		case RenderingDeviceCommons::TEXTURE_SWIZZLE_IDENTITY:
+			return p_identity;
+		case RenderingDeviceCommons::TEXTURE_SWIZZLE_ZERO:
+			return WGPUComponentSwizzle_Zero;
+		case RenderingDeviceCommons::TEXTURE_SWIZZLE_ONE:
+			return WGPUComponentSwizzle_One;
+		case RenderingDeviceCommons::TEXTURE_SWIZZLE_R:
+			return WGPUComponentSwizzle_R;
+		case RenderingDeviceCommons::TEXTURE_SWIZZLE_G:
+			return WGPUComponentSwizzle_G;
+		case RenderingDeviceCommons::TEXTURE_SWIZZLE_B:
+			return WGPUComponentSwizzle_B;
+		case RenderingDeviceCommons::TEXTURE_SWIZZLE_A:
+			return WGPUComponentSwizzle_A;
+		default:
+			return p_identity;
+	}
+}
+
 static WGPUTextureFormat _data_format_to_wgpu(RenderingDeviceCommons::DataFormat p_format) {
 	switch (p_format) {
 		case RenderingDeviceCommons::DATA_FORMAT_R8_UNORM:
@@ -1296,7 +1319,14 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 	ERR_FAIL_COND_V_MSG(p_view.format != p_format.format, TextureID(), "Texture views with a different format are not supported by the WebGPU driver yet.");
 	const bool identity_swizzle = p_view.swizzle_r == TEXTURE_SWIZZLE_R && p_view.swizzle_g == TEXTURE_SWIZZLE_G && p_view.swizzle_b == TEXTURE_SWIZZLE_B && p_view.swizzle_a == TEXTURE_SWIZZLE_A;
 	TextureInfo::SwizzleExpand swizzle_expand = TextureInfo::SWIZZLE_EXPAND_NONE;
-	if (!identity_swizzle) {
+	// Native view swizzles (texture-component-swizzle, stable since Chrome
+	// 143): the texture keeps its real format and the default view remaps
+	// components, replacing the CPU texel expansion below. Swizzled views are
+	// sampling-only in WebGPU, so any attachment or storage usage falls back
+	// to the emulation.
+	const bool native_swizzle = !identity_swizzle && device_has_texture_swizzle &&
+			!(p_format.usage_bits & (TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | TEXTURE_USAGE_STORAGE_BIT | TEXTURE_USAGE_STORAGE_ATOMIC_BIT | TEXTURE_USAGE_VRS_ATTACHMENT_BIT));
+	if (!identity_swizzle && !native_swizzle) {
 		// WebGPU has no view swizzle: emulate the engine's patterns by
 		// promoting to RGBA8 and expanding texels at upload.
 		const bool rrr = p_view.swizzle_r == TEXTURE_SWIZZLE_R && p_view.swizzle_g == TEXTURE_SWIZZLE_R && p_view.swizzle_b == TEXTURE_SWIZZLE_R;
@@ -1419,6 +1449,17 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 	WGPUTextureViewDescriptor view_desc = WGPU_TEXTURE_VIEW_DESCRIPTOR_INIT;
 	view_desc.format = wgpu_format; // p_view.format equals p_format.format (checked above); use the possibly promoted format.
 	view_desc.dimension = _texture_type_to_wgpu_view_dimension(p_format.texture_type);
+	WGPUTextureComponentSwizzleDescriptor swizzle_desc = WGPU_TEXTURE_COMPONENT_SWIZZLE_DESCRIPTOR_INIT;
+	if (native_swizzle) {
+		swizzle_desc.swizzle.r = _texture_swizzle_to_wgpu(p_view.swizzle_r, WGPUComponentSwizzle_R);
+		swizzle_desc.swizzle.g = _texture_swizzle_to_wgpu(p_view.swizzle_g, WGPUComponentSwizzle_G);
+		swizzle_desc.swizzle.b = _texture_swizzle_to_wgpu(p_view.swizzle_b, WGPUComponentSwizzle_B);
+		swizzle_desc.swizzle.a = _texture_swizzle_to_wgpu(p_view.swizzle_a, WGPUComponentSwizzle_A);
+		// Swizzled views are sampling-only; the usage gate above guarantees
+		// TextureBinding is a subset of the texture's usage.
+		view_desc.usage = WGPUTextureUsage_TextureBinding;
+		view_desc.nextInChain = &swizzle_desc.chain;
+	}
 	WGPUTextureView wgpu_view = wgpuTextureCreateView(wgpu_texture, &view_desc);
 	if (wgpu_view == nullptr) {
 		wgpuTextureRelease(wgpu_texture);
