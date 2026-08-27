@@ -152,8 +152,19 @@ const GodotWebGPU = {
 	godot_js_webgpu_has_transient_attachments: function () {
 		// Core addition in Chromium 149 (no adapter feature): the usage
 		// constant exists on the interface exactly when the browser
-		// understands it in createTexture.
+		// understands it in createTexture. ?notransient forces the plain
+		// attachment path for on-device A/B benchmarking.
+		if (window.location.search.indexOf('notransient') >= 0) {
+			return 0;
+		}
 		return (typeof GPUTextureUsage !== 'undefined' && 'TRANSIENT_ATTACHMENT' in GPUTextureUsage) ? 1 : 0;
+	},
+
+	godot_js_webgpu_use_native_swizzle__sig: 'i',
+	godot_js_webgpu_use_native_swizzle: function () {
+		// ?noswizzle forces the CPU texel-expansion fallback for on-device
+		// A/B benchmarking of the native view-swizzle path.
+		return window.location.search.indexOf('noswizzle') >= 0 ? 0 : 1;
 	},
 
 	/**
