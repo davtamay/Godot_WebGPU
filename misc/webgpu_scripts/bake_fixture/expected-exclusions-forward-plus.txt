@@ -9,7 +9,10 @@
 #   SceneForwardClustered   SDF voxelization variants: image atomics. Upstream
 #                           ships a NO_IMAGE_ATOMICS fallback in this very
 #                           shader but only the fog system enables the macro;
-#                           wiring it is the documented future fix.
+#                           wiring it is the documented future fix. 10 -> 14
+#                           at patch 110, which bakes Trail3D's engine-static
+#                           shader versions: their voxelization variants join
+#                           this same class.
 #   Octmap*                 rgb10a2 is not a WGSL storage format; the renderer
 #                           takes the raster octmap path instead (patch 68),
 #                           so nothing is missing at runtime.
@@ -25,7 +28,7 @@
 #   SdfgiIntegrate          rgba16i/rgba32i read-write probe accumulators.
 #   BokehDof                read-write rgba16f storage; the raster depth of
 #                           field path is used instead (patch 72).
-10 SceneForwardClusteredShaderRD
+14 SceneForwardClusteredShaderRD
 4 OctmapFilterShaderRD
 3 VoxelGiShaderRD
 3 VoxelGiDebugShaderRD
