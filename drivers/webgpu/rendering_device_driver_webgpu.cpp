@@ -40,6 +40,9 @@ extern "C" {
 int godot_js_webgpu_preferred_format();
 // 0 when the page URL carries ?nobundles (benchmark A/B switch).
 int godot_js_webgpu_use_bundles();
+// 1 when the browser understands GPUTextureUsage.TRANSIENT_ATTACHMENT
+// (core in Chromium 149+, no adapter feature to request).
+int godot_js_webgpu_has_transient_attachments();
 }
 
 // WebGPU exposes a single, implicitly synchronized queue: queue family and
@@ -58,6 +61,7 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	if (!use_render_bundles) {
 		print_line("WebGPU: render-bundle caching disabled (?nobundles).");
 	}
+	device_has_transient_attachments = godot_js_webgpu_has_transient_attachments() != 0;
 
 	if (wgpuDeviceGetLimits(device, &device_limits) != WGPUStatus_Success) {
 		ERR_FAIL_V_MSG(ERR_CANT_CREATE, "Failed to query WebGPU device limits.");
@@ -1388,6 +1392,20 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 		usage |= WGPUTextureUsage_CopyDst;
 	}
 
+	// Tile-memory scratch (Chromium 149+): a transient attachment's contents
+	// never leave the pass, so the browser can keep it in on-chip tile memory
+	// without allocating VRAM - the biggest bandwidth lever on mobile GPUs.
+	// The engine's TRANSIENT_BIT carries exactly that contract (the Vulkan
+	// driver maps it to lazily-allocated transient images); WebGPU's rules
+	// forbid every other usage on such a texture, including declared view
+	// formats, so the usage collapses to the attachment bit alone. Browsers
+	// without the flag simply treat the texture as a plain attachment.
+	const bool transient_attachment = device_has_transient_attachments &&
+			(p_format.usage_bits & TEXTURE_USAGE_TRANSIENT_BIT) &&
+			(p_format.usage_bits & (TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT));
+	if (transient_attachment) {
+		usage = WGPUTextureUsage_RenderAttachment | (WGPUTextureUsage)WGPUTextureUsage_TransientAttachment;
+	}
 	WGPUTextureDescriptor texture_desc = WGPU_TEXTURE_DESCRIPTOR_INIT;
 	texture_desc.usage = usage;
 	texture_desc.format = wgpu_format;
@@ -1420,7 +1438,7 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 	}
 	// Declaring a view format can cost a driver's lossless compression, so
 	// only ask when the sibling can actually be used.
-	const bool declare_srgb_sibling = srgb_sibling != WGPUTextureFormat_Undefined && (usage & WGPUTextureUsage_StorageBinding) == 0;
+	const bool declare_srgb_sibling = srgb_sibling != WGPUTextureFormat_Undefined && (usage & WGPUTextureUsage_StorageBinding) == 0 && !transient_attachment;
 	if (declare_srgb_sibling) {
 		texture_desc.viewFormatCount = 1;
 		texture_desc.viewFormats = &srgb_sibling;
