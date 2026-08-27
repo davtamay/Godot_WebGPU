@@ -148,6 +148,14 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('nobundles') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_has_transient_attachments__sig: 'i',
+	godot_js_webgpu_has_transient_attachments: function () {
+		// Core addition in Chromium 149 (no adapter feature): the usage
+		// constant exists on the interface exactly when the browser
+		// understands it in createTexture.
+		return (typeof GPUTextureUsage !== 'undefined' && 'TRANSIENT_ATTACHMENT' in GPUTextureUsage) ? 1 : 0;
+	},
+
 	/**
 	 * Creates the hidden probe canvas (see drivers/webgpu/webgpu_probe.cpp).
 	 * A canvas is permanently locked to its first context type, so the probe

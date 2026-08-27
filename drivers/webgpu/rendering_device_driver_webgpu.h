@@ -398,6 +398,7 @@ private:
 	bool device_has_depth_clip_control = false;
 	bool device_has_timestamp_query = false;
 	bool device_has_texture_swizzle = false;
+	bool device_has_transient_attachments = false;
 
 	struct TimestampPoolInfo {
 		WGPUQuerySet query_set = nullptr;
