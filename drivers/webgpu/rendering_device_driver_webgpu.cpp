@@ -46,6 +46,9 @@ int godot_js_webgpu_has_transient_attachments();
 // 0 when the page URL carries ?noswizzle (benchmark A/B switch for the
 // native view-swizzle path).
 int godot_js_webgpu_use_native_swizzle();
+// 0 when the page URL carries ?notiers (benchmark A/B switch for the
+// texture-format-tier paths).
+int godot_js_webgpu_use_tiers();
 }
 
 // WebGPU exposes a single, implicitly synchronized queue: queue family and
@@ -65,8 +68,9 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 		print_line("WebGPU: render-bundle caching disabled (?nobundles).");
 	}
 	device_has_transient_attachments = godot_js_webgpu_has_transient_attachments() != 0;
-	device_has_texture_formats_tier1 = wgpuDeviceHasFeature(device, WGPUFeatureName_TextureFormatsTier1);
-	device_has_texture_formats_tier2 = wgpuDeviceHasFeature(device, WGPUFeatureName_TextureFormatsTier2);
+	const bool use_tiers = godot_js_webgpu_use_tiers() != 0;
+	device_has_texture_formats_tier1 = use_tiers && wgpuDeviceHasFeature(device, WGPUFeatureName_TextureFormatsTier1);
+	device_has_texture_formats_tier2 = use_tiers && wgpuDeviceHasFeature(device, WGPUFeatureName_TextureFormatsTier2);
 	if (device_has_texture_formats_tier1 || device_has_texture_formats_tier2) {
 		print_verbose(vformat("WebGPU: texture format tiers granted: tier1=%s tier2=%s.", device_has_texture_formats_tier1 ? "yes" : "no", device_has_texture_formats_tier2 ? "yes" : "no"));
 	}
