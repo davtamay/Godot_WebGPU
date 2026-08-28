@@ -243,6 +243,7 @@ Ref<RenderSceneBuffers> RendererSceneRenderRD::render_buffers_create() {
 	rb.instantiate();
 
 	rb->set_can_be_storage(_render_buffers_can_be_storage());
+	rb->set_msaa_in_pass_resolve(_render_buffers_msaa_in_pass_resolve());
 	rb->set_max_cluster_elements(max_cluster_elements);
 	rb->set_preferred_data_format(_render_buffers_get_preferred_color_format());
 	if (vrs) {
