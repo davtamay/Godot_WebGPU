@@ -173,6 +173,18 @@ const Engine = (function () {
 			if (adapter['features'] && adapter['features'].has('texture-component-swizzle')) {
 				requiredFeatures.push('texture-component-swizzle');
 			}
+			// Texture format tiers (Chrome 142+). Tier1 adds storage access
+			// for rgb10a2 and friends (the compute octmap path); tier2 adds
+			// read-write storage for the rgba8/16/32 families (dynamic-object
+			// VoxelGI relighting, SDFGI probe integration, compute depth of
+			// field). The engine's capability probes select the fallback
+			// paths wherever a tier is missing.
+			if (adapter['features'] && adapter['features'].has('texture-formats-tier1')) {
+				requiredFeatures.push('texture-formats-tier1');
+			}
+			if (adapter['features'] && adapter['features'].has('texture-formats-tier2')) {
+				requiredFeatures.push('texture-formats-tier2');
+			}
 			// Depth clamping. Renderers that rasterize proxy volumes (the
 			// clustered light/decal/probe builder) rely on geometry crossing
 			// the near plane being clamped rather than clipped away.
