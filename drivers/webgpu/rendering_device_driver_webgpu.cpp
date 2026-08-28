@@ -236,7 +236,28 @@ void RenderingDeviceDriverWebGPU::command_clear_color_texture(CommandBufferID p_
 			print_verbose("WebGPU: clearing a non-renderable texture to a non-zero color is unsupported; clearing to zero instead.");
 		}
 		const bool is_3d = wgpuTextureGetDimension(texture->texture) == WGPUTextureDimension_3D;
-		const uint32_t pixel_size = get_image_format_pixel_size(texture->format);
+		// The PHYSICAL texel size: storage-format substitution can promote the
+		// texture to a wider format than the engine-side one (r16f/r8 -> r32f
+		// and friends), and a zero-fill sized from the engine format then
+		// passes a bytesPerRow smaller than the real row - Dawn rejects the
+		// write and the texture keeps its previous contents (SDFGI's cascade
+		// scratch was the first caught doing it).
+		uint32_t pixel_size = get_image_format_pixel_size(texture->format);
+		switch (texture->wgpu_format) {
+			case WGPUTextureFormat_RGBA8Unorm:
+			case WGPUTextureFormat_R32Float:
+			case WGPUTextureFormat_R32Uint:
+			case WGPUTextureFormat_R32Sint:
+				pixel_size = 4;
+				break;
+			case WGPUTextureFormat_RGBA16Float:
+			case WGPUTextureFormat_RG32Uint:
+			case WGPUTextureFormat_RG32Sint:
+				pixel_size = 8;
+				break;
+			default:
+				break;
+		}
 		for (uint32_t mip = 0; mip < p_subresources.mipmap_count; mip++) {
 			const uint32_t mip_level = p_subresources.base_mipmap + mip;
 			const uint32_t w = MAX(1u, wgpuTextureGetWidth(texture->texture) >> mip_level);
