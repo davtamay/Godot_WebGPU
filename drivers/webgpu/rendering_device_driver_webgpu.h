@@ -399,6 +399,41 @@ private:
 	bool device_has_timestamp_query = false;
 	bool device_has_texture_swizzle = false;
 	bool device_has_transient_attachments = false;
+	bool device_has_texture_formats_tier1 = false;
+	bool device_has_texture_formats_tier2 = false;
+
+	// Whether this device can create a shader module declaring the given
+	// storage texture format/access (core set + the texture-formats tiers).
+	bool _wgpu_storage_decl_supported_by_device(WGPUTextureFormat p_format, WGPUStorageTextureAccess p_access) const {
+		switch (p_format) {
+			case WGPUTextureFormat_R32Float:
+			case WGPUTextureFormat_R32Uint:
+			case WGPUTextureFormat_R32Sint:
+				return true; // Core, every access.
+			case WGPUTextureFormat_RGBA8Unorm:
+			case WGPUTextureFormat_RGBA8Uint:
+			case WGPUTextureFormat_RGBA8Sint:
+			case WGPUTextureFormat_RGBA16Uint:
+			case WGPUTextureFormat_RGBA16Sint:
+			case WGPUTextureFormat_RGBA16Float:
+			case WGPUTextureFormat_RGBA32Uint:
+			case WGPUTextureFormat_RGBA32Sint:
+			case WGPUTextureFormat_RGBA32Float:
+				// Core for read/write-only; read_write needs tier2.
+				return p_access != WGPUStorageTextureAccess_ReadWrite || device_has_texture_formats_tier2;
+			case WGPUTextureFormat_RGBA8Snorm:
+				return p_access != WGPUStorageTextureAccess_ReadWrite; // Not in tier2's read-write set.
+			case WGPUTextureFormat_RGB10A2Unorm:
+				return p_access != WGPUStorageTextureAccess_ReadWrite && device_has_texture_formats_tier1;
+			default:
+				// Everything else in baked WGSL went through the bake-time
+				// substitution and is core-legal; be permissive so a new
+				// class surfaces as a loud Dawn error rather than a silent
+				// missing variant.
+				return true;
+		}
+	}
+
 
 	struct TimestampPoolInfo {
 		WGPUQuerySet query_set = nullptr;
@@ -638,6 +673,12 @@ public:
 				// shader-f16 feature; the runtime then selects the baked
 				// FP16 variant groups (tint emits `enable f16`).
 				return device_has_shader_f16;
+			case SUPPORTS_READ_WRITE_STORAGE_IMAGES_ANY_FORMAT:
+				// texture-formats-tier2 grants read-write storage access to
+				// the rgba8/rgba16/rgba32 families - the capability the
+				// compute bokeh (and any future rw-storage effect) needs;
+				// without it the renderer takes the raster paths (patch 72).
+				return device_has_texture_formats_tier2;
 			default:
 				// SUPPORTS_FRAGMENT_SHADER_WITH_ONLY_SIDE_EFFECTS must stay
 				// false: WebGPU render pipelines require at least one
