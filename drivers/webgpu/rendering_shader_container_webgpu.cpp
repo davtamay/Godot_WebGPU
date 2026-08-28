@@ -1110,7 +1110,7 @@ static bool _unwrap_reader_atomic_taint(String &r_text) {
 // gate the generated WGSL here at bake time, where a failure is a benign
 // runtime cache miss instead.
 static bool _wgsl_storage_textures_supported(const String &p_text) {
-	static const char *supported_formats[] = { "rgba8unorm", "rgba8snorm", "rgba8uint", "rgba8sint", "rgba16uint", "rgba16sint", "rgba16float", "r32uint", "r32sint", "r32float", "rg32uint", "rg32sint", "rg32float", "rgba32uint", "rgba32sint", "rgba32float" };
+	static const char *supported_formats[] = { "rgba8unorm", "rgba8snorm", "rgba8uint", "rgba8sint", "rgba16uint", "rgba16sint", "rgba16float", "r32uint", "r32sint", "r32float", "rg32uint", "rg32sint", "rg32float", "rgba32uint", "rgba32sint", "rgba32float", "rgb10a2unorm" };
 	int pos = 0;
 	while ((pos = p_text.find("texture_storage_", pos)) != -1) {
 		const int open = p_text.find("<", pos);
@@ -1135,12 +1135,26 @@ static bool _wgsl_storage_textures_supported(const String &p_text) {
 			if (!format_ok) {
 				return false;
 			}
-			// read_write stays restricted to 32-bit single-channel formats;
-			// plain read is legal for every storage format via the shipped
-			// readonly_and_readwrite_storage_textures WGSL feature (Tint
-			// emits the requires directive itself).
+			// read_write beyond the 32-bit single-channel formats needs the
+			// texture-formats-tier2 device feature (Dawn's tier2 read-write
+			// set); the variants bake for every target - the driver leaves
+			// them empty on devices without the tier, exactly like a bake
+			// hole, and the renderer's capability probes pick the fallback
+			// path there. Plain read is legal for every storage format via
+			// the shipped readonly_and_readwrite_storage_textures feature.
+			// rgb10a2unorm is read/write-only under tier1, never read_write.
 			if (access == "read_write" && !format.begins_with("r32")) {
-				return false;
+				static const char *tier2_read_write[] = { "rgba8unorm", "rgba8uint", "rgba8sint", "rgba16uint", "rgba16sint", "rgba16float", "rgba32uint", "rgba32sint", "rgba32float" };
+				bool tier2_ok = false;
+				for (const char *rw : tier2_read_write) {
+					if (format == rw) {
+						tier2_ok = true;
+						break;
+					}
+				}
+				if (!tier2_ok) {
+					return false;
+				}
 			}
 		}
 		pos = close;
