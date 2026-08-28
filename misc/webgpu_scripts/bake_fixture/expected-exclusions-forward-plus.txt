@@ -16,27 +16,25 @@
 #   Octmap*                 rgb10a2 is not a WGSL storage format; the renderer
 #                           takes the raster octmap path instead (patch 68),
 #                           so nothing is missing at runtime.
-#   VoxelGi                 MODE_DYNAMIC relighting: rgba16f read-write
-#                           storage images (WGSL allows read-write on r32
-#                           formats only). Static VoxelGI works.
+#   VoxelGi / SdfgiIntegrate / BokehDof rows are GONE as of patch 116:
+#                           texture-formats-tier2 legalizes their read-write
+#                           storage formats, so the variants bake for every
+#                           target; devices without the tier get empty
+#                           variants from the driver (bake-hole semantics)
+#                           and the renderer's capability probes take the
+#                           fallback paths there.
 #   VoxelGiDebug            writable storage buffer visible to the vertex
 #                           stage, which WebGPU forbids. Debug view only.
 #   Fsr2* / FsrUpscale      16-bit integer math; lifts if the loader requests
 #                           shader-f16 where the adapter offers it.
 #   VolumetricFog           FogVolume-node injection: image atomics. The
 #                           environmental fog fallback variants bake and run.
-#   SdfgiIntegrate          rgba16i/rgba32i read-write probe accumulators.
-#   BokehDof                read-write rgba16f storage; the raster depth of
-#                           field path is used instead (patch 72).
 14 SceneForwardClusteredShaderRD
 4 OctmapFilterShaderRD
-3 VoxelGiShaderRD
 3 VoxelGiDebugShaderRD
 3 Fsr2AccumulatePassShaderRD
 2 VolumetricFogShaderRD
 2 Fsr2ReconstructPreviousDepthPassShaderRD
-2 BokehDofShaderRD
-1 SdfgiIntegrateShaderRD
 1 OctmapRoughnessShaderRD
 1 OctmapDownsamplerShaderRD
 1 FsrUpscaleShaderRD
