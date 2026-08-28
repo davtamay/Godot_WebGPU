@@ -65,6 +65,11 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 		print_line("WebGPU: render-bundle caching disabled (?nobundles).");
 	}
 	device_has_transient_attachments = godot_js_webgpu_has_transient_attachments() != 0;
+	device_has_texture_formats_tier1 = wgpuDeviceHasFeature(device, WGPUFeatureName_TextureFormatsTier1);
+	device_has_texture_formats_tier2 = wgpuDeviceHasFeature(device, WGPUFeatureName_TextureFormatsTier2);
+	if (device_has_texture_formats_tier1 || device_has_texture_formats_tier2) {
+		print_verbose(vformat("WebGPU: texture format tiers granted: tier1=%s tier2=%s.", device_has_texture_formats_tier1 ? "yes" : "no", device_has_texture_formats_tier2 ? "yes" : "no"));
+	}
 
 	if (wgpuDeviceGetLimits(device, &device_limits) != WGPUStatus_Success) {
 		ERR_FAIL_V_MSG(ERR_CANT_CREATE, "Failed to query WebGPU device limits.");
@@ -1256,8 +1261,14 @@ void RenderingDeviceDriverWebGPU::buffer_unmap(BufferID p_buffer) {
 
 // WebGPU only allows view reinterpretation between srgb/non-srgb siblings,
 // and the sibling must be declared in viewFormats at texture creation.
-static bool _wgpu_format_supports_storage(WGPUTextureFormat p_format) {
+static bool _wgpu_format_supports_storage(WGPUTextureFormat p_format, bool p_tier1) {
 	switch (p_format) {
+		case WGPUTextureFormat_RGB10A2Unorm:
+			// texture-formats-tier1 grants (read/write-only) storage access;
+			// the format is deliberately NOT in the substitution table, so a
+			// tier1 device runs the compute octmap path the patch-68 probe
+			// selects, and every other device keeps the raster path.
+			return p_tier1;
 		case WGPUTextureFormat_RGBA8Unorm:
 		case WGPUTextureFormat_RGBA8Snorm:
 		case WGPUTextureFormat_RGBA8Uint:
@@ -1371,12 +1382,12 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 		// rejects at the descriptor level. The texture only breaks if a
 		// shader actually reads it as a storage image, which Dawn validates
 		// at bind group creation.
-		if (!_wgpu_format_supports_storage(wgpu_format)) {
+		if (!_wgpu_format_supports_storage(wgpu_format, device_has_texture_formats_tier1)) {
 			// Mirror of the bake-time SPIR-V substitution: the shaders
 			// declare the substituted format, so the texture must be it.
 			wgpu_format = _wgpu_storage_substitute(wgpu_format);
 		}
-		if (_wgpu_format_supports_storage(wgpu_format)) {
+		if (_wgpu_format_supports_storage(wgpu_format, device_has_texture_formats_tier1)) {
 			usage |= WGPUTextureUsage_StorageBinding;
 		}
 		// Tint converts read-only storage images into sampled textures
@@ -2363,6 +2374,18 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 									const WGPUStorageTextureAccess decl_access = access == "write" ? WGPUStorageTextureAccess_WriteOnly : (access == "read_write" ? WGPUStorageTextureAccess_ReadWrite : WGPUStorageTextureAccess_ReadOnly);
 									if (decl_format != WGPUTextureFormat_Undefined) {
 										storage_texture_decls.insert(key, Pair<WGPUTextureFormat, WGPUStorageTextureAccess>(decl_format, decl_access));
+										// Tier-gated declarations: the bake ships them for
+										// every device (valid WGSL text), but creating the
+										// module on a device without the format tier would
+										// print a Dawn validation error. Fail the variant
+										// cleanly instead - the engine treats a null variant
+										// exactly like a bake hole and takes the fallback
+										// path its capability probes select anyway.
+										if (!_wgpu_storage_decl_supported_by_device(decl_format, decl_access)) {
+											print_verbose(vformat("WebGPU: shader '%s' declares storage format/access beyond this device's texture format tiers; variant left empty.", String::utf8(shader->name.get_data())));
+											shader_free(ShaderID(shader));
+											return ShaderID();
+										}
 									}
 								}
 							}
@@ -2810,7 +2833,7 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 					// bind time) so the layout stays valid.
 					const Pair<WGPUTextureFormat, WGPUStorageTextureAccess> *decl = storage_texture_decls.getptr(((uint64_t)set_index << 32) | entry.binding);
 					WGPUTextureFormat storage_format = _wgpu_storage_substitute(decl != nullptr ? decl->first : _data_format_to_wgpu(uniform.texture_format));
-					if (decl == nullptr && (!_wgpu_format_supports_storage(storage_format) || (uniform.writable == 0 && storage_format != WGPUTextureFormat_R32Float && storage_format != WGPUTextureFormat_R32Uint && storage_format != WGPUTextureFormat_R32Sint))) {
+					if (decl == nullptr && (!_wgpu_format_supports_storage(storage_format, device_has_texture_formats_tier1) || (uniform.writable == 0 && storage_format != WGPUTextureFormat_R32Float && storage_format != WGPUTextureFormat_R32Uint && storage_format != WGPUTextureFormat_R32Sint))) {
 						shader->dead_storage_bindings.insert(((uint64_t)set_index << 32) | entry.binding);
 						entry.storageTexture.access = WGPUStorageTextureAccess_ReadOnly;
 						entry.storageTexture.format = WGPUTextureFormat_R32Float;
