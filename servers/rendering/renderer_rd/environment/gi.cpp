@@ -2618,6 +2618,15 @@ void GI::VoxelGIInstance::update(bool p_update_light_instances, const Vector<RID
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 
+	// Dynamic-object relighting writes rgba16f storage images; a device
+	// without read-write storage beyond r32 (WebGPU below
+	// texture-formats-tier2) has empty shader variants for it, and running
+	// the path anyway requests them every frame. Degrade to the same visual
+	// result - dynamic objects unlit by this probe - without the per-frame
+	// churn.
+	static const PagedArray<RenderGeometryInstance *> no_dynamic_objects;
+	const PagedArray<RenderGeometryInstance *> &dynamic_objects = RD::get_singleton()->has_feature(RD::SUPPORTS_READ_WRITE_STORAGE_IMAGES_ANY_FORMAT) ? p_dynamic_objects : no_dynamic_objects;
+
 	uint32_t data_version = gi->voxel_gi_get_data_version(probe);
 
 	// (RE)CREATE IF NEEDED
@@ -2969,7 +2978,7 @@ void GI::VoxelGIInstance::update(bool p_update_light_instances, const Vector<RID
 
 	uint32_t light_count = 0;
 
-	if (p_update_light_instances || p_dynamic_objects.size() > 0) {
+	if (p_update_light_instances || dynamic_objects.size() > 0) {
 		light_count = MIN(gi->voxel_gi_max_lights, (uint32_t)p_light_instances.size());
 
 		{
@@ -3066,7 +3075,7 @@ void GI::VoxelGIInstance::update(bool p_update_light_instances, const Vector<RID
 		}
 	}
 
-	if (has_dynamic_object_data || p_update_light_instances || p_dynamic_objects.size()) {
+	if (has_dynamic_object_data || p_update_light_instances || dynamic_objects.size()) {
 		// PROCESS MIPMAPS
 		if (mipmaps.size()) {
 			//can update mipmaps
@@ -3176,7 +3185,7 @@ void GI::VoxelGIInstance::update(bool p_update_light_instances, const Vector<RID
 
 	has_dynamic_object_data = false; //clear until dynamic object data is used again
 
-	if (p_dynamic_objects.size() && dynamic_maps.size()) {
+	if (dynamic_objects.size() && dynamic_maps.size()) {
 		Vector3i octree_size = gi->voxel_gi_get_octree_size(probe);
 		int multiplier = dynamic_maps[0].size / MAX(MAX(octree_size.x, octree_size.y), octree_size.z);
 
@@ -3200,8 +3209,8 @@ void GI::VoxelGIInstance::update(bool p_update_light_instances, const Vector<RID
 		}
 
 		//this could probably be better parallelized in compute..
-		for (int i = 0; i < (int)p_dynamic_objects.size(); i++) {
-			RenderGeometryInstance *instance = p_dynamic_objects[i];
+		for (int i = 0; i < (int)dynamic_objects.size(); i++) {
+			RenderGeometryInstance *instance = dynamic_objects[i];
 
 			//transform aabb to voxel_gi
 			AABB aabb = (to_probe_xform * instance->get_transform()).xform(instance->get_aabb());
