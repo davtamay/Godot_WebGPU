@@ -160,6 +160,13 @@ const GodotWebGPU = {
 		return (typeof GPUTextureUsage !== 'undefined' && 'TRANSIENT_ATTACHMENT' in GPUTextureUsage) ? 1 : 0;
 	},
 
+	godot_js_webgpu_use_tiers__sig: 'i',
+	godot_js_webgpu_use_tiers: function () {
+		// ?notiers ignores texture-formats-tier1/2 for on-device A/B of the
+		// tier-gated paths (compute octmap, dynamic VoxelGI, compute bokeh).
+		return window.location.search.indexOf('notiers') >= 0 ? 0 : 1;
+	},
+
 	godot_js_webgpu_use_native_swizzle__sig: 'i',
 	godot_js_webgpu_use_native_swizzle: function () {
 		// ?noswizzle forces the CPU texel-expansion fallback for on-device
