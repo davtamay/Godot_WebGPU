@@ -242,6 +242,10 @@ public:
 	/* render buffers */
 	virtual RD::DataFormat _render_buffers_get_preferred_color_format();
 	virtual bool _render_buffers_can_be_storage();
+	// Whether this renderer resolves its MSAA buffers inside the render pass
+	// (resolve attachments) rather than with copy-class resolves afterwards;
+	// only then can the MSAA scratch be a transient tile-memory attachment.
+	virtual bool _render_buffers_msaa_in_pass_resolve() const { return false; }
 	virtual Ref<RenderSceneBuffers> render_buffers_create() override;
 	virtual void gi_set_use_half_resolution(bool p_enable) override;
 

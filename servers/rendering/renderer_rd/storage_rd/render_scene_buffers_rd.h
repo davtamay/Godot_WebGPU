@@ -68,6 +68,7 @@ class RenderSceneBuffersRD : public RenderSceneBuffers {
 
 private:
 	bool can_be_storage = true;
+	bool msaa_in_pass_resolve = false;
 	bool force_hdr = false;
 	uint32_t max_cluster_elements = 512;
 	RD::DataFormat preferred_data_format = RD::DATA_FORMAT_MAX;
@@ -187,6 +188,7 @@ public:
 
 	// info from our renderer
 	void set_can_be_storage(const bool p_can_be_storage) { can_be_storage = p_can_be_storage; }
+	void set_msaa_in_pass_resolve(const bool p_in_pass) { msaa_in_pass_resolve = p_in_pass; }
 	bool get_can_be_storage() const { return can_be_storage; }
 	void set_max_cluster_elements(const uint32_t p_max_elements) { max_cluster_elements = p_max_elements; }
 	uint32_t get_max_cluster_elements() { return max_cluster_elements; }
