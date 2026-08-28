@@ -185,8 +185,16 @@ void RenderSceneBuffersRD::configure(const RenderSceneBuffersConfiguration *p_co
 	const bool resolve_target = msaa_3d != RSE::VIEWPORT_MSAA_DISABLED;
 	create_texture(RB_SCOPE_BUFFERS, RB_TEX_COLOR, get_base_data_format(), get_color_usage_bits(resolve_target, false, can_be_storage));
 
-	// TODO: Detect when it is safe to use RD::TEXTURE_USAGE_TRANSIENT_BIT for RB_TEX_DEPTH, RB_TEX_COLOR_MSAA and/or RB_TEX_DEPTH_MSAA.
-	// (it means we cannot sample from it, we cannot copy from/to it) to save VRAM (and maybe performance too).
+	// MSAA scratch is transient when the renderer resolves inside the render
+	// pass (resolve attachments - the mobile renderer): the contents never
+	// leave the pass, so the buffers cannot be sampled or copied and drivers
+	// may keep them in tile memory without backing VRAM. Renderers that
+	// resolve with copy-class operations afterwards (clustered's
+	// texture_resolve_multisample reads the MSAA source in a later pass)
+	// keep the full usage. Depth additionally requires the in-pass depth
+	// resolve feature; without it the resolved depth comes from elsewhere
+	// and the MSAA depth still never escapes, but stay conservative.
+	const bool transient_msaa = msaa_in_pass_resolve;
 
 	// Create our depth buffer.
 	create_texture(RB_SCOPE_BUFFERS, RB_TEX_DEPTH, get_depth_format(resolve_target, false, can_be_storage), get_depth_usage_bits(resolve_target, false, can_be_storage));
@@ -196,8 +204,16 @@ void RenderSceneBuffersRD::configure(const RenderSceneBuffersConfiguration *p_co
 		texture_samples = RD::TEXTURE_SAMPLES_1;
 	} else {
 		texture_samples = msaa_to_samples(msaa_3d);
-		create_texture(RB_SCOPE_BUFFERS, RB_TEX_COLOR_MSAA, get_base_data_format(), get_color_usage_bits(false, true, can_be_storage), texture_samples, Size2i(), 0, 1, true, true);
-		create_texture(RB_SCOPE_BUFFERS, RB_TEX_DEPTH_MSAA, get_depth_format(false, true, can_be_storage), get_depth_usage_bits(false, true, can_be_storage), texture_samples, Size2i(), 0, 1, true, true);
+		uint32_t color_msaa_usage = get_color_usage_bits(false, true, can_be_storage);
+		uint32_t depth_msaa_usage = get_depth_usage_bits(false, true, can_be_storage);
+		if (transient_msaa) {
+			color_msaa_usage = RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_INPUT_ATTACHMENT_BIT | RD::TEXTURE_USAGE_TRANSIENT_BIT;
+			if (RD::get_singleton()->has_feature(RD::SUPPORTS_FRAMEBUFFER_DEPTH_RESOLVE)) {
+				depth_msaa_usage = RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | RD::TEXTURE_USAGE_INPUT_ATTACHMENT_BIT | RD::TEXTURE_USAGE_TRANSIENT_BIT;
+			}
+		}
+		create_texture(RB_SCOPE_BUFFERS, RB_TEX_COLOR_MSAA, get_base_data_format(), color_msaa_usage, texture_samples, Size2i(), 0, 1, true, true);
+		create_texture(RB_SCOPE_BUFFERS, RB_TEX_DEPTH_MSAA, get_depth_format(false, true, can_be_storage), depth_msaa_usage, texture_samples, Size2i(), 0, 1, true, true);
 	}
 
 	// VRS (note, our vrs object will only be set if VRS is supported)
