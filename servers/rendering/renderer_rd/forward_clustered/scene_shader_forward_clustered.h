@@ -62,7 +62,8 @@ public:
 		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_MULTIVIEW = 6;
 		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_MATERIAL = 7;
 		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_SDF = 8;
-		constexpr static uint16_t SHADER_VERSION_COLOR_PASS = 9;
+		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_SDF_NO_ATOMICS = 9;
+		constexpr static uint16_t SHADER_VERSION_COLOR_PASS = 10;
 	};
 
 	enum ShaderColorPassFlags {
@@ -350,6 +351,7 @@ public:
 	ShaderCompiler compiler;
 	bool emulate_point_size = false;
 	bool depth_prepass_enabled = false;
+	bool supports_image_atomics = true;
 
 	RID default_shader;
 	RID default_material;
