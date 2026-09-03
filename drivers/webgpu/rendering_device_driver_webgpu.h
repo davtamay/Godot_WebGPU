@@ -171,7 +171,12 @@ private:
 	// One buffered draw-side command inside a render pass. Commands are
 	// captured instead of encoded so an unchanged pass can replay a cached
 	// GPURenderBundle with a single call (see command_end_render_pass);
-	// plain data only - records are hashed by their raw bytes.
+	// plain data only - records are hashed and compared by their raw bytes.
+	// Draw PARAMETERS deliberately live outside the record (render_draw_params,
+	// referenced by index): the record stream then describes the pass's
+	// STRUCTURE only, so a pass whose counts change every frame (particles,
+	// batched canvas items) still matches its cached bundle, and the bundle
+	// reads the fresh parameters through an indirect-args buffer.
 	struct RenderCommandRecord {
 		enum Type : uint32_t {
 			TYPE_SET_PIPELINE,
@@ -205,23 +210,24 @@ private:
 				uint64_t offset;
 			} set_index_buffer;
 			struct {
-				uint32_t vertex_count;
-				uint32_t instance_count;
-				uint32_t first_vertex;
-				uint32_t first_instance;
+				uint32_t param_index; // Into render_draw_params.
 			} draw;
 			struct {
-				uint32_t index_count;
-				uint32_t instance_count;
-				uint32_t first_index;
-				int32_t vertex_offset;
-				uint32_t first_instance;
+				uint32_t param_index; // Into render_draw_params.
 			} draw_indexed;
 			struct {
 				WGPUBuffer buffer;
 				uint64_t offset;
 			} draw_indirect;
 		};
+	};
+
+	// Draw parameters in WebGPU's indirect-args layouts: for TYPE_DRAW_INDEXED
+	// {indexCount, instanceCount, firstIndex, baseVertex (int32 bit-cast),
+	// firstInstance}; for TYPE_DRAW {vertexCount, instanceCount, firstVertex,
+	// firstInstance, 0}. One 20-byte slot per draw either way.
+	struct DrawParams {
+		uint32_t args[5] = {};
 	};
 
 	struct RenderPassInfo;
@@ -239,7 +245,7 @@ private:
 		// for the rest of the pass - bundles cannot carry those commands.
 		bool render_bundleable = false;
 		LocalVector<RenderCommandRecord> render_records;
-		uint64_t render_records_hash = 0;
+		LocalVector<DrawParams> render_draw_params;
 		RenderPassInfo *render_pass_info = nullptr;
 		FramebufferInfo *render_framebuffer = nullptr;
 		// Bind groups are deferred to draw/dispatch time: the group that
@@ -294,6 +300,22 @@ private:
 		uint64_t hash = 0;
 		uint64_t epoch = 0;
 		WGPURenderBundle bundle = nullptr;
+		// The record stream that built the bundle: an exact (vectorized)
+		// memcmp against the frame's capture replaces hashing entirely on the
+		// steady state (see command_end_render_pass's fast path).
+		LocalVector<RenderCommandRecord> records;
+		// The draw parameters last written to params_buffer, in draw order.
+		// On a cache hit with different parameters, the delta is a single
+		// small queue write - not a bundle rebuild.
+		LocalVector<DrawParams> params;
+		WGPUBuffer params_buffer = nullptr;
+		// Bundle recorded literal draws (indirect unavailable for it):
+		// parameters cannot be updated, a mismatch falls back to direct replay.
+		bool params_baked = false;
+		// Guards the same entry executing twice in one frame with different
+		// parameters: queue writes land before the whole submit, so the second
+		// execution must not retarget the first's arguments.
+		uint64_t last_param_frame = 0;
 	};
 
 	struct FramebufferInfo {
@@ -301,13 +323,16 @@ private:
 		uint32_t width = 0;
 		uint32_t height = 0;
 		// Frame-sliced dynamic buffers give a static scene a small cycle of
-		// distinct command streams; four entries cover the cycle.
-		BundleCacheEntry bundle_cache[4];
+		// distinct command streams, and scenes alternate a few stream shapes
+		// on top of it; eight entries cover the product (four thrashed on the
+		// stress scene: ~0.5 rebuilds per frame from cycles longer than the
+		// cache).
+		BundleCacheEntry bundle_cache[8];
 		uint32_t bundle_cache_evict = 0;
 		// Bundles are only built for streams seen twice: a pass whose stream
 		// changes every frame (sorted transparents under a moving camera)
 		// must not pay bundle creation for replays that never happen.
-		uint64_t recent_hashes[4] = {};
+		uint64_t recent_hashes[8] = {};
 		uint32_t recent_hash_next = 0;
 	};
 
@@ -584,12 +609,16 @@ public:
 	// Render-bundle caching (see command_end_render_pass).
 	void _record_render_command(CommandBufferInfo *p_cb_info, const RenderCommandRecord &p_record);
 	void _render_pass_flush_records(CommandBufferInfo *p_cb_info);
-	void _replay_render_records(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass_encoder, WGPURenderBundleEncoder p_bundle_encoder);
+	void _replay_render_records(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass_encoder, WGPURenderBundleEncoder p_bundle_encoder, WGPUBuffer p_indirect_params = nullptr);
 	// Bumped whenever any resource class a bundle can reference is freed;
 	// cache entries recorded under an older epoch are treated as misses.
 	uint64_t resource_epoch = 0;
 	bool use_render_bundles = true;
 	bool use_pipeline_warm = true;
+	bool use_bundle_fastpath = true;
+	bool use_indirect_params = true;
+	bool device_has_indirect_first_instance = false;
+	uint64_t present_count = 0;
 	virtual void pipeline_free(PipelineID p_pipeline) override;
 	virtual void command_bind_push_constants(CommandBufferID p_cmd_buffer, ShaderID p_shader, uint32_t p_first_index, VectorView<uint32_t> p_data) override;
 	// The browser manages pipeline caching; declining makes the engine skip it.
