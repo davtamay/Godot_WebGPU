@@ -211,6 +211,14 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('nodiff') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_perf_counters__sig: 'i',
+	godot_js_webgpu_perf_counters: function () {
+		// ?perfcounters prints a parseable per-window driver counter line
+		// (writeBuffer calls/bytes, bundle hits/builds, bind group and
+		// pipeline creations) - the measurement surface for every A/B.
+		return window.location.search.indexOf('perfcounters') >= 0 ? 1 : 0;
+	},
+
 	/**
 	 * Creates the hidden probe canvas (see drivers/webgpu/webgpu_probe.cpp).
 	 * A canvas is permanently locked to its first context type, so the probe
