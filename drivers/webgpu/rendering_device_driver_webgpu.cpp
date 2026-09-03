@@ -52,6 +52,12 @@ int godot_js_webgpu_use_bc();
 // 0 when the page URL carries ?nowarm (benchmark A/B switch for the
 // background pipeline warm).
 int godot_js_webgpu_use_warm();
+// 0 when the page URL carries ?nofastpath (benchmark A/B switch for the
+// identity bundle fast path).
+int godot_js_webgpu_use_fastpath();
+// 0 when the page URL carries ?noindirect (benchmark A/B switch for
+// indirect draw parameters in cached bundles).
+int godot_js_webgpu_use_indirect();
 // 0 when the page URL carries ?notiers (benchmark A/B switch for the
 // texture-format-tier paths).
 int godot_js_webgpu_use_tiers();
@@ -79,6 +85,14 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	if (!use_pipeline_warm) {
 		print_line("WebGPU: background pipeline warming disabled (?nowarm).");
 	}
+	use_bundle_fastpath = godot_js_webgpu_use_fastpath() != 0;
+	if (!use_bundle_fastpath) {
+		print_line("WebGPU: identity bundle fast path disabled (?nofastpath).");
+	}
+	use_indirect_params = godot_js_webgpu_use_indirect() != 0;
+	if (!use_indirect_params) {
+		print_line("WebGPU: indirect bundle draw parameters disabled (?noindirect).");
+	}
 	device_has_transient_attachments = godot_js_webgpu_has_transient_attachments() != 0;
 	const bool use_tiers = godot_js_webgpu_use_tiers() != 0;
 	device_has_texture_formats_tier1 = use_tiers && wgpuDeviceHasFeature(device, WGPUFeatureName_TextureFormatsTier1);
@@ -96,6 +110,7 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	device_has_texture_swizzle = wgpuDeviceHasFeature(device, WGPUFeatureName_TextureComponentSwizzle) && godot_js_webgpu_use_native_swizzle() != 0;
 	print_verbose(device_has_texture_swizzle ? "WebGPU: texture swizzles served by native view swizzles." : "WebGPU: texture swizzles emulated by texel expansion at upload.");
 	device_has_texture_compression_bc = wgpuDeviceHasFeature(device, WGPUFeatureName_TextureCompressionBC) && godot_js_webgpu_use_bc() != 0;
+	device_has_indirect_first_instance = wgpuDeviceHasFeature(device, WGPUFeatureName_IndirectFirstInstance);
 
 	frame_count = MAX(1u, p_frame_count);
 
@@ -178,6 +193,7 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 	// browser for background compilation (runs on the main thread, where
 	// the spontaneous completion callbacks also fire).
 	_pump_pipeline_warm_queue();
+	present_count++;
 	return OK;
 }
 
@@ -498,7 +514,7 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 	// its single blit draw is not worth the bundle bookkeeping.
 	cb_info->render_bundleable = use_render_bundles && !pass->from_swap_chain;
 	cb_info->render_records.clear();
-	cb_info->render_records_hash = 0xcbf29ce484222325ULL; // FNV-1a basis.
+	cb_info->render_draw_params.clear();
 	cb_info->render_pass_info = pass;
 	cb_info->render_framebuffer = framebuffer;
 }
@@ -512,8 +528,9 @@ static _FORCE_INLINE_ uint64_t _fnv1a64_append(uint64_t p_hash, const void *p_da
 }
 
 void RenderingDeviceDriverWebGPU::_record_render_command(CommandBufferInfo *p_cb_info, const RenderCommandRecord &p_record) {
+	// Hashing is deferred to command_end_render_pass: the steady state
+	// resolves through the identity fast path there and never hashes at all.
 	p_cb_info->render_records.push_back(p_record);
-	p_cb_info->render_records_hash = _fnv1a64_append(p_cb_info->render_records_hash, &p_record, sizeof(RenderCommandRecord));
 }
 
 void RenderingDeviceDriverWebGPU::_render_pass_flush_records(CommandBufferInfo *p_cb_info) {
@@ -522,10 +539,16 @@ void RenderingDeviceDriverWebGPU::_render_pass_flush_records(CommandBufferInfo *
 	// encoded directly and bundling ends for this pass.
 	_replay_render_records(p_cb_info, p_cb_info->render_pass_encoder, nullptr);
 	p_cb_info->render_records.clear();
+	p_cb_info->render_draw_params.clear();
 	p_cb_info->render_bundleable = false;
 }
 
-void RenderingDeviceDriverWebGPU::_replay_render_records(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass_encoder, WGPURenderBundleEncoder p_bundle_encoder) {
+void RenderingDeviceDriverWebGPU::_replay_render_records(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass_encoder, WGPURenderBundleEncoder p_bundle_encoder, WGPUBuffer p_indirect_params) {
+	// With p_indirect_params (bundle recording only), draws read their
+	// parameters from that buffer at 20-byte slots in draw order instead of
+	// baking them into the bundle - a later parameter change is then a queue
+	// write, not a bundle rebuild.
+	uint32_t draw_slot = 0;
 	for (const RenderCommandRecord &rec : p_cb_info->render_records) {
 		switch (rec.type) {
 			case RenderCommandRecord::TYPE_SET_PIPELINE: {
@@ -558,18 +581,30 @@ void RenderingDeviceDriverWebGPU::_replay_render_records(const CommandBufferInfo
 				}
 			} break;
 			case RenderCommandRecord::TYPE_DRAW: {
+				const DrawParams &params = p_cb_info->render_draw_params[rec.draw.param_index];
 				if (p_bundle_encoder != nullptr) {
-					wgpuRenderBundleEncoderDraw(p_bundle_encoder, rec.draw.vertex_count, rec.draw.instance_count, rec.draw.first_vertex, rec.draw.first_instance);
+					if (p_indirect_params != nullptr) {
+						wgpuRenderBundleEncoderDrawIndirect(p_bundle_encoder, p_indirect_params, (uint64_t)draw_slot * sizeof(DrawParams));
+					} else {
+						wgpuRenderBundleEncoderDraw(p_bundle_encoder, params.args[0], params.args[1], params.args[2], params.args[3]);
+					}
 				} else {
-					wgpuRenderPassEncoderDraw(p_pass_encoder, rec.draw.vertex_count, rec.draw.instance_count, rec.draw.first_vertex, rec.draw.first_instance);
+					wgpuRenderPassEncoderDraw(p_pass_encoder, params.args[0], params.args[1], params.args[2], params.args[3]);
 				}
+				draw_slot++;
 			} break;
 			case RenderCommandRecord::TYPE_DRAW_INDEXED: {
+				const DrawParams &params = p_cb_info->render_draw_params[rec.draw_indexed.param_index];
 				if (p_bundle_encoder != nullptr) {
-					wgpuRenderBundleEncoderDrawIndexed(p_bundle_encoder, rec.draw_indexed.index_count, rec.draw_indexed.instance_count, rec.draw_indexed.first_index, rec.draw_indexed.vertex_offset, rec.draw_indexed.first_instance);
+					if (p_indirect_params != nullptr) {
+						wgpuRenderBundleEncoderDrawIndexedIndirect(p_bundle_encoder, p_indirect_params, (uint64_t)draw_slot * sizeof(DrawParams));
+					} else {
+						wgpuRenderBundleEncoderDrawIndexed(p_bundle_encoder, params.args[0], params.args[1], params.args[2], (int32_t)params.args[3], params.args[4]);
+					}
 				} else {
-					wgpuRenderPassEncoderDrawIndexed(p_pass_encoder, rec.draw_indexed.index_count, rec.draw_indexed.instance_count, rec.draw_indexed.first_index, rec.draw_indexed.vertex_offset, rec.draw_indexed.first_instance);
+					wgpuRenderPassEncoderDrawIndexed(p_pass_encoder, params.args[0], params.args[1], params.args[2], (int32_t)params.args[3], params.args[4]);
 				}
+				draw_slot++;
 			} break;
 			case RenderCommandRecord::TYPE_DRAW_INDIRECT: {
 				if (p_bundle_encoder != nullptr) {
@@ -594,71 +629,153 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
 	if (cb_info->render_bundleable && cb_info->render_records.size() > 0) {
 		FramebufferInfo *framebuffer = cb_info->render_framebuffer;
-		WGPURenderBundle bundle = nullptr;
-		for (const BundleCacheEntry &entry : framebuffer->bundle_cache) {
-			if (entry.bundle != nullptr && entry.hash == cb_info->render_records_hash && entry.epoch == resource_epoch) {
-				bundle = entry.bundle;
-				break;
+		const uint64_t record_bytes = (uint64_t)cb_info->render_records.size() * sizeof(RenderCommandRecord);
+		const uint64_t param_bytes = (uint64_t)cb_info->render_draw_params.size() * sizeof(DrawParams);
+		BundleCacheEntry *hit = nullptr;
+		uint64_t stream_hash = 0;
+		if (use_bundle_fastpath) {
+			// Identity fast path: an exact memcmp against each cached entry's
+			// record stream. Vectorized compares beat the byte-serial FNV this
+			// replaces, mismatches exit at the first differing byte (usually a
+			// dynamic offset in the first bind-group record), and a match
+			// needs no hashing at all.
+			for (BundleCacheEntry &entry : framebuffer->bundle_cache) {
+				if (entry.bundle != nullptr && entry.epoch == resource_epoch &&
+						entry.records.size() == cb_info->render_records.size() &&
+						memcmp(entry.records.ptr(), cb_info->render_records.ptr(), record_bytes) == 0) {
+					hit = &entry;
+					break;
+				}
 			}
 		}
-		bool build_bundle = false;
-		if (bundle == nullptr) {
+		if (hit == nullptr) {
+			stream_hash = _fnv1a64_append(0xcbf29ce484222325ULL, cb_info->render_records.ptr(), record_bytes);
+			for (BundleCacheEntry &entry : framebuffer->bundle_cache) {
+				if (entry.bundle != nullptr && entry.hash == stream_hash && entry.epoch == resource_epoch) {
+					hit = &entry;
+					break;
+				}
+			}
+		}
+		WGPURenderBundle bundle = nullptr;
+		if (hit != nullptr) {
+			// Records match; reconcile the draw parameters (excluded from both
+			// the identity compare and the hash by construction).
+			bool usable = hit->params.size() == cb_info->render_draw_params.size();
+			if (usable && param_bytes > 0 && memcmp(hit->params.ptr(), cb_info->render_draw_params.ptr(), param_bytes) != 0) {
+				if (hit->params_baked || hit->last_param_frame == present_count) {
+					// Literal-draw bundle, or this entry already executed this
+					// frame with other parameters (queue writes land before the
+					// whole submit): the capture must encode directly.
+					usable = false;
+				} else {
+					wgpuQueueWriteBuffer(queue, hit->params_buffer, 0, cb_info->render_draw_params.ptr(), param_bytes);
+					memcpy(hit->params.ptr(), cb_info->render_draw_params.ptr(), param_bytes);
+				}
+			}
+			if (usable) {
+				bundle = hit->bundle;
+				hit->last_param_frame = present_count;
+			}
+		} else {
 			// Build a bundle only for a stream seen before: a first sighting
 			// encodes directly and just notes the hash, so passes that never
-			// repeat (per-frame transparent sort order, one-off passes) cost
-			// nothing beyond the capture itself.
+			// repeat (one-off passes, structure churn) cost nothing beyond
+			// the capture itself.
+			bool build_bundle = false;
 			for (const uint64_t recent : framebuffer->recent_hashes) {
-				if (recent == cb_info->render_records_hash) {
+				if (recent == stream_hash) {
 					build_bundle = true;
 					break;
 				}
 			}
 			if (!build_bundle) {
-				framebuffer->recent_hashes[framebuffer->recent_hash_next] = cb_info->render_records_hash;
+				framebuffer->recent_hashes[framebuffer->recent_hash_next] = stream_hash;
 				framebuffer->recent_hash_next = (framebuffer->recent_hash_next + 1) % (sizeof(framebuffer->recent_hashes) / sizeof(uint64_t));
 			}
-		}
-		if (build_bundle) {
-			// Second sighting: record it into a bundle so subsequent
-			// identical frames replay it with a single call.
-			WGPUTextureFormat color_formats[8];
-			uint32_t color_format_count = 0;
-			WGPURenderBundleEncoderDescriptor bundle_desc = WGPU_RENDER_BUNDLE_ENCODER_DESCRIPTOR_INIT;
-			for (const RenderPassAttachment &attachment : cb_info->render_pass_info->attachments) {
-				if (attachment.is_resolve_target) {
-					continue;
+			if (build_bundle) {
+				// Second sighting: record it into a bundle so subsequent
+				// structurally identical frames replay it with a single call.
+				// Draws go through an indirect-args buffer where legal, so
+				// parameter-only changes keep hitting this entry.
+				bool indirect_ok = use_indirect_params && param_bytes > 0;
+				if (indirect_ok && !device_has_indirect_first_instance) {
+					for (const RenderCommandRecord &rec : cb_info->render_records) {
+						if ((rec.type == RenderCommandRecord::TYPE_DRAW && cb_info->render_draw_params[rec.draw.param_index].args[3] != 0) ||
+								(rec.type == RenderCommandRecord::TYPE_DRAW_INDEXED && cb_info->render_draw_params[rec.draw_indexed.param_index].args[4] != 0)) {
+							indirect_ok = false;
+							break;
+						}
+					}
 				}
-				bundle_desc.sampleCount = attachment.texture_samples;
-				if (attachment.is_depth_stencil) {
-					bundle_desc.depthStencilFormat = attachment.format;
-				} else if (color_format_count < 8) {
-					color_formats[color_format_count++] = attachment.format;
+				WGPUBuffer params_buffer = nullptr;
+				if (indirect_ok) {
+					WGPUBufferDescriptor params_desc = WGPU_BUFFER_DESCRIPTOR_INIT;
+					params_desc.usage = WGPUBufferUsage_Indirect | WGPUBufferUsage_CopyDst;
+					params_desc.size = param_bytes;
+					params_buffer = wgpuDeviceCreateBuffer(device, &params_desc);
+					if (params_buffer != nullptr) {
+						wgpuQueueWriteBuffer(queue, params_buffer, 0, cb_info->render_draw_params.ptr(), param_bytes);
+					} else {
+						indirect_ok = false;
+					}
 				}
-			}
-			bundle_desc.colorFormatCount = color_format_count;
-			bundle_desc.colorFormats = color_formats;
-			WGPURenderBundleEncoder bundle_encoder = wgpuDeviceCreateRenderBundleEncoder(device, &bundle_desc);
-			if (bundle_encoder != nullptr) {
-				_replay_render_records(cb_info, nullptr, bundle_encoder);
-				bundle = wgpuRenderBundleEncoderFinish(bundle_encoder, nullptr);
-				wgpuRenderBundleEncoderRelease(bundle_encoder);
-			}
-			if (bundle != nullptr) {
-				BundleCacheEntry &evict = framebuffer->bundle_cache[framebuffer->bundle_cache_evict];
-				framebuffer->bundle_cache_evict = (framebuffer->bundle_cache_evict + 1) % (sizeof(framebuffer->bundle_cache) / sizeof(BundleCacheEntry));
-				if (evict.bundle != nullptr) {
-					wgpuRenderBundleRelease(evict.bundle);
+				WGPUTextureFormat color_formats[8];
+				uint32_t color_format_count = 0;
+				WGPURenderBundleEncoderDescriptor bundle_desc = WGPU_RENDER_BUNDLE_ENCODER_DESCRIPTOR_INIT;
+				for (const RenderPassAttachment &attachment : cb_info->render_pass_info->attachments) {
+					if (attachment.is_resolve_target) {
+						continue;
+					}
+					bundle_desc.sampleCount = attachment.texture_samples;
+					if (attachment.is_depth_stencil) {
+						bundle_desc.depthStencilFormat = attachment.format;
+					} else if (color_format_count < 8) {
+						color_formats[color_format_count++] = attachment.format;
+					}
 				}
-				evict.hash = cb_info->render_records_hash;
-				evict.epoch = resource_epoch;
-				evict.bundle = bundle;
+				bundle_desc.colorFormatCount = color_format_count;
+				bundle_desc.colorFormats = color_formats;
+				WGPURenderBundleEncoder bundle_encoder = wgpuDeviceCreateRenderBundleEncoder(device, &bundle_desc);
+				if (bundle_encoder != nullptr) {
+					_replay_render_records(cb_info, nullptr, bundle_encoder, indirect_ok ? params_buffer : nullptr);
+					bundle = wgpuRenderBundleEncoderFinish(bundle_encoder, nullptr);
+					wgpuRenderBundleEncoderRelease(bundle_encoder);
+				}
+				if (bundle != nullptr) {
+						BundleCacheEntry &evict = framebuffer->bundle_cache[framebuffer->bundle_cache_evict];
+					framebuffer->bundle_cache_evict = (framebuffer->bundle_cache_evict + 1) % (sizeof(framebuffer->bundle_cache) / sizeof(BundleCacheEntry));
+					if (evict.bundle != nullptr) {
+						wgpuRenderBundleRelease(evict.bundle);
+					}
+					if (evict.params_buffer != nullptr) {
+						wgpuBufferRelease(evict.params_buffer);
+					}
+					evict.hash = stream_hash;
+					evict.epoch = resource_epoch;
+					evict.bundle = bundle;
+					evict.params_buffer = indirect_ok ? params_buffer : nullptr;
+					evict.params_baked = !indirect_ok;
+					evict.last_param_frame = present_count;
+					evict.records.clear();
+					evict.records.resize(cb_info->render_records.size());
+					memcpy(evict.records.ptr(), cb_info->render_records.ptr(), record_bytes);
+					evict.params.clear();
+					evict.params.resize(cb_info->render_draw_params.size());
+					if (param_bytes > 0) {
+						memcpy(evict.params.ptr(), cb_info->render_draw_params.ptr(), param_bytes);
+					}
+				} else if (params_buffer != nullptr) {
+					wgpuBufferRelease(params_buffer);
+				}
 			}
 		}
 		if (bundle != nullptr) {
 			wgpuRenderPassEncoderExecuteBundles(cb_info->render_pass_encoder, 1, &bundle);
 		} else {
-			// First sighting of this stream (or bundle creation failed):
-			// encode the capture directly - the cost of the old path.
+			// First sighting of this stream (or bundle creation failed, or an
+			// unusable parameter mismatch): encode the capture directly - the
+			// cost of the old path.
 			_replay_render_records(cb_info, cb_info->render_pass_encoder, nullptr);
 		}
 	}
@@ -667,6 +784,7 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 	cb_info->render_pass_encoder = nullptr;
 	cb_info->render_bundleable = false;
 	cb_info->render_records.clear();
+	cb_info->render_draw_params.clear();
 	cb_info->render_pass_info = nullptr;
 	cb_info->render_framebuffer = nullptr;
 }
@@ -3400,6 +3518,9 @@ void RenderingDeviceDriverWebGPU::framebuffer_free(FramebufferID p_framebuffer) 
 		if (entry.bundle != nullptr) {
 			wgpuRenderBundleRelease(entry.bundle);
 		}
+		if (entry.params_buffer != nullptr) {
+			wgpuBufferRelease(entry.params_buffer);
+		}
 	}
 	// Views are owned by their textures.
 	memdelete(framebuffer);
@@ -3800,10 +3921,13 @@ void RenderingDeviceDriverWebGPU::command_render_draw(CommandBufferID p_cmd_buff
 		RenderCommandRecord rec;
 		memset(&rec, 0, sizeof(rec));
 		rec.type = RenderCommandRecord::TYPE_DRAW;
-		rec.draw.vertex_count = p_vertex_count;
-		rec.draw.instance_count = p_instance_count;
-		rec.draw.first_vertex = p_base_vertex;
-		rec.draw.first_instance = p_first_instance;
+		rec.draw.param_index = cb_info->render_draw_params.size();
+		DrawParams params;
+		params.args[0] = p_vertex_count;
+		params.args[1] = p_instance_count;
+		params.args[2] = p_base_vertex;
+		params.args[3] = p_first_instance;
+		cb_info->render_draw_params.push_back(params);
 		_record_render_command(cb_info, rec);
 		return;
 	}
@@ -3818,11 +3942,14 @@ void RenderingDeviceDriverWebGPU::command_render_draw_indexed(CommandBufferID p_
 		RenderCommandRecord rec;
 		memset(&rec, 0, sizeof(rec));
 		rec.type = RenderCommandRecord::TYPE_DRAW_INDEXED;
-		rec.draw_indexed.index_count = p_index_count;
-		rec.draw_indexed.instance_count = p_instance_count;
-		rec.draw_indexed.first_index = p_first_index;
-		rec.draw_indexed.vertex_offset = p_vertex_offset;
-		rec.draw_indexed.first_instance = p_first_instance;
+		rec.draw_indexed.param_index = cb_info->render_draw_params.size();
+		DrawParams params;
+		params.args[0] = p_index_count;
+		params.args[1] = p_instance_count;
+		params.args[2] = p_first_index;
+		params.args[3] = (uint32_t)p_vertex_offset;
+		params.args[4] = p_first_instance;
+		cb_info->render_draw_params.push_back(params);
 		_record_render_command(cb_info, rec);
 		return;
 	}
