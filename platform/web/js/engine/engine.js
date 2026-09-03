@@ -206,6 +206,16 @@ const Engine = (function () {
 			if (adapter['features'] && adapter['features'].has('indirect-first-instance')) {
 				requiredFeatures.push('indirect-first-instance');
 			}
+			// The mobile compressed-texture families. With these, exports
+			// carrying ETC2/ASTC imports upload at a quarter of the memory
+			// and bandwidth of the RGBA fallback on phone and standalone
+			// headset GPUs - the devices where both are scarcest.
+			if (adapter['features'] && adapter['features'].has('texture-compression-etc2')) {
+				requiredFeatures.push('texture-compression-etc2');
+			}
+			if (adapter['features'] && adapter['features'].has('texture-compression-astc')) {
+				requiredFeatures.push('texture-compression-astc');
+			}
 			return adapter['requestDevice']({ 'requiredLimits': requiredLimits, 'requiredFeatures': requiredFeatures });
 		}).catch(function () {
 			return null;

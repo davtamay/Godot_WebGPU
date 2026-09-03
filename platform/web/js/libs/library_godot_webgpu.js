@@ -181,6 +181,13 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('nobc') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_use_etc__sig: 'i',
+	godot_js_webgpu_use_etc: function () {
+		// ?noetc reports the mobile compressed-texture families (ETC2/EAC
+		// and ASTC) unsupported for A/B against the CPU-decompress fallback.
+		return window.location.search.indexOf('noetc') >= 0 ? 0 : 1;
+	},
+
 	godot_js_webgpu_use_warm__sig: 'i',
 	godot_js_webgpu_use_warm: function () {
 		// ?nowarm disables background pipeline warming for A/B of the
