@@ -199,6 +199,13 @@ const Engine = (function () {
 			if (adapter['features'] && adapter['features'].has('texture-compression-bc')) {
 				requiredFeatures.push('texture-compression-bc');
 			}
+			// Nonzero firstInstance in indirect draws. The renderer's cached
+			// render bundles read draw parameters through indirect arguments;
+			// without this feature, draws carrying a first instance fall back
+			// to literal recording.
+			if (adapter['features'] && adapter['features'].has('indirect-first-instance')) {
+				requiredFeatures.push('indirect-first-instance');
+			}
 			return adapter['requestDevice']({ 'requiredLimits': requiredLimits, 'requiredFeatures': requiredFeatures });
 		}).catch(function () {
 			return null;
