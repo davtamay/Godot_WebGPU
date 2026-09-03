@@ -49,6 +49,9 @@ int godot_js_webgpu_use_native_swizzle();
 // 0 when the page URL carries ?nobc (benchmark A/B switch for
 // block-compressed texture support).
 int godot_js_webgpu_use_bc();
+// 0 when the page URL carries ?noetc (benchmark A/B switch for the mobile
+// compressed-texture families, ETC2/EAC and ASTC together).
+int godot_js_webgpu_use_etc();
 // 0 when the page URL carries ?nowarm (benchmark A/B switch for the
 // background pipeline warm).
 int godot_js_webgpu_use_warm();
@@ -68,7 +71,7 @@ int godot_js_webgpu_perf_counters();
 int godot_js_webgpu_use_tiers();
 }
 
-static uint32_t _data_format_block_bytes(RenderingDeviceCommons::DataFormat p_format);
+static uint32_t _data_format_block_info(RenderingDeviceCommons::DataFormat p_format, uint32_t &r_block_w, uint32_t &r_block_h);
 
 // WebGPU exposes a single, implicitly synchronized queue: queue family and
 // queue handles are opaque non-zero tokens, submission order is the only
@@ -123,6 +126,9 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	device_has_texture_swizzle = wgpuDeviceHasFeature(device, WGPUFeatureName_TextureComponentSwizzle) && godot_js_webgpu_use_native_swizzle() != 0;
 	print_verbose(device_has_texture_swizzle ? "WebGPU: texture swizzles served by native view swizzles." : "WebGPU: texture swizzles emulated by texel expansion at upload.");
 	device_has_texture_compression_bc = wgpuDeviceHasFeature(device, WGPUFeatureName_TextureCompressionBC) && godot_js_webgpu_use_bc() != 0;
+	const bool use_etc = godot_js_webgpu_use_etc() != 0;
+	device_has_texture_compression_etc2 = use_etc && wgpuDeviceHasFeature(device, WGPUFeatureName_TextureCompressionETC2);
+	device_has_texture_compression_astc = use_etc && wgpuDeviceHasFeature(device, WGPUFeatureName_TextureCompressionASTC);
 	device_has_indirect_first_instance = wgpuDeviceHasFeature(device, WGPUFeatureName_IndirectFirstInstance);
 
 	frame_count = MAX(1u, p_frame_count);
@@ -278,7 +284,8 @@ void RenderingDeviceDriverWebGPU::command_clear_color_texture(CommandBufferID p_
 	const TextureInfo *texture = (const TextureInfo *)p_texture.id;
 	ERR_FAIL_NULL(cb_info->encoder);
 	_end_compute_pass(cb_info);
-	if (_data_format_block_bytes(texture->format) != 0) {
+	uint32_t clear_block_w = 1, clear_block_h = 1;
+	if (_data_format_block_info(texture->format, clear_block_w, clear_block_h) != 0) {
 		// Block-compressed textures are sampled-only content; nothing clears
 		// them, and the texel zero-fill below cannot express block rows.
 		return;
@@ -1169,6 +1176,82 @@ static WGPUTextureFormat _data_format_to_wgpu(RenderingDeviceCommons::DataFormat
 			return WGPUTextureFormat_BC7RGBAUnorm;
 		case RenderingDeviceCommons::DATA_FORMAT_BC7_SRGB_BLOCK:
 			return WGPUTextureFormat_BC7RGBAUnormSrgb;
+		case RenderingDeviceCommons::DATA_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
+			return WGPUTextureFormat_ETC2RGB8Unorm;
+		case RenderingDeviceCommons::DATA_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
+			return WGPUTextureFormat_ETC2RGB8UnormSrgb;
+		case RenderingDeviceCommons::DATA_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
+			return WGPUTextureFormat_ETC2RGB8A1Unorm;
+		case RenderingDeviceCommons::DATA_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK:
+			return WGPUTextureFormat_ETC2RGB8A1UnormSrgb;
+		case RenderingDeviceCommons::DATA_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK:
+			return WGPUTextureFormat_ETC2RGBA8Unorm;
+		case RenderingDeviceCommons::DATA_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK:
+			return WGPUTextureFormat_ETC2RGBA8UnormSrgb;
+		case RenderingDeviceCommons::DATA_FORMAT_EAC_R11_UNORM_BLOCK:
+			return WGPUTextureFormat_EACR11Unorm;
+		case RenderingDeviceCommons::DATA_FORMAT_EAC_R11_SNORM_BLOCK:
+			return WGPUTextureFormat_EACR11Snorm;
+		case RenderingDeviceCommons::DATA_FORMAT_EAC_R11G11_UNORM_BLOCK:
+			return WGPUTextureFormat_EACRG11Unorm;
+		case RenderingDeviceCommons::DATA_FORMAT_EAC_R11G11_SNORM_BLOCK:
+			return WGPUTextureFormat_EACRG11Snorm;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_4x4_UNORM_BLOCK:
+			return WGPUTextureFormat_ASTC4x4Unorm;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_4x4_SRGB_BLOCK:
+			return WGPUTextureFormat_ASTC4x4UnormSrgb;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_5x4_UNORM_BLOCK:
+			return WGPUTextureFormat_ASTC5x4Unorm;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_5x4_SRGB_BLOCK:
+			return WGPUTextureFormat_ASTC5x4UnormSrgb;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_5x5_UNORM_BLOCK:
+			return WGPUTextureFormat_ASTC5x5Unorm;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_5x5_SRGB_BLOCK:
+			return WGPUTextureFormat_ASTC5x5UnormSrgb;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_6x5_UNORM_BLOCK:
+			return WGPUTextureFormat_ASTC6x5Unorm;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_6x5_SRGB_BLOCK:
+			return WGPUTextureFormat_ASTC6x5UnormSrgb;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_6x6_UNORM_BLOCK:
+			return WGPUTextureFormat_ASTC6x6Unorm;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_6x6_SRGB_BLOCK:
+			return WGPUTextureFormat_ASTC6x6UnormSrgb;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_8x5_UNORM_BLOCK:
+			return WGPUTextureFormat_ASTC8x5Unorm;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_8x5_SRGB_BLOCK:
+			return WGPUTextureFormat_ASTC8x5UnormSrgb;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_8x6_UNORM_BLOCK:
+			return WGPUTextureFormat_ASTC8x6Unorm;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_8x6_SRGB_BLOCK:
+			return WGPUTextureFormat_ASTC8x6UnormSrgb;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_8x8_UNORM_BLOCK:
+			return WGPUTextureFormat_ASTC8x8Unorm;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_8x8_SRGB_BLOCK:
+			return WGPUTextureFormat_ASTC8x8UnormSrgb;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_10x5_UNORM_BLOCK:
+			return WGPUTextureFormat_ASTC10x5Unorm;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_10x5_SRGB_BLOCK:
+			return WGPUTextureFormat_ASTC10x5UnormSrgb;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_10x6_UNORM_BLOCK:
+			return WGPUTextureFormat_ASTC10x6Unorm;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_10x6_SRGB_BLOCK:
+			return WGPUTextureFormat_ASTC10x6UnormSrgb;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_10x8_UNORM_BLOCK:
+			return WGPUTextureFormat_ASTC10x8Unorm;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_10x8_SRGB_BLOCK:
+			return WGPUTextureFormat_ASTC10x8UnormSrgb;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_10x10_UNORM_BLOCK:
+			return WGPUTextureFormat_ASTC10x10Unorm;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_10x10_SRGB_BLOCK:
+			return WGPUTextureFormat_ASTC10x10UnormSrgb;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_12x10_UNORM_BLOCK:
+			return WGPUTextureFormat_ASTC12x10Unorm;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_12x10_SRGB_BLOCK:
+			return WGPUTextureFormat_ASTC12x10UnormSrgb;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_12x12_UNORM_BLOCK:
+			return WGPUTextureFormat_ASTC12x12Unorm;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_12x12_SRGB_BLOCK:
+			return WGPUTextureFormat_ASTC12x12UnormSrgb;
 		default:
 			return WGPUTextureFormat_Undefined;
 	}
@@ -1230,10 +1313,14 @@ static uint32_t _data_format_texel_size(RenderingDeviceCommons::DataFormat p_for
 	}
 }
 
-// Bytes per 4x4 block for the compressed formats mapped above; 0 for
-// uncompressed formats. Copy commands take texel extents but express their
-// buffer layout in block rows (WebGPU's rule for compressed formats).
-static uint32_t _data_format_block_bytes(RenderingDeviceCommons::DataFormat p_format) {
+// Block size and bytes-per-block for the compressed formats mapped above;
+// returns 0 (blocks left 1x1) for uncompressed formats. Copy commands take
+// texel extents but express their buffer layout in block rows (WebGPU's rule
+// for compressed formats). BC and ETC2/EAC blocks are 4x4; ASTC blocks carry
+// their dimensions in the format.
+static uint32_t _data_format_block_info(RenderingDeviceCommons::DataFormat p_format, uint32_t &r_block_w, uint32_t &r_block_h) {
+	r_block_w = 1;
+	r_block_h = 1;
 	switch (p_format) {
 		case RenderingDeviceCommons::DATA_FORMAT_BC1_RGB_UNORM_BLOCK:
 		case RenderingDeviceCommons::DATA_FORMAT_BC1_RGB_SRGB_BLOCK:
@@ -1241,6 +1328,14 @@ static uint32_t _data_format_block_bytes(RenderingDeviceCommons::DataFormat p_fo
 		case RenderingDeviceCommons::DATA_FORMAT_BC1_RGBA_SRGB_BLOCK:
 		case RenderingDeviceCommons::DATA_FORMAT_BC4_UNORM_BLOCK:
 		case RenderingDeviceCommons::DATA_FORMAT_BC4_SNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_EAC_R11_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_EAC_R11_SNORM_BLOCK:
+			r_block_w = 4;
+			r_block_h = 4;
 			return 8;
 		case RenderingDeviceCommons::DATA_FORMAT_BC2_UNORM_BLOCK:
 		case RenderingDeviceCommons::DATA_FORMAT_BC2_SRGB_BLOCK:
@@ -1252,6 +1347,82 @@ static uint32_t _data_format_block_bytes(RenderingDeviceCommons::DataFormat p_fo
 		case RenderingDeviceCommons::DATA_FORMAT_BC6H_SFLOAT_BLOCK:
 		case RenderingDeviceCommons::DATA_FORMAT_BC7_UNORM_BLOCK:
 		case RenderingDeviceCommons::DATA_FORMAT_BC7_SRGB_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_EAC_R11G11_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_EAC_R11G11_SNORM_BLOCK:
+			r_block_w = 4;
+			r_block_h = 4;
+			return 16;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_4x4_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_4x4_SRGB_BLOCK:
+			r_block_w = 4;
+			r_block_h = 4;
+			return 16;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_5x4_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_5x4_SRGB_BLOCK:
+			r_block_w = 5;
+			r_block_h = 4;
+			return 16;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_5x5_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_5x5_SRGB_BLOCK:
+			r_block_w = 5;
+			r_block_h = 5;
+			return 16;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_6x5_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_6x5_SRGB_BLOCK:
+			r_block_w = 6;
+			r_block_h = 5;
+			return 16;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_6x6_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_6x6_SRGB_BLOCK:
+			r_block_w = 6;
+			r_block_h = 6;
+			return 16;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_8x5_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_8x5_SRGB_BLOCK:
+			r_block_w = 8;
+			r_block_h = 5;
+			return 16;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_8x6_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_8x6_SRGB_BLOCK:
+			r_block_w = 8;
+			r_block_h = 6;
+			return 16;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_8x8_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_8x8_SRGB_BLOCK:
+			r_block_w = 8;
+			r_block_h = 8;
+			return 16;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_10x5_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_10x5_SRGB_BLOCK:
+			r_block_w = 10;
+			r_block_h = 5;
+			return 16;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_10x6_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_10x6_SRGB_BLOCK:
+			r_block_w = 10;
+			r_block_h = 6;
+			return 16;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_10x8_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_10x8_SRGB_BLOCK:
+			r_block_w = 10;
+			r_block_h = 8;
+			return 16;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_10x10_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_10x10_SRGB_BLOCK:
+			r_block_w = 10;
+			r_block_h = 10;
+			return 16;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_12x10_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_12x10_SRGB_BLOCK:
+			r_block_w = 12;
+			r_block_h = 10;
+			return 16;
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_12x12_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_ASTC_12x12_SRGB_BLOCK:
+			r_block_w = 12;
+			r_block_h = 12;
 			return 16;
 		default:
 			return 0;
@@ -1617,6 +1788,74 @@ static WGPUTextureFormat _wgpu_srgb_sibling(WGPUTextureFormat p_format) {
 			return WGPUTextureFormat_BC7RGBAUnormSrgb;
 		case WGPUTextureFormat_BC7RGBAUnormSrgb:
 			return WGPUTextureFormat_BC7RGBAUnorm;
+		case WGPUTextureFormat_ETC2RGB8Unorm:
+			return WGPUTextureFormat_ETC2RGB8UnormSrgb;
+		case WGPUTextureFormat_ETC2RGB8UnormSrgb:
+			return WGPUTextureFormat_ETC2RGB8Unorm;
+		case WGPUTextureFormat_ETC2RGB8A1Unorm:
+			return WGPUTextureFormat_ETC2RGB8A1UnormSrgb;
+		case WGPUTextureFormat_ETC2RGB8A1UnormSrgb:
+			return WGPUTextureFormat_ETC2RGB8A1Unorm;
+		case WGPUTextureFormat_ETC2RGBA8Unorm:
+			return WGPUTextureFormat_ETC2RGBA8UnormSrgb;
+		case WGPUTextureFormat_ETC2RGBA8UnormSrgb:
+			return WGPUTextureFormat_ETC2RGBA8Unorm;
+		case WGPUTextureFormat_ASTC4x4Unorm:
+			return WGPUTextureFormat_ASTC4x4UnormSrgb;
+		case WGPUTextureFormat_ASTC4x4UnormSrgb:
+			return WGPUTextureFormat_ASTC4x4Unorm;
+		case WGPUTextureFormat_ASTC5x4Unorm:
+			return WGPUTextureFormat_ASTC5x4UnormSrgb;
+		case WGPUTextureFormat_ASTC5x4UnormSrgb:
+			return WGPUTextureFormat_ASTC5x4Unorm;
+		case WGPUTextureFormat_ASTC5x5Unorm:
+			return WGPUTextureFormat_ASTC5x5UnormSrgb;
+		case WGPUTextureFormat_ASTC5x5UnormSrgb:
+			return WGPUTextureFormat_ASTC5x5Unorm;
+		case WGPUTextureFormat_ASTC6x5Unorm:
+			return WGPUTextureFormat_ASTC6x5UnormSrgb;
+		case WGPUTextureFormat_ASTC6x5UnormSrgb:
+			return WGPUTextureFormat_ASTC6x5Unorm;
+		case WGPUTextureFormat_ASTC6x6Unorm:
+			return WGPUTextureFormat_ASTC6x6UnormSrgb;
+		case WGPUTextureFormat_ASTC6x6UnormSrgb:
+			return WGPUTextureFormat_ASTC6x6Unorm;
+		case WGPUTextureFormat_ASTC8x5Unorm:
+			return WGPUTextureFormat_ASTC8x5UnormSrgb;
+		case WGPUTextureFormat_ASTC8x5UnormSrgb:
+			return WGPUTextureFormat_ASTC8x5Unorm;
+		case WGPUTextureFormat_ASTC8x6Unorm:
+			return WGPUTextureFormat_ASTC8x6UnormSrgb;
+		case WGPUTextureFormat_ASTC8x6UnormSrgb:
+			return WGPUTextureFormat_ASTC8x6Unorm;
+		case WGPUTextureFormat_ASTC8x8Unorm:
+			return WGPUTextureFormat_ASTC8x8UnormSrgb;
+		case WGPUTextureFormat_ASTC8x8UnormSrgb:
+			return WGPUTextureFormat_ASTC8x8Unorm;
+		case WGPUTextureFormat_ASTC10x5Unorm:
+			return WGPUTextureFormat_ASTC10x5UnormSrgb;
+		case WGPUTextureFormat_ASTC10x5UnormSrgb:
+			return WGPUTextureFormat_ASTC10x5Unorm;
+		case WGPUTextureFormat_ASTC10x6Unorm:
+			return WGPUTextureFormat_ASTC10x6UnormSrgb;
+		case WGPUTextureFormat_ASTC10x6UnormSrgb:
+			return WGPUTextureFormat_ASTC10x6Unorm;
+		case WGPUTextureFormat_ASTC10x8Unorm:
+			return WGPUTextureFormat_ASTC10x8UnormSrgb;
+		case WGPUTextureFormat_ASTC10x8UnormSrgb:
+			return WGPUTextureFormat_ASTC10x8Unorm;
+		case WGPUTextureFormat_ASTC10x10Unorm:
+			return WGPUTextureFormat_ASTC10x10UnormSrgb;
+		case WGPUTextureFormat_ASTC10x10UnormSrgb:
+			return WGPUTextureFormat_ASTC10x10Unorm;
+		case WGPUTextureFormat_ASTC12x10Unorm:
+			return WGPUTextureFormat_ASTC12x10UnormSrgb;
+		case WGPUTextureFormat_ASTC12x10UnormSrgb:
+			return WGPUTextureFormat_ASTC12x10Unorm;
+		case WGPUTextureFormat_ASTC12x12Unorm:
+			return WGPUTextureFormat_ASTC12x12UnormSrgb;
+		case WGPUTextureFormat_ASTC12x12UnormSrgb:
+			return WGPUTextureFormat_ASTC12x12Unorm;
 		default:
 			return WGPUTextureFormat_Undefined;
 	}
@@ -1835,10 +2074,17 @@ BitField<RenderingDeviceDriver::TextureUsageBits> RenderingDeviceDriverWebGPU::t
 		// probe picks Depth24PlusStencil8 instead).
 		return supported;
 	}
-	const bool compressed = p_format >= DATA_FORMAT_BC1_RGB_UNORM_BLOCK && p_format <= DATA_FORMAT_BC7_SRGB_BLOCK;
-	if (compressed && !device_has_texture_compression_bc) {
-		// The loader requests texture-compression-bc adapter-gated; on
-		// devices without it (mobile GPUs), BC content must not be created.
+	const bool bc_family = p_format >= DATA_FORMAT_BC1_RGB_UNORM_BLOCK && p_format <= DATA_FORMAT_BC7_SRGB_BLOCK;
+	const bool etc2_family = p_format >= DATA_FORMAT_ETC2_R8G8B8_UNORM_BLOCK && p_format <= DATA_FORMAT_EAC_R11G11_SNORM_BLOCK;
+	const bool astc_family = p_format >= DATA_FORMAT_ASTC_4x4_UNORM_BLOCK && p_format <= DATA_FORMAT_ASTC_12x12_SRGB_BLOCK;
+	const bool compressed = bc_family || etc2_family || astc_family;
+	if ((bc_family && !device_has_texture_compression_bc) ||
+			(etc2_family && !device_has_texture_compression_etc2) ||
+			(astc_family && !device_has_texture_compression_astc)) {
+		// The loader requests each texture-compression-* feature
+		// adapter-gated (BC on desktop GPUs, ETC2/ASTC on mobile GPUs);
+		// families the device lacks report zero usage so the engine takes
+		// its CPU-decompress fallback instead of a failing create.
 		return supported;
 	}
 	supported.set_flag(TEXTURE_USAGE_SAMPLING_BIT);
@@ -2001,11 +2247,12 @@ void RenderingDeviceDriverWebGPU::texture_get_copyable_layout(TextureID p_textur
 	TextureInfo *texture = (TextureInfo *)p_texture.id;
 	const uint32_t width = MAX(1U, wgpuTextureGetWidth(texture->texture) >> p_subresource.mipmap);
 	const uint32_t height = MAX(1U, wgpuTextureGetHeight(texture->texture) >> p_subresource.mipmap);
-	const uint32_t block_bytes = _data_format_block_bytes(texture->format);
+	uint32_t block_w = 1, block_h = 1;
+	const uint32_t block_bytes = _data_format_block_info(texture->format, block_w, block_h);
 	if (block_bytes != 0) {
-		// Block-compressed: the layout is expressed in 4x4 block rows.
-		const uint64_t blocks_x = (width + 3) / 4;
-		const uint64_t blocks_y = (height + 3) / 4;
+		// Block-compressed: the layout is expressed in block rows.
+		const uint64_t blocks_x = (width + block_w - 1) / block_w;
+		const uint64_t blocks_y = (height + block_h - 1) / block_h;
 		const uint64_t row_pitch = (blocks_x * block_bytes + 255) & ~255ULL;
 		r_layout->row_pitch = row_pitch;
 		r_layout->size = row_pitch * blocks_y;
@@ -2333,11 +2580,12 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 		BufferInfo *src_sync = (BufferInfo *)p_src_buffer.id;
 		if (src_sync->shadow != nullptr && !src_sync->dynamic) {
 			TextureInfo *dst_sync = (TextureInfo *)p_dst_texture.id;
-			const uint32_t sync_block_bytes = _data_format_block_bytes(dst_sync->format);
+			uint32_t sync_block_w = 1, sync_block_h = 1;
+			const uint32_t sync_block_bytes = _data_format_block_info(dst_sync->format, sync_block_w, sync_block_h);
 			for (uint32_t i = 0; i < p_regions.size(); i++) {
 				const BufferTextureCopyRegion &region = p_regions[i];
-				const uint32_t sync_bytes_per_row = region.row_pitch != 0 ? (uint32_t)region.row_pitch : (sync_block_bytes != 0 ? (((uint32_t)region.texture_region_size.x + 3u) / 4u) * sync_block_bytes : (uint32_t)region.texture_region_size.x * _data_format_texel_size(dst_sync->format));
-				const uint32_t sync_rows = sync_block_bytes != 0 ? (((uint32_t)region.texture_region_size.y + 3u) / 4u) : (uint32_t)region.texture_region_size.y;
+				const uint32_t sync_bytes_per_row = region.row_pitch != 0 ? (uint32_t)region.row_pitch : (sync_block_bytes != 0 ? (((uint32_t)region.texture_region_size.x + sync_block_w - 1u) / sync_block_w) * sync_block_bytes : (uint32_t)region.texture_region_size.x * _data_format_texel_size(dst_sync->format));
+				const uint32_t sync_rows = sync_block_bytes != 0 ? (((uint32_t)region.texture_region_size.y + sync_block_h - 1u) / sync_block_h) : (uint32_t)region.texture_region_size.y;
 				const uint64_t data_size = (uint64_t)sync_bytes_per_row * (uint64_t)sync_rows * (uint64_t)region.texture_region_size.z;
 				const uint64_t write_offset = region.buffer_offset & ~3ull;
 				const uint64_t write_size = MIN((((region.buffer_offset + data_size + 3ull) & ~3ull) - write_offset), src_sync->size - write_offset);
@@ -2349,16 +2597,17 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 	_end_compute_pass(cb_info);
 	ERR_FAIL_NULL(cb_info->encoder);
 	TextureInfo *texture = (TextureInfo *)p_dst_texture.id;
-	const uint32_t block_bytes = _data_format_block_bytes(texture->format);
+	uint32_t block_w = 1, block_h = 1;
+	const uint32_t block_bytes = _data_format_block_info(texture->format, block_w, block_h);
 	for (uint32_t i = 0; i < p_regions.size(); i++) {
 		const BufferTextureCopyRegion &region = p_regions[i];
 		WGPUTexelCopyBufferInfo src = WGPU_TEXEL_COPY_BUFFER_INFO_INIT;
 		src.buffer = ((BufferInfo *)p_src_buffer.id)->buffer;
 		src.layout.offset = region.buffer_offset;
-		// For compressed formats the buffer layout is expressed in 4x4 block
+		// For compressed formats the buffer layout is expressed in block
 		// rows (the extent stays in texels, per WebGPU's copy rules).
-		const uint32_t buffer_rows = block_bytes != 0 ? (((uint32_t)region.texture_region_size.y + 3u) / 4u) : (uint32_t)region.texture_region_size.y;
-		const uint32_t bytes_per_row = region.row_pitch != 0 ? (uint32_t)region.row_pitch : (block_bytes != 0 ? (((uint32_t)region.texture_region_size.x + 3u) / 4u) * block_bytes : (uint32_t)region.texture_region_size.x * _data_format_texel_size(texture->format));
+		const uint32_t buffer_rows = block_bytes != 0 ? (((uint32_t)region.texture_region_size.y + block_h - 1u) / block_h) : (uint32_t)region.texture_region_size.y;
+		const uint32_t bytes_per_row = region.row_pitch != 0 ? (uint32_t)region.row_pitch : (block_bytes != 0 ? (((uint32_t)region.texture_region_size.x + block_w - 1u) / block_w) * block_bytes : (uint32_t)region.texture_region_size.x * _data_format_texel_size(texture->format));
 		src.layout.bytesPerRow = bytes_per_row;
 		src.layout.rowsPerImage = buffer_rows;
 		WGPUTexelCopyTextureInfo dst = _texel_copy_texture_info(((TextureInfo *)p_dst_texture.id)->texture, region.texture_subresource.mipmap, region.texture_offset, region.texture_subresource.layer);
@@ -2396,15 +2645,16 @@ void RenderingDeviceDriverWebGPU::command_copy_texture_to_buffer(CommandBufferID
 	_end_compute_pass(cb_info);
 	ERR_FAIL_NULL(cb_info->encoder);
 	TextureInfo *texture = (TextureInfo *)p_src_texture.id;
-	const uint32_t block_bytes = _data_format_block_bytes(texture->format);
+	uint32_t block_w = 1, block_h = 1;
+	const uint32_t block_bytes = _data_format_block_info(texture->format, block_w, block_h);
 	for (uint32_t i = 0; i < p_regions.size(); i++) {
 		const BufferTextureCopyRegion &region = p_regions[i];
 		WGPUTexelCopyTextureInfo src = _texel_copy_texture_info(((TextureInfo *)p_src_texture.id)->texture, region.texture_subresource.mipmap, region.texture_offset, region.texture_subresource.layer);
 		WGPUTexelCopyBufferInfo dst = WGPU_TEXEL_COPY_BUFFER_INFO_INIT;
 		dst.buffer = ((BufferInfo *)p_dst_buffer.id)->buffer;
 		dst.layout.offset = region.buffer_offset;
-		dst.layout.bytesPerRow = region.row_pitch != 0 ? (uint32_t)region.row_pitch : (block_bytes != 0 ? (((uint32_t)region.texture_region_size.x + 3u) / 4u) * block_bytes : (uint32_t)region.texture_region_size.x * _data_format_texel_size(texture->format));
-		dst.layout.rowsPerImage = block_bytes != 0 ? (((uint32_t)region.texture_region_size.y + 3u) / 4u) : (uint32_t)region.texture_region_size.y;
+		dst.layout.bytesPerRow = region.row_pitch != 0 ? (uint32_t)region.row_pitch : (block_bytes != 0 ? (((uint32_t)region.texture_region_size.x + block_w - 1u) / block_w) * block_bytes : (uint32_t)region.texture_region_size.x * _data_format_texel_size(texture->format));
+		dst.layout.rowsPerImage = block_bytes != 0 ? (((uint32_t)region.texture_region_size.y + block_h - 1u) / block_h) : (uint32_t)region.texture_region_size.y;
 		WGPUExtent3D size = { (uint32_t)region.texture_region_size.x, (uint32_t)region.texture_region_size.y, (uint32_t)region.texture_region_size.z };
 		wgpuCommandEncoderCopyTextureToBuffer(cb_info->encoder, &src, &dst, &size);
 	}
