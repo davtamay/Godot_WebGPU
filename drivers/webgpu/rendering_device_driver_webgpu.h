@@ -68,6 +68,13 @@ private:
 		// before any subsequently submitted command buffer, matching the
 		// engine's staging semantics). Downloads are not supported yet.
 		uint8_t *shadow = nullptr;
+		// Dynamic-slice flushes are range-diffed against the bytes last
+		// uploaded (the engine writes through the persistent map, so the
+		// driver cannot see WHICH bytes changed - the flush API carries no
+		// range). Allocated lazily at first flush; slices upload whole once
+		// (bit per slice), then only their changed span.
+		uint8_t *last_upload = nullptr;
+		uint32_t slice_inited_mask = 0;
 		// xr_import_epoch at creation time. Only buffers created while XR
 		// layer textures have been imported (epoch > 0, the class whose
 		// encoded copies never land on Galaxy XR's Chrome) take the
@@ -617,8 +624,11 @@ public:
 	bool use_pipeline_warm = true;
 	bool use_bundle_fastpath = true;
 	bool use_indirect_params = true;
+	bool use_diff_flush = true;
 	bool device_has_indirect_first_instance = false;
 	uint64_t present_count = 0;
+
+	void _flush_dynamic_slice(BufferInfo *p_buffer);
 	virtual void pipeline_free(PipelineID p_pipeline) override;
 	virtual void command_bind_push_constants(CommandBufferID p_cmd_buffer, ShaderID p_shader, uint32_t p_first_index, VectorView<uint32_t> p_data) override;
 	// The browser manages pipeline caching; declining makes the engine skip it.
