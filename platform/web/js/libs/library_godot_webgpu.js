@@ -174,6 +174,13 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('noswizzle') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_use_bc__sig: 'i',
+	godot_js_webgpu_use_bc: function () {
+		// ?nobc reports BC texture compression unsupported for A/B of
+		// compressed-texture content against its uncompressed fallback.
+		return window.location.search.indexOf('nobc') >= 0 ? 0 : 1;
+	},
+
 	/**
 	 * Creates the hidden probe canvas (see drivers/webgpu/webgpu_probe.cpp).
 	 * A canvas is permanently locked to its first context type, so the probe
