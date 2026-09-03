@@ -46,10 +46,15 @@ int godot_js_webgpu_has_transient_attachments();
 // 0 when the page URL carries ?noswizzle (benchmark A/B switch for the
 // native view-swizzle path).
 int godot_js_webgpu_use_native_swizzle();
+// 0 when the page URL carries ?nobc (benchmark A/B switch for
+// block-compressed texture support).
+int godot_js_webgpu_use_bc();
 // 0 when the page URL carries ?notiers (benchmark A/B switch for the
 // texture-format-tier paths).
 int godot_js_webgpu_use_tiers();
 }
+
+static uint32_t _data_format_block_bytes(RenderingDeviceCommons::DataFormat p_format);
 
 // WebGPU exposes a single, implicitly synchronized queue: queue family and
 // queue handles are opaque non-zero tokens, submission order is the only
@@ -83,6 +88,7 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	device_has_timestamp_query = wgpuDeviceHasFeature(device, WGPUFeatureName_TimestampQuery);
 	device_has_texture_swizzle = wgpuDeviceHasFeature(device, WGPUFeatureName_TextureComponentSwizzle) && godot_js_webgpu_use_native_swizzle() != 0;
 	print_verbose(device_has_texture_swizzle ? "WebGPU: texture swizzles served by native view swizzles." : "WebGPU: texture swizzles emulated by texel expansion at upload.");
+	device_has_texture_compression_bc = wgpuDeviceHasFeature(device, WGPUFeatureName_TextureCompressionBC) && godot_js_webgpu_use_bc() != 0;
 
 	frame_count = MAX(1u, p_frame_count);
 
@@ -227,6 +233,11 @@ void RenderingDeviceDriverWebGPU::command_clear_color_texture(CommandBufferID p_
 	const TextureInfo *texture = (const TextureInfo *)p_texture.id;
 	ERR_FAIL_NULL(cb_info->encoder);
 	_end_compute_pass(cb_info);
+	if (_data_format_block_bytes(texture->format) != 0) {
+		// Block-compressed textures are sampled-only content; nothing clears
+		// them, and the texel zero-fill below cannot express block rows.
+		return;
+	}
 	if ((texture->usage & WGPUTextureUsage_RenderAttachment) == 0 || wgpuTextureGetDimension(texture->texture) == WGPUTextureDimension_3D) {
 		// Non-renderable (e.g. storage-only fog maps) and 3D textures cannot
 		// take the render-pass clear below; zero them through writeTexture
@@ -974,8 +985,12 @@ static WGPUTextureFormat _data_format_to_wgpu(RenderingDeviceCommons::DataFormat
 			return WGPUTextureFormat_Depth24PlusStencil8;
 		case RenderingDeviceCommons::DATA_FORMAT_D32_SFLOAT_S8_UINT:
 			return WGPUTextureFormat_Depth32FloatStencil8;
+		case RenderingDeviceCommons::DATA_FORMAT_BC1_RGB_UNORM_BLOCK:
 		case RenderingDeviceCommons::DATA_FORMAT_BC1_RGBA_UNORM_BLOCK:
+			// WebGPU has no RGB-only BC1 enum; the RGBA decode of RGB-mode
+			// blocks yields opaque alpha, so the mapping is lossless.
 			return WGPUTextureFormat_BC1RGBAUnorm;
+		case RenderingDeviceCommons::DATA_FORMAT_BC1_RGB_SRGB_BLOCK:
 		case RenderingDeviceCommons::DATA_FORMAT_BC1_RGBA_SRGB_BLOCK:
 			return WGPUTextureFormat_BC1RGBAUnormSrgb;
 		case RenderingDeviceCommons::DATA_FORMAT_BC2_UNORM_BLOCK:
@@ -1057,6 +1072,34 @@ static uint32_t _data_format_texel_size(RenderingDeviceCommons::DataFormat p_for
 		case RenderingDeviceCommons::DATA_FORMAT_R32G32B32A32_UINT:
 		case RenderingDeviceCommons::DATA_FORMAT_R32G32B32A32_SINT:
 		case RenderingDeviceCommons::DATA_FORMAT_R32G32B32A32_SFLOAT:
+			return 16;
+		default:
+			return 0;
+	}
+}
+
+// Bytes per 4x4 block for the compressed formats mapped above; 0 for
+// uncompressed formats. Copy commands take texel extents but express their
+// buffer layout in block rows (WebGPU's rule for compressed formats).
+static uint32_t _data_format_block_bytes(RenderingDeviceCommons::DataFormat p_format) {
+	switch (p_format) {
+		case RenderingDeviceCommons::DATA_FORMAT_BC1_RGB_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_BC1_RGB_SRGB_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_BC1_RGBA_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_BC1_RGBA_SRGB_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_BC4_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_BC4_SNORM_BLOCK:
+			return 8;
+		case RenderingDeviceCommons::DATA_FORMAT_BC2_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_BC2_SRGB_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_BC3_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_BC3_SRGB_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_BC5_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_BC5_SNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_BC6H_UFLOAT_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_BC6H_SFLOAT_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_BC7_UNORM_BLOCK:
+		case RenderingDeviceCommons::DATA_FORMAT_BC7_SRGB_BLOCK:
 			return 16;
 		default:
 			return 0;
@@ -1352,6 +1395,22 @@ static WGPUTextureFormat _wgpu_srgb_sibling(WGPUTextureFormat p_format) {
 			return WGPUTextureFormat_BGRA8UnormSrgb;
 		case WGPUTextureFormat_BGRA8UnormSrgb:
 			return WGPUTextureFormat_BGRA8Unorm;
+		case WGPUTextureFormat_BC1RGBAUnorm:
+			return WGPUTextureFormat_BC1RGBAUnormSrgb;
+		case WGPUTextureFormat_BC1RGBAUnormSrgb:
+			return WGPUTextureFormat_BC1RGBAUnorm;
+		case WGPUTextureFormat_BC2RGBAUnorm:
+			return WGPUTextureFormat_BC2RGBAUnormSrgb;
+		case WGPUTextureFormat_BC2RGBAUnormSrgb:
+			return WGPUTextureFormat_BC2RGBAUnorm;
+		case WGPUTextureFormat_BC3RGBAUnorm:
+			return WGPUTextureFormat_BC3RGBAUnormSrgb;
+		case WGPUTextureFormat_BC3RGBAUnormSrgb:
+			return WGPUTextureFormat_BC3RGBAUnorm;
+		case WGPUTextureFormat_BC7RGBAUnorm:
+			return WGPUTextureFormat_BC7RGBAUnormSrgb;
+		case WGPUTextureFormat_BC7RGBAUnormSrgb:
+			return WGPUTextureFormat_BC7RGBAUnorm;
 		default:
 			return WGPUTextureFormat_Undefined;
 	}
@@ -1570,11 +1629,16 @@ BitField<RenderingDeviceDriver::TextureUsageBits> RenderingDeviceDriverWebGPU::t
 		// probe picks Depth24PlusStencil8 instead).
 		return supported;
 	}
+	const bool compressed = p_format >= DATA_FORMAT_BC1_RGB_UNORM_BLOCK && p_format <= DATA_FORMAT_BC7_SRGB_BLOCK;
+	if (compressed && !device_has_texture_compression_bc) {
+		// The loader requests texture-compression-bc adapter-gated; on
+		// devices without it (mobile GPUs), BC content must not be created.
+		return supported;
+	}
 	supported.set_flag(TEXTURE_USAGE_SAMPLING_BIT);
 	supported.set_flag(TEXTURE_USAGE_CAN_UPDATE_BIT);
 	supported.set_flag(TEXTURE_USAGE_CAN_COPY_FROM_BIT);
 	supported.set_flag(TEXTURE_USAGE_CAN_COPY_TO_BIT);
-	const bool compressed = p_format >= DATA_FORMAT_BC1_RGB_UNORM_BLOCK && p_format <= DATA_FORMAT_BC7_SRGB_BLOCK;
 	if (_is_depth_stencil_format(p_format)) {
 		supported.set_flag(TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
 		supported.set_flag(TEXTURE_USAGE_INPUT_ATTACHMENT_BIT);
@@ -1729,10 +1793,20 @@ uint64_t RenderingDeviceDriverWebGPU::texture_get_allocation_size(TextureID p_te
 
 void RenderingDeviceDriverWebGPU::texture_get_copyable_layout(TextureID p_texture, const TextureSubresource &p_subresource, TextureCopyableLayout *r_layout) {
 	TextureInfo *texture = (TextureInfo *)p_texture.id;
-	const uint32_t texel_size = _data_format_texel_size(texture->format);
-	ERR_FAIL_COND_MSG(texel_size == 0, "Copyable layouts for block-compressed formats are not supported by the WebGPU driver yet.");
 	const uint32_t width = MAX(1U, wgpuTextureGetWidth(texture->texture) >> p_subresource.mipmap);
 	const uint32_t height = MAX(1U, wgpuTextureGetHeight(texture->texture) >> p_subresource.mipmap);
+	const uint32_t block_bytes = _data_format_block_bytes(texture->format);
+	if (block_bytes != 0) {
+		// Block-compressed: the layout is expressed in 4x4 block rows.
+		const uint64_t blocks_x = (width + 3) / 4;
+		const uint64_t blocks_y = (height + 3) / 4;
+		const uint64_t row_pitch = (blocks_x * block_bytes + 255) & ~255ULL;
+		r_layout->row_pitch = row_pitch;
+		r_layout->size = row_pitch * blocks_y;
+		return;
+	}
+	const uint32_t texel_size = _data_format_texel_size(texture->format);
+	ERR_FAIL_COND_MSG(texel_size == 0, "Copyable layout requested for an unmapped format.");
 	// WebGPU requires 256-byte row alignment for buffer <-> texture copies.
 	const uint64_t row_pitch = (uint64_t(width) * texel_size + 255) & ~255ULL;
 	r_layout->row_pitch = row_pitch;
@@ -2053,10 +2127,12 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 		BufferInfo *src_sync = (BufferInfo *)p_src_buffer.id;
 		if (src_sync->shadow != nullptr && !src_sync->dynamic) {
 			TextureInfo *dst_sync = (TextureInfo *)p_dst_texture.id;
+			const uint32_t sync_block_bytes = _data_format_block_bytes(dst_sync->format);
 			for (uint32_t i = 0; i < p_regions.size(); i++) {
 				const BufferTextureCopyRegion &region = p_regions[i];
-				const uint32_t sync_bytes_per_row = region.row_pitch != 0 ? (uint32_t)region.row_pitch : (uint32_t)region.texture_region_size.x * _data_format_texel_size(dst_sync->format);
-				const uint64_t data_size = (uint64_t)sync_bytes_per_row * (uint64_t)region.texture_region_size.y * (uint64_t)region.texture_region_size.z;
+				const uint32_t sync_bytes_per_row = region.row_pitch != 0 ? (uint32_t)region.row_pitch : (sync_block_bytes != 0 ? (((uint32_t)region.texture_region_size.x + 3u) / 4u) * sync_block_bytes : (uint32_t)region.texture_region_size.x * _data_format_texel_size(dst_sync->format));
+				const uint32_t sync_rows = sync_block_bytes != 0 ? (((uint32_t)region.texture_region_size.y + 3u) / 4u) : (uint32_t)region.texture_region_size.y;
+				const uint64_t data_size = (uint64_t)sync_bytes_per_row * (uint64_t)sync_rows * (uint64_t)region.texture_region_size.z;
 				const uint64_t write_offset = region.buffer_offset & ~3ull;
 				const uint64_t write_size = MIN((((region.buffer_offset + data_size + 3ull) & ~3ull) - write_offset), src_sync->size - write_offset);
 				wgpuQueueWriteBuffer(queue, src_sync->buffer, write_offset, src_sync->shadow + write_offset, write_size);
@@ -2067,22 +2143,26 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 	_end_compute_pass(cb_info);
 	ERR_FAIL_NULL(cb_info->encoder);
 	TextureInfo *texture = (TextureInfo *)p_dst_texture.id;
+	const uint32_t block_bytes = _data_format_block_bytes(texture->format);
 	for (uint32_t i = 0; i < p_regions.size(); i++) {
 		const BufferTextureCopyRegion &region = p_regions[i];
 		WGPUTexelCopyBufferInfo src = WGPU_TEXEL_COPY_BUFFER_INFO_INIT;
 		src.buffer = ((BufferInfo *)p_src_buffer.id)->buffer;
 		src.layout.offset = region.buffer_offset;
-		const uint32_t bytes_per_row = region.row_pitch != 0 ? (uint32_t)region.row_pitch : (uint32_t)region.texture_region_size.x * _data_format_texel_size(texture->format);
+		// For compressed formats the buffer layout is expressed in 4x4 block
+		// rows (the extent stays in texels, per WebGPU's copy rules).
+		const uint32_t buffer_rows = block_bytes != 0 ? (((uint32_t)region.texture_region_size.y + 3u) / 4u) : (uint32_t)region.texture_region_size.y;
+		const uint32_t bytes_per_row = region.row_pitch != 0 ? (uint32_t)region.row_pitch : (block_bytes != 0 ? (((uint32_t)region.texture_region_size.x + 3u) / 4u) * block_bytes : (uint32_t)region.texture_region_size.x * _data_format_texel_size(texture->format));
 		src.layout.bytesPerRow = bytes_per_row;
-		src.layout.rowsPerImage = region.texture_region_size.y;
+		src.layout.rowsPerImage = buffer_rows;
 		WGPUTexelCopyTextureInfo dst = _texel_copy_texture_info(((TextureInfo *)p_dst_texture.id)->texture, region.texture_subresource.mipmap, region.texture_offset, region.texture_subresource.layer);
 		WGPUExtent3D size = { (uint32_t)region.texture_region_size.x, (uint32_t)region.texture_region_size.y, (uint32_t)region.texture_region_size.z };
-		if (bytes_per_row % 256 != 0 && (region.texture_region_size.y > 1 || region.texture_region_size.z > 1)) {
+		if (bytes_per_row % 256 != 0 && (buffer_rows > 1 || region.texture_region_size.z > 1)) {
 			// WebGPU requires bytesPerRow to be a multiple of 256 for
 			// multi-row copies, and depth subresources must be copied whole:
 			// repack small uploads (e.g. 4x4 default textures) through a
 			// transient 256-stride buffer.
-			const uint32_t rows = (uint32_t)region.texture_region_size.y * (uint32_t)region.texture_region_size.z;
+			const uint32_t rows = buffer_rows * (uint32_t)region.texture_region_size.z;
 			const uint32_t packed_stride = (bytes_per_row + 255u) & ~255u;
 			WGPUBufferDescriptor staging_desc = WGPU_BUFFER_DESCRIPTOR_INIT;
 			staging_desc.usage = WGPUBufferUsage_CopySrc | WGPUBufferUsage_CopyDst;
@@ -2096,7 +2176,7 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 			packed_src.buffer = staging;
 			packed_src.layout.offset = 0;
 			packed_src.layout.bytesPerRow = packed_stride;
-			packed_src.layout.rowsPerImage = region.texture_region_size.y;
+			packed_src.layout.rowsPerImage = buffer_rows;
 			wgpuCommandEncoderCopyBufferToTexture(cb_info->encoder, &packed_src, &dst, &size);
 			wgpuBufferRelease(staging);
 			continue;
@@ -2110,14 +2190,15 @@ void RenderingDeviceDriverWebGPU::command_copy_texture_to_buffer(CommandBufferID
 	_end_compute_pass(cb_info);
 	ERR_FAIL_NULL(cb_info->encoder);
 	TextureInfo *texture = (TextureInfo *)p_src_texture.id;
+	const uint32_t block_bytes = _data_format_block_bytes(texture->format);
 	for (uint32_t i = 0; i < p_regions.size(); i++) {
 		const BufferTextureCopyRegion &region = p_regions[i];
 		WGPUTexelCopyTextureInfo src = _texel_copy_texture_info(((TextureInfo *)p_src_texture.id)->texture, region.texture_subresource.mipmap, region.texture_offset, region.texture_subresource.layer);
 		WGPUTexelCopyBufferInfo dst = WGPU_TEXEL_COPY_BUFFER_INFO_INIT;
 		dst.buffer = ((BufferInfo *)p_dst_buffer.id)->buffer;
 		dst.layout.offset = region.buffer_offset;
-		dst.layout.bytesPerRow = region.row_pitch != 0 ? (uint32_t)region.row_pitch : (uint32_t)region.texture_region_size.x * _data_format_texel_size(texture->format);
-		dst.layout.rowsPerImage = region.texture_region_size.y;
+		dst.layout.bytesPerRow = region.row_pitch != 0 ? (uint32_t)region.row_pitch : (block_bytes != 0 ? (((uint32_t)region.texture_region_size.x + 3u) / 4u) * block_bytes : (uint32_t)region.texture_region_size.x * _data_format_texel_size(texture->format));
+		dst.layout.rowsPerImage = block_bytes != 0 ? (((uint32_t)region.texture_region_size.y + 3u) / 4u) : (uint32_t)region.texture_region_size.y;
 		WGPUExtent3D size = { (uint32_t)region.texture_region_size.x, (uint32_t)region.texture_region_size.y, (uint32_t)region.texture_region_size.z };
 		wgpuCommandEncoderCopyTextureToBuffer(cb_info->encoder, &src, &dst, &size);
 	}
@@ -4318,6 +4399,15 @@ uint64_t RenderingDeviceDriverWebGPU::api_trait_get(ApiTrait p_trait) {
 		case API_TRAIT_HONORS_PIPELINE_BARRIERS:
 			// WebGPU tracks resource hazards internally.
 			return 0;
+		case API_TRAIT_TEXTURE_DATA_ROW_PITCH_STEP:
+			// WebGPU requires bytesPerRow % 256 for multi-row copies; asking
+			// the engine to pack staging at that stride makes every upload a
+			// single direct copy (no per-row repack) - the D3D12 pattern.
+			return 256;
+		case API_TRAIT_TEXTURE_TRANSFER_ALIGNMENT:
+			// Copy offsets must be a multiple of the texel block byte size
+			// (16 for the widest BC blocks); 256 keeps them row-aligned too.
+			return 256;
 		default:
 			return RenderingDeviceDriver::api_trait_get(p_trait);
 	}
