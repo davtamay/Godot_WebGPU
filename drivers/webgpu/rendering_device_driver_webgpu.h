@@ -628,6 +628,30 @@ public:
 	bool device_has_indirect_first_instance = false;
 	uint64_t present_count = 0;
 
+	// Per-frame-window counters, printed every PERF_WINDOW frames when the
+	// page URL carries ?perfcounters. The parseable one-liner is the product
+	// surface every A/B switch reads its verdict from.
+	struct PerfCounters {
+		uint32_t frames = 0;
+		uint32_t write_buffer_calls = 0;
+		uint64_t write_buffer_bytes = 0;
+		uint32_t bundle_fastpath_hits = 0;
+		uint32_t bundle_hash_hits = 0;
+		uint32_t bundle_builds = 0;
+		uint32_t bundle_direct = 0;
+		uint32_t indirect_param_writes = 0;
+		uint32_t bind_groups_created = 0;
+		uint32_t pipelines_created = 0;
+	};
+	PerfCounters perf;
+	bool perf_counters_enabled = false;
+
+	_FORCE_INLINE_ void _counted_write_buffer(WGPUBuffer p_buffer, uint64_t p_offset, const void *p_data, uint64_t p_size) {
+		perf.write_buffer_calls++;
+		perf.write_buffer_bytes += p_size;
+		wgpuQueueWriteBuffer(queue, p_buffer, p_offset, p_data, p_size);
+	}
+
 	void _flush_dynamic_slice(BufferInfo *p_buffer);
 	virtual void pipeline_free(PipelineID p_pipeline) override;
 	virtual void command_bind_push_constants(CommandBufferID p_cmd_buffer, ShaderID p_shader, uint32_t p_first_index, VectorView<uint32_t> p_data) override;
