@@ -191,6 +191,14 @@ const Engine = (function () {
 			if (adapter['features'] && adapter['features'].has('depth-clip-control')) {
 				requiredFeatures.push('depth-clip-control');
 			}
+			// Block-compressed textures (desktop GPUs). Without this any
+			// VRAM-compressed import (BC6H lightmaps and HDR panoramas most
+			// commonly) fails texture creation outright; with it such
+			// content uploads at a quarter of the memory and bandwidth of
+			// the RGBA fallback.
+			if (adapter['features'] && adapter['features'].has('texture-compression-bc')) {
+				requiredFeatures.push('texture-compression-bc');
+			}
 			return adapter['requestDevice']({ 'requiredLimits': requiredLimits, 'requiredFeatures': requiredFeatures });
 		}).catch(function () {
 			return null;
