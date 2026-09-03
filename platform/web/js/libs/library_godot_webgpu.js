@@ -189,6 +189,21 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('nowarm') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_use_fastpath__sig: 'i',
+	godot_js_webgpu_use_fastpath: function () {
+		// ?nofastpath disables the identity (memcmp) bundle fast path for
+		// A/B against the hash lookup it replaces.
+		return window.location.search.indexOf('nofastpath') >= 0 ? 0 : 1;
+	},
+
+	godot_js_webgpu_use_indirect__sig: 'i',
+	godot_js_webgpu_use_indirect: function () {
+		// ?noindirect makes cached bundles record literal draw parameters
+		// again (a parameter change then misses the cache) for A/B of the
+		// indirect-args path.
+		return window.location.search.indexOf('noindirect') >= 0 ? 0 : 1;
+	},
+
 	/**
 	 * Creates the hidden probe canvas (see drivers/webgpu/webgpu_probe.cpp).
 	 * A canvas is permanently locked to its first context type, so the probe
