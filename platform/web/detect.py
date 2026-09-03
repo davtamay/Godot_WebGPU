@@ -261,8 +261,12 @@ def configure(env: "SConsEnvironment"):
     if env["webgpu"]:
         env["use_rendering_device"] = True
         env.AppendUnique(CPPDEFINES=["WEBGPU_ENABLED"])
-        env.Append(CCFLAGS=["--use-port=emdawnwebgpu"])
-        env.Append(LINKFLAGS=["--use-port=emdawnwebgpu"])
+        # The vendored remote port pins a newer emdawnwebgpu than the one
+        # bundled with the Emscripten toolchain (the port is decoupled from
+        # the compiler version); see the port file for the pinned release.
+        port = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "misc", "webgpu_scripts", "emdawnwebgpu.remoteport.py")).replace("\\", "/")
+        env.Append(CCFLAGS=["--use-port=" + port])
+        env.Append(LINKFLAGS=["--use-port=" + port])
 
     if env["use_rendering_device"]:
         # RenderingDevice (and the WebGPU driver) runs with or without threads.
