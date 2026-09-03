@@ -589,6 +589,7 @@ public:
 	// cache entries recorded under an older epoch are treated as misses.
 	uint64_t resource_epoch = 0;
 	bool use_render_bundles = true;
+	bool use_pipeline_warm = true;
 	virtual void pipeline_free(PipelineID p_pipeline) override;
 	virtual void command_bind_push_constants(CommandBufferID p_cmd_buffer, ShaderID p_shader, uint32_t p_first_index, VectorView<uint32_t> p_data) override;
 	// The browser manages pipeline caching; declining makes the engine skip it.
