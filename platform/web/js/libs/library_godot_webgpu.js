@@ -204,6 +204,13 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('noindirect') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_use_diff_flush__sig: 'i',
+	godot_js_webgpu_use_diff_flush: function () {
+		// ?nodiff uploads whole dynamic-buffer slices again (no change
+		// scan) for A/B of the range-diffed flush.
+		return window.location.search.indexOf('nodiff') >= 0 ? 0 : 1;
+	},
+
 	/**
 	 * Creates the hidden probe canvas (see drivers/webgpu/webgpu_probe.cpp).
 	 * A canvas is permanently locked to its first context type, so the probe
