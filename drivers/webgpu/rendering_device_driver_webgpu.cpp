@@ -61,6 +61,8 @@ int godot_js_webgpu_use_indirect();
 // 0 when the page URL carries ?nodiff (benchmark A/B switch for the
 // range-diffed dynamic slice flush).
 int godot_js_webgpu_use_diff_flush();
+// 1 when the page URL carries ?perfcounters (periodic driver counter print).
+int godot_js_webgpu_perf_counters();
 // 0 when the page URL carries ?notiers (benchmark A/B switch for the
 // texture-format-tier paths).
 int godot_js_webgpu_use_tiers();
@@ -99,6 +101,10 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	use_diff_flush = godot_js_webgpu_use_diff_flush() != 0;
 	if (!use_diff_flush) {
 		print_line("WebGPU: range-diffed dynamic flushes disabled (?nodiff).");
+	}
+	perf_counters_enabled = godot_js_webgpu_perf_counters() != 0;
+	if (perf_counters_enabled) {
+		print_line("WebGPU: driver perf counters enabled (?perfcounters).");
 	}
 	device_has_transient_attachments = godot_js_webgpu_has_transient_attachments() != 0;
 	const bool use_tiers = godot_js_webgpu_use_tiers() != 0;
@@ -159,7 +165,7 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 			wgpu_buffers.push_back(cb_info->command_buffer);
 		}
 		if (push_constant_used > 0) {
-			wgpuQueueWriteBuffer(queue, push_constant_buffer, 0, push_constant_shadow, push_constant_used);
+			_counted_write_buffer(push_constant_buffer, 0, push_constant_shadow, push_constant_used);
 		}
 		// Persistent-map writes have no flush on coherent-memory platforms;
 		// push dirty slices before their commands execute.
@@ -199,6 +205,17 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 	// the spontaneous completion callbacks also fire).
 	_pump_pipeline_warm_queue();
 	present_count++;
+	if (perf_counters_enabled) {
+		perf.frames++;
+		const uint32_t PERF_WINDOW = 120;
+		if (perf.frames >= PERF_WINDOW) {
+			print_line(vformat("WGPUPERF frames=%d wb_calls=%d wb_kb=%d fastpath=%d hash_hit=%d builds=%d direct=%d param_writes=%d bg_new=%d pipe_new=%d",
+					perf.frames, perf.write_buffer_calls, (int)(perf.write_buffer_bytes / 1024),
+					perf.bundle_fastpath_hits, perf.bundle_hash_hits, perf.bundle_builds, perf.bundle_direct,
+					perf.indirect_param_writes, perf.bind_groups_created, perf.pipelines_created));
+			perf = PerfCounters();
+		}
+	}
 	return OK;
 }
 
@@ -649,6 +666,7 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 						entry.records.size() == cb_info->render_records.size() &&
 						memcmp(entry.records.ptr(), cb_info->render_records.ptr(), record_bytes) == 0) {
 					hit = &entry;
+					perf.bundle_fastpath_hits++;
 					break;
 				}
 			}
@@ -658,6 +676,7 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 			for (BundleCacheEntry &entry : framebuffer->bundle_cache) {
 				if (entry.bundle != nullptr && entry.hash == stream_hash && entry.epoch == resource_epoch) {
 					hit = &entry;
+					perf.bundle_hash_hits++;
 					break;
 				}
 			}
@@ -674,8 +693,9 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 					// whole submit): the capture must encode directly.
 					usable = false;
 				} else {
-					wgpuQueueWriteBuffer(queue, hit->params_buffer, 0, cb_info->render_draw_params.ptr(), param_bytes);
+					_counted_write_buffer(hit->params_buffer, 0, cb_info->render_draw_params.ptr(), param_bytes);
 					memcpy(hit->params.ptr(), cb_info->render_draw_params.ptr(), param_bytes);
+					perf.indirect_param_writes++;
 				}
 			}
 			if (usable) {
@@ -720,7 +740,7 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 					params_desc.size = param_bytes;
 					params_buffer = wgpuDeviceCreateBuffer(device, &params_desc);
 					if (params_buffer != nullptr) {
-						wgpuQueueWriteBuffer(queue, params_buffer, 0, cb_info->render_draw_params.ptr(), param_bytes);
+						_counted_write_buffer(params_buffer, 0, cb_info->render_draw_params.ptr(), param_bytes);
 					} else {
 						indirect_ok = false;
 					}
@@ -748,7 +768,8 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 					wgpuRenderBundleEncoderRelease(bundle_encoder);
 				}
 				if (bundle != nullptr) {
-						BundleCacheEntry &evict = framebuffer->bundle_cache[framebuffer->bundle_cache_evict];
+					perf.bundle_builds++;
+					BundleCacheEntry &evict = framebuffer->bundle_cache[framebuffer->bundle_cache_evict];
 					framebuffer->bundle_cache_evict = (framebuffer->bundle_cache_evict + 1) % (sizeof(framebuffer->bundle_cache) / sizeof(BundleCacheEntry));
 					if (evict.bundle != nullptr) {
 						wgpuRenderBundleRelease(evict.bundle);
@@ -781,6 +802,7 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 			// First sighting of this stream (or bundle creation failed, or an
 			// unusable parameter mismatch): encode the capture directly - the
 			// cost of the old path.
+			perf.bundle_direct++;
 			_replay_render_records(cb_info, cb_info->render_pass_encoder, nullptr);
 		}
 	}
@@ -1415,7 +1437,7 @@ void RenderingDeviceDriverWebGPU::_flush_dynamic_slice(BufferInfo *p_buffer) {
 	const uint8_t *src = p_buffer->shadow + offset;
 	const uint64_t stride = p_buffer->slice_stride;
 	if (!use_diff_flush) {
-		wgpuQueueWriteBuffer(queue, p_buffer->buffer, offset, src, stride);
+		_counted_write_buffer(p_buffer->buffer, offset, src, stride);
 		p_buffer->dirty = false;
 		return;
 	}
@@ -1426,7 +1448,7 @@ void RenderingDeviceDriverWebGPU::_flush_dynamic_slice(BufferInfo *p_buffer) {
 	const uint32_t slice_bit = 1u << (p_buffer->frame_idx & 31u);
 	if ((p_buffer->slice_inited_mask & slice_bit) == 0) {
 		p_buffer->slice_inited_mask |= slice_bit;
-		wgpuQueueWriteBuffer(queue, p_buffer->buffer, offset, src, stride);
+		_counted_write_buffer(p_buffer->buffer, offset, src, stride);
 		memcpy(last, src, stride);
 		p_buffer->dirty = false;
 		return;
@@ -1453,7 +1475,7 @@ void RenderingDeviceDriverWebGPU::_flush_dynamic_slice(BufferInfo *p_buffer) {
 		}
 		hi -= step;
 	}
-	wgpuQueueWriteBuffer(queue, p_buffer->buffer, offset + lo, src + lo, hi - lo);
+	_counted_write_buffer(p_buffer->buffer, offset + lo, src + lo, hi - lo);
 	memcpy(last + lo, src + lo, hi - lo);
 	p_buffer->dirty = false;
 }
@@ -1508,7 +1530,7 @@ void RenderingDeviceDriverWebGPU::buffer_unmap(BufferID p_buffer) {
 	WEBGPU_MAIN_THREAD_GUARD(buffer_unmap(p_buffer));
 	BufferInfo *buffer = (BufferInfo *)p_buffer.id;
 	ERR_FAIL_NULL(buffer->shadow);
-	wgpuQueueWriteBuffer(queue, buffer->buffer, 0, buffer->shadow, buffer->size);
+	_counted_write_buffer(buffer->buffer, 0, buffer->shadow, buffer->size);
 }
 
 // WebGPU only allows view reinterpretation between srgb/non-srgb siblings,
@@ -2130,7 +2152,7 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer(CommandBufferID p_cmd_buff
 				const BufferCopyRegion &region = p_regions[i];
 				const uint64_t sync_offset = region.src_offset & ~3ull;
 				const uint64_t sync_size = MIN((((region.src_offset + region.size + 3ull) & ~3ull) - sync_offset), src_sync->size - sync_offset) & ~3ull;
-				wgpuQueueWriteBuffer(queue, src_sync->buffer, sync_offset, src_sync->shadow + sync_offset, sync_size);
+				_counted_write_buffer(src_sync->buffer, sync_offset, src_sync->shadow + sync_offset, sync_size);
 			}
 		} else if (src_sync->shadow != nullptr && !src_sync->dynamic) {
 			bool all_direct = true;
@@ -2147,10 +2169,10 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer(CommandBufferID p_cmd_buff
 					all_direct = false;
 					const uint64_t sync_offset = region.src_offset & ~3ull;
 					const uint64_t sync_size = MIN((((region.src_offset + region.size + 3ull) & ~3ull) - sync_offset), src_sync->size - sync_offset) & ~3ull;
-					wgpuQueueWriteBuffer(queue, src_sync->buffer, sync_offset, src_sync->shadow + sync_offset, sync_size);
+					_counted_write_buffer(src_sync->buffer, sync_offset, src_sync->shadow + sync_offset, sync_size);
 					continue;
 				}
-				wgpuQueueWriteBuffer(queue, dst->buffer, dst_offset, src_sync->shadow + src_offset, write_size);
+				_counted_write_buffer(dst->buffer, dst_offset, src_sync->shadow + src_offset, write_size);
 			}
 			if (all_direct) {
 				return;
@@ -2319,7 +2341,7 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 				const uint64_t data_size = (uint64_t)sync_bytes_per_row * (uint64_t)sync_rows * (uint64_t)region.texture_region_size.z;
 				const uint64_t write_offset = region.buffer_offset & ~3ull;
 				const uint64_t write_size = MIN((((region.buffer_offset + data_size + 3ull) & ~3ull) - write_offset), src_sync->size - write_offset);
-				wgpuQueueWriteBuffer(queue, src_sync->buffer, write_offset, src_sync->shadow + write_offset, write_size);
+				_counted_write_buffer(src_sync->buffer, write_offset, src_sync->shadow + write_offset, write_size);
 			}
 		}
 	}
@@ -3802,6 +3824,7 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_uniform_set_build(VectorView<BoundUn
 	bind_group_desc.layout = shader->bind_group_layouts[p_set_index];
 	bind_group_desc.entryCount = entries.size();
 	bind_group_desc.entries = entries.ptr();
+	perf.bind_groups_created++;
 	WGPUBindGroup bind_group = wgpuDeviceCreateBindGroup(device, &bind_group_desc);
 	ERR_FAIL_NULL_V_MSG(bind_group, nullptr, vformat("Failed to create a bind group for set %d.", p_set_index));
 	return bind_group;
@@ -4297,6 +4320,7 @@ WGPURenderPipeline RenderingDeviceDriverWebGPU::_build_render_pipeline(const Sha
 		return nullptr;
 	}
 
+	perf.pipelines_created++;
 	WGPURenderPipeline render_pipeline = wgpuDeviceCreateRenderPipeline(device, &pipeline_desc);
 	ERR_FAIL_NULL_V_MSG(render_pipeline, nullptr, "Failed to create a WebGPU render pipeline.");
 
@@ -4505,6 +4529,7 @@ WGPUComputePipeline RenderingDeviceDriverWebGPU::_create_compute_pipeline(const 
 		return nullptr;
 	}
 
+	perf.pipelines_created++;
 	return wgpuDeviceCreateComputePipeline(device, &pipeline_desc);
 }
 
