@@ -58,6 +58,9 @@ int godot_js_webgpu_use_fastpath();
 // 0 when the page URL carries ?noindirect (benchmark A/B switch for
 // indirect draw parameters in cached bundles).
 int godot_js_webgpu_use_indirect();
+// 0 when the page URL carries ?nodiff (benchmark A/B switch for the
+// range-diffed dynamic slice flush).
+int godot_js_webgpu_use_diff_flush();
 // 0 when the page URL carries ?notiers (benchmark A/B switch for the
 // texture-format-tier paths).
 int godot_js_webgpu_use_tiers();
@@ -92,6 +95,10 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	use_indirect_params = godot_js_webgpu_use_indirect() != 0;
 	if (!use_indirect_params) {
 		print_line("WebGPU: indirect bundle draw parameters disabled (?noindirect).");
+	}
+	use_diff_flush = godot_js_webgpu_use_diff_flush() != 0;
+	if (!use_diff_flush) {
+		print_line("WebGPU: range-diffed dynamic flushes disabled (?nodiff).");
 	}
 	device_has_transient_attachments = godot_js_webgpu_has_transient_attachments() != 0;
 	const bool use_tiers = godot_js_webgpu_use_tiers() != 0;
@@ -158,9 +165,7 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 		// push dirty slices before their commands execute.
 		for (BufferInfo *dynamic_buffer : dynamic_buffers_all) {
 			if (dynamic_buffer->dirty) {
-				const uint64_t slice_offset = dynamic_buffer->frame_idx * dynamic_buffer->slice_stride;
-				wgpuQueueWriteBuffer(queue, dynamic_buffer->buffer, slice_offset, dynamic_buffer->shadow + slice_offset, dynamic_buffer->slice_stride);
-				dynamic_buffer->dirty = false;
+				_flush_dynamic_slice(dynamic_buffer);
 			}
 		}
 		wgpuQueueSubmit(queue, wgpu_buffers.size(), wgpu_buffers.ptr());
@@ -1381,6 +1386,9 @@ void RenderingDeviceDriverWebGPU::buffer_free(BufferID p_buffer) {
 	if (buffer->shadow != nullptr) {
 		memfree(buffer->shadow);
 	}
+	if (buffer->last_upload != nullptr) {
+		memfree(buffer->last_upload);
+	}
 	memdelete(buffer);
 }
 
@@ -1397,15 +1405,66 @@ uint8_t *RenderingDeviceDriverWebGPU::buffer_persistent_map_advance(BufferID p_b
 	return buffer->shadow + buffer->frame_idx * buffer->slice_stride;
 }
 
+void RenderingDeviceDriverWebGPU::_flush_dynamic_slice(BufferInfo *p_buffer) {
+	// The engine writes through the persistent map, so the flush API carries
+	// no range: diff the slice against the bytes last uploaded and write only
+	// the changed span. An unchanged slice costs one vectorized scan instead
+	// of a multi-megabyte queue write; a canvas-style buffer that fills only
+	// the head of its slice uploads only that head.
+	const uint64_t offset = p_buffer->frame_idx * p_buffer->slice_stride;
+	const uint8_t *src = p_buffer->shadow + offset;
+	const uint64_t stride = p_buffer->slice_stride;
+	if (!use_diff_flush) {
+		wgpuQueueWriteBuffer(queue, p_buffer->buffer, offset, src, stride);
+		p_buffer->dirty = false;
+		return;
+	}
+	if (p_buffer->last_upload == nullptr) {
+		p_buffer->last_upload = (uint8_t *)memalloc(p_buffer->size);
+	}
+	uint8_t *last = p_buffer->last_upload + offset;
+	const uint32_t slice_bit = 1u << (p_buffer->frame_idx & 31u);
+	if ((p_buffer->slice_inited_mask & slice_bit) == 0) {
+		p_buffer->slice_inited_mask |= slice_bit;
+		wgpuQueueWriteBuffer(queue, p_buffer->buffer, offset, src, stride);
+		memcpy(last, src, stride);
+		p_buffer->dirty = false;
+		return;
+	}
+	// Trim from both ends at 64-byte granularity (wgpuQueueWriteBuffer needs
+	// 4-byte alignment; 64 keeps the scan in memcmp's vectorized fast path).
+	uint64_t lo = 0;
+	while (lo < stride) {
+		const uint64_t step = MIN(64ull, stride - lo);
+		if (memcmp(last + lo, src + lo, step) != 0) {
+			break;
+		}
+		lo += step;
+	}
+	if (lo >= stride) {
+		p_buffer->dirty = false;
+		return; // Identical - nothing to upload.
+	}
+	uint64_t hi = stride;
+	while (hi > lo + 64) {
+		const uint64_t step = 64;
+		if (memcmp(last + hi - step, src + hi - step, step) != 0) {
+			break;
+		}
+		hi -= step;
+	}
+	wgpuQueueWriteBuffer(queue, p_buffer->buffer, offset + lo, src + lo, hi - lo);
+	memcpy(last + lo, src + lo, hi - lo);
+	p_buffer->dirty = false;
+}
+
 void RenderingDeviceDriverWebGPU::buffer_flush(BufferID p_buffer) {
 	WEBGPU_MAIN_THREAD_GUARD(buffer_flush(p_buffer));
-	const BufferInfo *buffer = (const BufferInfo *)p_buffer.id;
+	BufferInfo *buffer = (BufferInfo *)p_buffer.id;
 	ERR_FAIL_COND(!buffer->dynamic);
 	// Executes before any subsequently submitted command buffer, matching the
 	// staging shadow semantics in buffer_unmap().
-	const uint64_t offset = buffer->frame_idx * buffer->slice_stride;
-	wgpuQueueWriteBuffer(queue, buffer->buffer, offset, buffer->shadow + offset, buffer->slice_stride);
-	((BufferInfo *)p_buffer.id)->dirty = false;
+	_flush_dynamic_slice(buffer);
 }
 
 uint64_t RenderingDeviceDriverWebGPU::buffer_get_dynamic_offsets(Span<BufferID> p_buffers) {
