@@ -49,6 +49,9 @@ int godot_js_webgpu_use_native_swizzle();
 // 0 when the page URL carries ?nobc (benchmark A/B switch for
 // block-compressed texture support).
 int godot_js_webgpu_use_bc();
+// 0 when the page URL carries ?nowarm (benchmark A/B switch for the
+// background pipeline warm).
+int godot_js_webgpu_use_warm();
 // 0 when the page URL carries ?notiers (benchmark A/B switch for the
 // texture-format-tier paths).
 int godot_js_webgpu_use_tiers();
@@ -71,6 +74,10 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	use_render_bundles = godot_js_webgpu_use_bundles() != 0;
 	if (!use_render_bundles) {
 		print_line("WebGPU: render-bundle caching disabled (?nobundles).");
+	}
+	use_pipeline_warm = godot_js_webgpu_use_warm() != 0;
+	if (!use_pipeline_warm) {
+		print_line("WebGPU: background pipeline warming disabled (?nowarm).");
 	}
 	device_has_transient_attachments = godot_js_webgpu_has_transient_attachments() != 0;
 	const bool use_tiers = godot_js_webgpu_use_tiers() != 0;
@@ -4188,6 +4195,9 @@ void RenderingDeviceDriverWebGPU::_pump_pipeline_warm_queue() {
 	// browser's pipeline cache has usually already done the work. Throttling
 	// keeps the warm from re-creating the create-burst that saturates the
 	// Dawn wire, which is what the deferral fixed in the first place.
+	if (!use_pipeline_warm) {
+		return;
+	}
 	const uint32_t warm_per_frame = 2;
 	uint32_t kicked = 0;
 	while (kicked < warm_per_frame && pipeline_warm_queue.size() > 0) {

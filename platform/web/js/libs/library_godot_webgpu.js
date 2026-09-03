@@ -181,6 +181,14 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('nobc') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_use_warm__sig: 'i',
+	godot_js_webgpu_use_warm: function () {
+		// ?nowarm disables background pipeline warming for A/B of the
+		// first-visit warm-up curve (deferred pipelines then compile only
+		// at first bind).
+		return window.location.search.indexOf('nowarm') >= 0 ? 0 : 1;
+	},
+
 	/**
 	 * Creates the hidden probe canvas (see drivers/webgpu/webgpu_probe.cpp).
 	 * A canvas is permanently locked to its first context type, so the probe
