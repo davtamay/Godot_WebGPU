@@ -52,6 +52,9 @@ int godot_js_webgpu_use_bc();
 // 0 when the page URL carries ?noetc (benchmark A/B switch for the mobile
 // compressed-texture families, ETC2/EAC and ASTC together).
 int godot_js_webgpu_use_etc();
+// Publishes the pipeline-warm backlog (queued + compiles in flight) to the
+// page, so a loading overlay can hold until the first-visit compile settles.
+void godot_js_webgpu_report_warm_pending(int p_pending);
 // 0 when the page URL carries ?nowarm (benchmark A/B switch for the
 // background pipeline warm).
 int godot_js_webgpu_use_warm();
@@ -78,6 +81,10 @@ static uint32_t _data_format_block_info(RenderingDeviceCommons::DataFormat p_for
 // ordering guarantee, and fences/semaphores are recorded but never waited on
 // (a blocking wait on the browser's main thread can never make progress).
 static const uint64_t TOKEN_ID = 1;
+
+// Warm compiles handed to createRenderPipelineAsync/createComputePipelineAsync
+// whose callbacks have not fired yet (main-thread only - no atomics needed).
+static uint32_t g_warm_inflight = 0;
 
 Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t p_frame_count) {
 	ERR_FAIL_COND_V(p_device_index != 0, ERR_INVALID_PARAMETER);
@@ -4610,6 +4617,9 @@ RenderingDeviceDriver::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_c
 }
 
 void RenderingDeviceDriverWebGPU::_on_render_pipeline_async(WGPUCreatePipelineAsyncStatus p_status, WGPURenderPipeline p_pipeline, WGPUStringView p_message, void *p_userdata1, void *p_userdata2) {
+	if (g_warm_inflight > 0) {
+		g_warm_inflight--;
+	}
 	PipelineAsyncTicket *ticket = (PipelineAsyncTicket *)p_userdata1;
 	PipelineInfo *pipeline = ticket->pipeline;
 	const bool succeeded = p_status == WGPUCreatePipelineAsyncStatus_Success && p_pipeline != nullptr;
@@ -4631,6 +4641,9 @@ void RenderingDeviceDriverWebGPU::_on_render_pipeline_async(WGPUCreatePipelineAs
 }
 
 void RenderingDeviceDriverWebGPU::_on_compute_pipeline_async(WGPUCreatePipelineAsyncStatus p_status, WGPUComputePipeline p_pipeline, WGPUStringView p_message, void *p_userdata1, void *p_userdata2) {
+	if (g_warm_inflight > 0) {
+		g_warm_inflight--;
+	}
 	PipelineAsyncTicket *ticket = (PipelineAsyncTicket *)p_userdata1;
 	PipelineInfo *pipeline = ticket->pipeline;
 	const bool succeeded = p_status == WGPUCreatePipelineAsyncStatus_Success && p_pipeline != nullptr;
@@ -4656,9 +4669,14 @@ void RenderingDeviceDriverWebGPU::_pump_pipeline_warm_queue() {
 	// keeps the warm from re-creating the create-burst that saturates the
 	// Dawn wire, which is what the deferral fixed in the first place.
 	if (!use_pipeline_warm) {
+		godot_js_webgpu_report_warm_pending(0);
 		return;
 	}
-	const uint32_t warm_per_frame = 2;
+	// Drain hard while the app is young - the load/overlay window, where a
+	// stall-free first interaction matters more than main-thread headroom
+	// (async creates do not block the Dawn wire the way the old eager sync
+	// creation burst did) - then drop to a trickle.
+	const uint32_t warm_per_frame = present_count < 900 ? 16u : 2u;
 	uint32_t kicked = 0;
 	while (kicked < warm_per_frame && pipeline_warm_queue.size() > 0) {
 		PipelineInfo *pipeline = pipeline_warm_queue[0];
@@ -4705,7 +4723,15 @@ void RenderingDeviceDriverWebGPU::_pump_pipeline_warm_queue() {
 			memdelete(ticket);
 			continue;
 		}
+		g_warm_inflight++;
 		kicked++;
+	}
+	// Publish the backlog only when it changes (one boundary crossing).
+	static int last_reported_pending = -1;
+	const int pending = (int)(pipeline_warm_queue.size() + g_warm_inflight);
+	if (pending != last_reported_pending) {
+		last_reported_pending = pending;
+		godot_js_webgpu_report_warm_pending(pending);
 	}
 }
 
