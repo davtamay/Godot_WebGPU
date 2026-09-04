@@ -188,6 +188,14 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('noetc') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_report_warm_pending__sig: 'vi',
+	godot_js_webgpu_report_warm_pending: function (pending) {
+		// The pipeline-warm backlog (queued + compiles in flight). A page
+		// loading overlay can hold until this reaches zero, so the one-time
+		// first-visit shader compile reads as loading instead of stutter.
+		window['__godotWebGPUWarmPending'] = pending;
+	},
+
 	godot_js_webgpu_use_warm__sig: 'i',
 	godot_js_webgpu_use_warm: function () {
 		// ?nowarm disables background pipeline warming for A/B of the
