@@ -90,7 +90,13 @@ layout(r32ui, set = 0, binding = 5) uniform restrict readonly uimage3D src_light
 layout(r32ui, set = 0, binding = 6) uniform restrict readonly uimage3D src_facing;
 
 layout(r8, set = 0, binding = 7) uniform restrict writeonly image3D dst_sdf;
+#ifdef SDFGI_FLOAT_STORAGE
+// Occlusion stored as RGBA8 (the driver cannot reinterpret the nibble-packed
+// R16_UINT form as an R4G4B4A4 view at sampling time).
+layout(rgba8, set = 0, binding = 8) uniform restrict writeonly image3D dst_occlusion;
+#else
 layout(r16ui, set = 0, binding = 8) uniform restrict writeonly uimage3D dst_occlusion;
+#endif
 
 layout(set = 0, binding = 10, std430) restrict buffer DispatchData {
 	uint x;
@@ -151,7 +157,11 @@ src_process_voxels;
 #ifdef MODE_SCROLL_OCCLUSION
 
 layout(r8, set = 0, binding = 1) uniform restrict image3D dst_occlusion; // 8 volumes stacked along Z
+#ifdef SDFGI_FLOAT_STORAGE
+layout(rgba8, set = 0, binding = 2) uniform restrict readonly image3D src_occlusion;
+#else
 layout(r16ui, set = 0, binding = 2) uniform restrict readonly uimage3D src_occlusion;
+#endif
 
 #endif
 
@@ -217,6 +227,17 @@ void main() {
 	ivec3 write_pos = pos + max(ivec3(0), params.scroll);
 
 	read_pos.z += params.cascade * params.grid_size;
+#ifdef SDFGI_FLOAT_STORAGE
+	// RGBA8 form: volumes 0-3 in the texel's channels, 4-7 one grid width to the right.
+	vec4 occlusion_lo = imageLoad(src_occlusion, read_pos);
+	read_pos.x += params.grid_size;
+	vec4 occlusion_hi = imageLoad(src_occlusion, read_pos);
+
+	for (uint i = 0; i < 4; i++) {
+		imageStore(dst_occlusion, occlusion_pos(i, write_pos), vec4(occlusion_lo[i]));
+		imageStore(dst_occlusion, occlusion_pos(i + 4, write_pos), vec4(occlusion_hi[i]));
+	}
+#else
 	uint occlusion = imageLoad(src_occlusion, read_pos).r;
 	read_pos.x += params.grid_size;
 	occlusion |= imageLoad(src_occlusion, read_pos).r << 16;
@@ -227,6 +248,7 @@ void main() {
 		float o = float((occlusion >> occlusion_shift[i]) & 0xF) / 15.0;
 		imageStore(dst_occlusion, occlusion_pos(i, write_pos), vec4(o));
 	}
+#endif
 
 #endif
 
@@ -975,6 +997,24 @@ void main() {
 
 	// STORE OCCLUSION
 
+#ifdef SDFGI_FLOAT_STORAGE
+	// Same layout the packed form's R4G4B4A4 view presents: volumes 0-3 in
+	// the texel's channels, volumes 4-7 one grid width to the right, each
+	// value quantized to sixteenths (k/15 is exact in RGBA8: k * 17).
+	vec4 occlusion_lo = vec4(0.0);
+	vec4 occlusion_hi = vec4(0.0);
+	for (int i = 0; i < 4; i++) {
+		occlusion_lo[i] = floor(clamp(imageLoad(src_occlusion, occlusion_pos(uint(i), pos)).r * 15.0, 0.0, 15.0)) / 15.0;
+		occlusion_hi[i] = floor(clamp(imageLoad(src_occlusion, occlusion_pos(uint(i + 4), pos)).r * 15.0, 0.0, 15.0)) / 15.0;
+	}
+	{
+		ivec3 occ_pos = pos;
+		occ_pos.z += params.cascade * params.grid_size;
+		imageStore(dst_occlusion, occ_pos, occlusion_lo);
+		occ_pos.x += params.grid_size;
+		imageStore(dst_occlusion, occ_pos, occlusion_hi);
+	}
+#else
 	uint occlusion = 0;
 	const uint occlusion_shift[8] = uint[](12, 8, 4, 0, 28, 24, 20, 16);
 	for (int i = 0; i < 8; i++) {
@@ -988,6 +1028,7 @@ void main() {
 		occ_pos.x += params.grid_size;
 		imageStore(dst_occlusion, occ_pos, uvec4(occlusion >> 16));
 	}
+#endif
 
 	// STORE POSITIONS
 
