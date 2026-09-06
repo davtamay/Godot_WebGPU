@@ -473,17 +473,30 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 		render_sdf_half[1] = create_clear_texture(tf_render, "SDFGI Render SDF Half 1");
 	}
 
+	// Occlusion holds four 4-bit values per texel and radiance an RGBE9995
+	// value, written as integers and sampled through R4G4B4A4 / E5B9G9R9
+	// views. Drivers that cannot reinterpret formats that way store them in
+	// RGBA8 / RGBA16F instead (the writers' SDFGI_FLOAT_STORAGE twins); every
+	// reader samples floats either way.
 	RD::TextureFormat tf_occlusion = tf_sdf;
-	tf_occlusion.format = RD::DATA_FORMAT_R16_UINT;
-	tf_occlusion.shareable_formats.push_back(RD::DATA_FORMAT_R16_UINT);
-	tf_occlusion.shareable_formats.push_back(RD::DATA_FORMAT_R4G4B4A4_UNORM_PACK16);
+	if (gi->sdfgi_float_storage) {
+		tf_occlusion.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
+	} else {
+		tf_occlusion.format = RD::DATA_FORMAT_R16_UINT;
+		tf_occlusion.shareable_formats.push_back(RD::DATA_FORMAT_R16_UINT);
+		tf_occlusion.shareable_formats.push_back(RD::DATA_FORMAT_R4G4B4A4_UNORM_PACK16);
+	}
 	tf_occlusion.depth *= cascades.size(); //use depth for occlusion slices
 	tf_occlusion.width *= 2; //use width for the other half
 
 	RD::TextureFormat tf_light = tf_sdf;
-	tf_light.format = RD::DATA_FORMAT_R32_UINT;
-	tf_light.shareable_formats.push_back(RD::DATA_FORMAT_R32_UINT);
-	tf_light.shareable_formats.push_back(RD::DATA_FORMAT_E5B9G9R9_UFLOAT_PACK32);
+	if (gi->sdfgi_float_storage) {
+		tf_light.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+	} else {
+		tf_light.format = RD::DATA_FORMAT_R32_UINT;
+		tf_light.shareable_formats.push_back(RD::DATA_FORMAT_R32_UINT);
+		tf_light.shareable_formats.push_back(RD::DATA_FORMAT_E5B9G9R9_UFLOAT_PACK32);
+	}
 
 	RD::TextureFormat tf_aniso0 = tf_sdf;
 	tf_aniso0.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
@@ -517,16 +530,22 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 		//octahedral lightprobes
 		RD::TextureFormat tf_octprobes = tf_probes;
 		tf_octprobes.array_layers = cascades.size() * 2;
-		tf_octprobes.format = RD::DATA_FORMAT_R32_UINT; //pack well with RGBE
 		tf_octprobes.width = probe_axis_count * probe_axis_count * (SDFGI::LIGHTPROBE_OCT_SIZE + 2);
 		tf_octprobes.height = probe_axis_count * (SDFGI::LIGHTPROBE_OCT_SIZE + 2);
-		tf_octprobes.shareable_formats.push_back(RD::DATA_FORMAT_R32_UINT);
-		tf_octprobes.shareable_formats.push_back(RD::DATA_FORMAT_E5B9G9R9_UFLOAT_PACK32);
+		if (gi->sdfgi_float_storage) {
+			tf_octprobes.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+		} else {
+			tf_octprobes.format = RD::DATA_FORMAT_R32_UINT; //pack well with RGBE
+			tf_octprobes.shareable_formats.push_back(RD::DATA_FORMAT_R32_UINT);
+			tf_octprobes.shareable_formats.push_back(RD::DATA_FORMAT_E5B9G9R9_UFLOAT_PACK32);
+		}
 		//lightprobe texture is an octahedral texture
 
 		lightprobe_data = create_clear_texture(tf_octprobes, "SDFGI LightProbe Data");
 		RD::TextureView tv;
-		tv.format_override = RD::DATA_FORMAT_E5B9G9R9_UFLOAT_PACK32;
+		if (!gi->sdfgi_float_storage) {
+			tv.format_override = RD::DATA_FORMAT_E5B9G9R9_UFLOAT_PACK32;
+		}
 		lightprobe_texture = RD::get_singleton()->texture_create_shared(tv, lightprobe_data);
 
 		//texture handling ambient data, to integrate with volumetric foc
@@ -545,7 +564,9 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 	occlusion_data = create_clear_texture(tf_occlusion, "SDFGI Occlusion Data");
 	{
 		RD::TextureView tv;
-		tv.format_override = RD::DATA_FORMAT_R4G4B4A4_UNORM_PACK16;
+		if (!gi->sdfgi_float_storage) {
+			tv.format_override = RD::DATA_FORMAT_R4G4B4A4_UNORM_PACK16;
+		}
 		occlusion_texture = RD::get_singleton()->texture_create_shared(tv, occlusion_data);
 	}
 
@@ -561,7 +582,9 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 
 		{
 			RD::TextureView tv;
-			tv.format_override = RD::DATA_FORMAT_E5B9G9R9_UFLOAT_PACK32;
+			if (!gi->sdfgi_float_storage) {
+				tv.format_override = RD::DATA_FORMAT_E5B9G9R9_UFLOAT_PACK32;
+			}
 			cascade.light_tex = RD::get_singleton()->texture_create_shared(tv, cascade.light_data);
 		}
 
@@ -667,7 +690,7 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 				uniforms.push_back(u);
 			}
 
-			cascade.sdf_store_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->sdfgi_shader.preprocess.version_get_shader(gi->sdfgi_shader.preprocess_shader, SDFGIShader::PRE_PROCESS_STORE), 0);
+			cascade.sdf_store_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->sdfgi_shader.preprocess.version_get_shader(gi->sdfgi_shader.preprocess_shader, gi->sdfgi_shader.preprocess_store_variant), 0);
 		}
 
 		{
@@ -734,7 +757,7 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 				uniforms.push_back(u);
 			}
 
-			cascade.scroll_occlusion_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->sdfgi_shader.preprocess.version_get_shader(gi->sdfgi_shader.preprocess_shader, SDFGIShader::PRE_PROCESS_SCROLL_OCCLUSION), 0);
+			cascade.scroll_occlusion_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->sdfgi_shader.preprocess.version_get_shader(gi->sdfgi_shader.preprocess_shader, gi->sdfgi_shader.preprocess_scroll_occlusion_variant), 0);
 		}
 	}
 
@@ -832,8 +855,8 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 			uniforms.push_back(u);
 		}
 
-		cascade.sdf_direct_light_static_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->sdfgi_shader.direct_light.version_get_shader(gi->sdfgi_shader.direct_light_shader, SDFGIShader::DIRECT_LIGHT_MODE_STATIC), 0);
-		cascade.sdf_direct_light_dynamic_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->sdfgi_shader.direct_light.version_get_shader(gi->sdfgi_shader.direct_light_shader, SDFGIShader::DIRECT_LIGHT_MODE_DYNAMIC), 0);
+		cascade.sdf_direct_light_static_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->sdfgi_shader.direct_light.version_get_shader(gi->sdfgi_shader.direct_light_shader, gi->sdfgi_shader.direct_light_variant_base + SDFGIShader::DIRECT_LIGHT_MODE_STATIC), 0);
+		cascade.sdf_direct_light_dynamic_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->sdfgi_shader.direct_light.version_get_shader(gi->sdfgi_shader.direct_light_shader, gi->sdfgi_shader.direct_light_variant_base + SDFGIShader::DIRECT_LIGHT_MODE_DYNAMIC), 0);
 	}
 
 	//preprocess initialize uniform set
@@ -1118,7 +1141,7 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 			uniforms.push_back(u);
 		}
 
-		cascades[i].integrate_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->sdfgi_shader.integrate.version_get_shader(gi->sdfgi_shader.integrate_shader, 0), 0);
+		cascades[i].integrate_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->sdfgi_shader.integrate.version_get_shader(gi->sdfgi_shader.integrate_shader, gi->sdfgi_shader.integrate_variant_base), 0);
 	}
 
 	bounce_feedback = RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_bounce_feedback(p_env);
@@ -1368,7 +1391,7 @@ void GI::SDFGI::update_probes(RID p_env, SkyRD::Sky *p_sky) {
 						uniforms.push_back(u);
 					}
 
-					integrate_sky_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->sdfgi_shader.integrate.version_get_shader(gi->sdfgi_shader.integrate_shader, 0), 1);
+					integrate_sky_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, gi->sdfgi_shader.integrate.version_get_shader(gi->sdfgi_shader.integrate_shader, gi->sdfgi_shader.integrate_variant_base), 1);
 				}
 				sky_uniform_set = integrate_sky_uniform_set;
 				push_constant.sky_flags |= SDFGIShader::IntegratePushConstant::SKY_FLAGS_MODE_SKY;
@@ -3580,6 +3603,12 @@ void GI::init(SkyRD *p_sky) {
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 
+	// SDFGI packs radiance as RGBE into R32_UINT and occlusion as four 4-bit
+	// values into R16_UINT, then samples them through E5B9G9R9 / R4G4B4A4
+	// views. Where the driver cannot reinterpret formats that way, the
+	// writers store plain floats (RGBA16F / RGBA8) and nothing else changes.
+	sdfgi_float_storage = !RD::get_singleton()->has_feature(RD::SUPPORTS_TEXTURE_FORMAT_REINTERPRETATION);
+
 	/* GI */
 
 	{
@@ -3636,21 +3665,37 @@ void GI::init(SkyRD *p_sky) {
 	/* SDGFI */
 
 	{
-		Vector<String> preprocess_modes;
-		preprocess_modes.push_back("\n#define MODE_SCROLL\n");
-		preprocess_modes.push_back("\n#define MODE_SCROLL_OCCLUSION\n");
-		preprocess_modes.push_back("\n#define MODE_INITIALIZE_JUMP_FLOOD\n");
-		preprocess_modes.push_back("\n#define MODE_INITIALIZE_JUMP_FLOOD_HALF\n");
-		preprocess_modes.push_back("\n#define MODE_JUMPFLOOD\n");
-		preprocess_modes.push_back("\n#define MODE_JUMPFLOOD_OPTIMIZED\n");
-		preprocess_modes.push_back("\n#define MODE_UPSCALE_JUMP_FLOOD\n");
-		preprocess_modes.push_back("\n#define MODE_OCCLUSION\n");
-		preprocess_modes.push_back("\n#define MODE_STORE\n");
+		Vector<ShaderRD::VariantDefine> preprocess_modes;
+		preprocess_modes.push_back(ShaderRD::VariantDefine(0, "\n#define MODE_SCROLL\n", true));
+		preprocess_modes.push_back(ShaderRD::VariantDefine(0, "\n#define MODE_SCROLL_OCCLUSION\n", true));
+		preprocess_modes.push_back(ShaderRD::VariantDefine(0, "\n#define MODE_INITIALIZE_JUMP_FLOOD\n", true));
+		preprocess_modes.push_back(ShaderRD::VariantDefine(0, "\n#define MODE_INITIALIZE_JUMP_FLOOD_HALF\n", true));
+		preprocess_modes.push_back(ShaderRD::VariantDefine(0, "\n#define MODE_JUMPFLOOD\n", true));
+		preprocess_modes.push_back(ShaderRD::VariantDefine(0, "\n#define MODE_JUMPFLOOD_OPTIMIZED\n", true));
+		preprocess_modes.push_back(ShaderRD::VariantDefine(0, "\n#define MODE_UPSCALE_JUMP_FLOOD\n", true));
+		preprocess_modes.push_back(ShaderRD::VariantDefine(0, "\n#define MODE_OCCLUSION\n", true));
+		preprocess_modes.push_back(ShaderRD::VariantDefine(0, "\n#define MODE_STORE\n", true));
+		// The float-storage twins of the two modes that touch the packed
+		// occlusion (RGBA8 instead of nibble-packed R16_UINT): store writes
+		// it, scroll occlusion reads it back. Off unless the driver needs them.
+		preprocess_modes.push_back(ShaderRD::VariantDefine(1, "\n#define MODE_STORE\n#define SDFGI_FLOAT_STORAGE\n", false));
+		preprocess_modes.push_back(ShaderRD::VariantDefine(1, "\n#define MODE_SCROLL_OCCLUSION\n#define SDFGI_FLOAT_STORAGE\n", false));
 		String defines = "\n#define OCCLUSION_SIZE " + itos(SDFGI::CASCADE_SIZE / SDFGI::PROBE_DIVISOR) + "\n";
 		sdfgi_shader.preprocess.initialize(preprocess_modes, defines);
+		if (sdfgi_float_storage) {
+			sdfgi_shader.preprocess.enable_group(1);
+			sdfgi_shader.preprocess_store_variant = SDFGIShader::PRE_PROCESS_MAX;
+			sdfgi_shader.preprocess_scroll_occlusion_variant = SDFGIShader::PRE_PROCESS_MAX + 1;
+		}
 		sdfgi_shader.preprocess_shader = sdfgi_shader.preprocess.version_create();
 		for (int i = 0; i < SDFGIShader::PRE_PROCESS_MAX; i++) {
-			sdfgi_shader.preprocess_pipeline[i].create_compute_pipeline(sdfgi_shader.preprocess.version_get_shader(sdfgi_shader.preprocess_shader, i));
+			int variant = i;
+			if (i == SDFGIShader::PRE_PROCESS_STORE) {
+				variant = sdfgi_shader.preprocess_store_variant;
+			} else if (i == SDFGIShader::PRE_PROCESS_SCROLL_OCCLUSION) {
+				variant = sdfgi_shader.preprocess_scroll_occlusion_variant;
+			}
+			sdfgi_shader.preprocess_pipeline[i].create_compute_pipeline(sdfgi_shader.preprocess.version_get_shader(sdfgi_shader.preprocess_shader, variant));
 		}
 	}
 
@@ -3658,13 +3703,20 @@ void GI::init(SkyRD *p_sky) {
 		//calculate tables
 		String defines = "\n#define OCT_SIZE " + itos(SDFGI::LIGHTPROBE_OCT_SIZE) + "\n";
 
-		Vector<String> direct_light_modes;
-		direct_light_modes.push_back("\n#define MODE_PROCESS_STATIC\n");
-		direct_light_modes.push_back("\n#define MODE_PROCESS_DYNAMIC\n");
+		Vector<ShaderRD::VariantDefine> direct_light_modes;
+		for (int float_storage = 0; float_storage < 2; float_storage++) {
+			String storage_base = float_storage ? "\n#define SDFGI_FLOAT_STORAGE\n" : "";
+			direct_light_modes.push_back(ShaderRD::VariantDefine(float_storage, storage_base + "\n#define MODE_PROCESS_STATIC\n", float_storage == 0));
+			direct_light_modes.push_back(ShaderRD::VariantDefine(float_storage, storage_base + "\n#define MODE_PROCESS_DYNAMIC\n", float_storage == 0));
+		}
 		sdfgi_shader.direct_light.initialize(direct_light_modes, defines);
+		if (sdfgi_float_storage) {
+			sdfgi_shader.direct_light.enable_group(1);
+			sdfgi_shader.direct_light_variant_base = SDFGIShader::DIRECT_LIGHT_MODE_MAX;
+		}
 		sdfgi_shader.direct_light_shader = sdfgi_shader.direct_light.version_create();
 		for (int i = 0; i < SDFGIShader::DIRECT_LIGHT_MODE_MAX; i++) {
-			sdfgi_shader.direct_light_pipeline[i].create_compute_pipeline(sdfgi_shader.direct_light.version_get_shader(sdfgi_shader.direct_light_shader, i));
+			sdfgi_shader.direct_light_pipeline[i].create_compute_pipeline(sdfgi_shader.direct_light.version_get_shader(sdfgi_shader.direct_light_shader, sdfgi_shader.direct_light_variant_base + i));
 		}
 	}
 
@@ -3676,16 +3728,23 @@ void GI::init(SkyRD *p_sky) {
 			defines += "\n#define USE_RADIANCE_OCTMAP_ARRAY\n";
 		}
 
-		Vector<String> integrate_modes;
-		integrate_modes.push_back("\n#define MODE_PROCESS\n");
-		integrate_modes.push_back("\n#define MODE_STORE\n");
-		integrate_modes.push_back("\n#define MODE_SCROLL\n");
-		integrate_modes.push_back("\n#define MODE_SCROLL_STORE\n");
+		Vector<ShaderRD::VariantDefine> integrate_modes;
+		for (int float_storage = 0; float_storage < 2; float_storage++) {
+			String storage_base = float_storage ? "\n#define SDFGI_FLOAT_STORAGE\n" : "";
+			integrate_modes.push_back(ShaderRD::VariantDefine(float_storage, storage_base + "\n#define MODE_PROCESS\n", float_storage == 0));
+			integrate_modes.push_back(ShaderRD::VariantDefine(float_storage, storage_base + "\n#define MODE_STORE\n", float_storage == 0));
+			integrate_modes.push_back(ShaderRD::VariantDefine(float_storage, storage_base + "\n#define MODE_SCROLL\n", float_storage == 0));
+			integrate_modes.push_back(ShaderRD::VariantDefine(float_storage, storage_base + "\n#define MODE_SCROLL_STORE\n", float_storage == 0));
+		}
 		sdfgi_shader.integrate.initialize(integrate_modes, defines);
+		if (sdfgi_float_storage) {
+			sdfgi_shader.integrate.enable_group(1);
+			sdfgi_shader.integrate_variant_base = SDFGIShader::INTEGRATE_MODE_MAX;
+		}
 		sdfgi_shader.integrate_shader = sdfgi_shader.integrate.version_create();
 
 		for (int i = 0; i < SDFGIShader::INTEGRATE_MODE_MAX; i++) {
-			sdfgi_shader.integrate_pipeline[i].create_compute_pipeline(sdfgi_shader.integrate.version_get_shader(sdfgi_shader.integrate_shader, i));
+			sdfgi_shader.integrate_pipeline[i].create_compute_pipeline(sdfgi_shader.integrate.version_get_shader(sdfgi_shader.integrate_shader, sdfgi_shader.integrate_variant_base + i));
 		}
 
 		{
@@ -3710,7 +3769,7 @@ void GI::init(SkyRD *p_sky) {
 				uniforms.push_back(u);
 			}
 
-			sdfgi_shader.integrate_default_sky_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, sdfgi_shader.integrate.version_get_shader(sdfgi_shader.integrate_shader, 0), 1);
+			sdfgi_shader.integrate_default_sky_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, sdfgi_shader.integrate.version_get_shader(sdfgi_shader.integrate_shader, sdfgi_shader.integrate_variant_base), 1);
 		}
 	}
 
