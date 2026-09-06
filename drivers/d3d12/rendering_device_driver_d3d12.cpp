@@ -6091,6 +6091,8 @@ bool RenderingDeviceDriverD3D12::has_feature(Features p_feature) {
 	switch (p_feature) {
 		case SUPPORTS_READ_WRITE_STORAGE_IMAGES_ANY_FORMAT:
 			return true;
+		case SUPPORTS_TEXTURE_FORMAT_REINTERPRETATION:
+			return true;
 		case SUPPORTS_HALF_FLOAT:
 			return shader_capabilities.native_16bit_ops;
 		case SUPPORTS_FRAGMENT_SHADER_WITH_ONLY_SIDE_EFFECTS:
