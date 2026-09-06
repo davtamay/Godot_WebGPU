@@ -69,6 +69,7 @@ int godot_js_webgpu_use_indirect();
 int godot_js_webgpu_use_diff_flush();
 // 1 when the page URL carries ?perfcounters (periodic driver counter print).
 int godot_js_webgpu_perf_counters();
+int godot_js_webgpu_use_subgroups();
 // 0 when the page URL carries ?notiers (benchmark A/B switch for the
 // texture-format-tier paths).
 int godot_js_webgpu_use_tiers();
@@ -128,6 +129,7 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 		ERR_FAIL_V_MSG(ERR_CANT_CREATE, "Failed to query WebGPU device limits.");
 	}
 	device_has_shader_f16 = wgpuDeviceHasFeature(device, WGPUFeatureName_ShaderF16);
+	device_has_subgroups = wgpuDeviceHasFeature(device, WGPUFeatureName_Subgroups) && godot_js_webgpu_use_subgroups() != 0;
 	device_has_depth_clip_control = wgpuDeviceHasFeature(device, WGPUFeatureName_DepthClipControl);
 	device_has_timestamp_query = wgpuDeviceHasFeature(device, WGPUFeatureName_TimestampQuery);
 	device_has_texture_swizzle = wgpuDeviceHasFeature(device, WGPUFeatureName_TextureComponentSwizzle) && godot_js_webgpu_use_native_swizzle() != 0;
@@ -222,10 +224,10 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 		perf.frames++;
 		const uint32_t PERF_WINDOW = 120;
 		if (perf.frames >= PERF_WINDOW) {
-			print_line(vformat("WGPUPERF frames=%d wb_calls=%d wb_kb=%d fastpath=%d hash_hit=%d builds=%d direct=%d param_writes=%d bg_new=%d pipe_new=%d",
+			print_line(vformat("WGPUPERF frames=%d wb_calls=%d wb_kb=%d fastpath=%d hash_hit=%d builds=%d direct=%d param_writes=%d bg_new=%d pipe_new=%d sg_new=%d",
 					perf.frames, perf.write_buffer_calls, (int)(perf.write_buffer_bytes / 1024),
 					perf.bundle_fastpath_hits, perf.bundle_hash_hits, perf.bundle_builds, perf.bundle_direct,
-					perf.indirect_param_writes, perf.bind_groups_created, perf.pipelines_created));
+					perf.indirect_param_writes, perf.bind_groups_created, perf.pipelines_created, perf.native_subgroup_modules));
 			perf = PerfCounters();
 		}
 	}
@@ -2863,13 +2865,29 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 	// Shader modules from the container's WGSL.
 	for (int64_t i = 0; i < p_shader_container->shaders.size(); i++) {
 		const RenderingShaderContainer::Shader &stage = p_shader_container->shaders[i];
+		const uint8_t *code_ptr = stage.code_compressed_bytes.ptr();
+		uint32_t code_compressed_size = stage.code_compressed_bytes.size();
+		uint32_t code_decompressed_size = stage.code_decompressed_size;
+		uint32_t code_compression_flags = stage.code_compression_flags;
+		// Devices with the subgroups feature take the stage's native wave-op
+		// translation when the bake produced one (same bindings, real wave
+		// coherence in the clustered light loop).
+		const RenderingShaderContainerWebGPU *webgpu_container = Object::cast_to<RenderingShaderContainerWebGPU>(p_shader_container.ptr());
+		if (device_has_subgroups && webgpu_container != nullptr && i < webgpu_container->native_shaders.size() && webgpu_container->native_shaders[i].code_decompressed_size > 0) {
+			const RenderingShaderContainerWebGPU::NativeShader &native = webgpu_container->native_shaders[i];
+			code_ptr = native.code_compressed_bytes.ptr();
+			code_compressed_size = native.code_compressed_bytes.size();
+			code_decompressed_size = native.code_decompressed_size;
+			code_compression_flags = native.code_compression_flags;
+			perf.native_subgroup_modules++;
+		}
 		Vector<uint8_t> wgsl;
-		wgsl.resize(stage.code_decompressed_size + 1);
-		if (!p_shader_container->decompress_code(stage.code_compressed_bytes.ptr(), stage.code_compressed_bytes.size(), stage.code_compression_flags, wgsl.ptrw(), stage.code_decompressed_size)) {
+		wgsl.resize(code_decompressed_size + 1);
+		if (!p_shader_container->decompress_code(code_ptr, code_compressed_size, code_compression_flags, wgsl.ptrw(), code_decompressed_size)) {
 			shader_free(ShaderID(shader));
 			ERR_FAIL_V_MSG(ShaderID(), vformat("Failed to decompress WGSL for stage #%d.", i));
 		}
-		wgsl.ptrw()[stage.code_decompressed_size] = 0;
+		wgsl.ptrw()[code_decompressed_size] = 0;
 		{
 			// Attribute order varies (@group @binding or @binding @group);
 			// pair each @binding with the nearest @group either side.
@@ -3101,7 +3119,7 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 		}
 
 		WGPUShaderSourceWGSL wgsl_source = WGPU_SHADER_SOURCE_WGSL_INIT;
-		wgsl_source.code = { (const char *)wgsl.ptr(), stage.code_decompressed_size };
+		wgsl_source.code = { (const char *)wgsl.ptr(), code_decompressed_size };
 		WGPUShaderModuleDescriptor module_desc = WGPU_SHADER_MODULE_DESCRIPTOR_INIT;
 		module_desc.nextInChain = &wgsl_source.chain;
 		WGPUShaderModule module = wgpuDeviceCreateShaderModule(device, &module_desc);

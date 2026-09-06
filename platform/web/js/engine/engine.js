@@ -159,6 +159,11 @@ const Engine = (function () {
 			if (adapter['features'] && adapter['features'].has('shader-f16')) {
 				requiredFeatures.push('shader-f16');
 			}
+			// Native wave operations for the clustered light loop; the driver
+			// falls back to per-invocation shader variants without it.
+			if (adapter['features'] && adapter['features'].has('subgroups')) {
+				requiredFeatures.push('subgroups');
+			}
 			// GPU timing. Without this the engine's per-viewport render-time
 			// profiling reads zero on the web. Note browsers quantize the
 			// values for security unless launched with developer flags, so
