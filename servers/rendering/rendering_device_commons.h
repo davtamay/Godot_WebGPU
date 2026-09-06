@@ -1034,6 +1034,10 @@ public:
 		// single-channel (e.g. rgba16f); WebGPU restricts read_write to
 		// r32float/r32uint/r32sint.
 		SUPPORTS_READ_WRITE_STORAGE_IMAGES_ANY_FORMAT,
+		// Sampling a texture through a shared view of a different but
+		// bit-compatible format (e.g. R32_UINT data read as
+		// E5B9G9R9_UFLOAT); WebGPU allows only sRGB/linear view pairs.
+		SUPPORTS_TEXTURE_FORMAT_REINTERPRETATION,
 		SUPPORTS_VULKAN_MEMORY_MODEL,
 		SUPPORTS_FRAMEBUFFER_DEPTH_RESOLVE,
 		SUPPORTS_POINT_SIZE,

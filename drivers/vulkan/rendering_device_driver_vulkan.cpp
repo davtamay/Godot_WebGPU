@@ -7446,6 +7446,8 @@ bool RenderingDeviceDriverVulkan::has_feature(Features p_feature) {
 			return true;
 		case SUPPORTS_READ_WRITE_STORAGE_IMAGES_ANY_FORMAT:
 			return true;
+		case SUPPORTS_TEXTURE_FORMAT_REINTERPRETATION:
+			return true;
 		case SUPPORTS_BUFFER_DEVICE_ADDRESS:
 			return buffer_device_address_support;
 		case SUPPORTS_IMAGE_ATOMIC_32_BIT:
