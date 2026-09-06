@@ -54,7 +54,7 @@ uvec4 group_load(ivec3 p_pos) {
 #ifdef MODE_OCCLUSION
 
 layout(r16ui, set = 0, binding = 1) uniform restrict readonly uimage3D src_color;
-layout(r8, set = 0, binding = 2) uniform restrict image3D dst_occlusion[8];
+layout(r8, set = 0, binding = 2) uniform restrict image3D dst_occlusion; // 8 volumes stacked along Z
 layout(r32ui, set = 0, binding = 3) uniform restrict readonly uimage3D src_facing;
 
 const uvec2 group_size_offset[11] = uvec2[](uvec2(1, 0), uvec2(3, 1), uvec2(6, 4), uvec2(10, 10), uvec2(15, 20), uvec2(21, 35), uvec2(28, 56), uvec2(36, 84), uvec2(42, 120), uvec2(46, 162), uvec2(48, 208));
@@ -84,7 +84,7 @@ uint get_facing(ivec3 p_pos) {
 
 layout(rgba8ui, set = 0, binding = 1) uniform restrict readonly uimage3D src_positions;
 layout(r16ui, set = 0, binding = 2) uniform restrict readonly uimage3D src_albedo;
-layout(r8, set = 0, binding = 3) uniform restrict readonly image3D src_occlusion[8];
+layout(r8, set = 0, binding = 3) uniform restrict readonly image3D src_occlusion; // 8 volumes stacked along Z
 layout(r32ui, set = 0, binding = 4) uniform restrict readonly uimage3D src_light;
 layout(r32ui, set = 0, binding = 5) uniform restrict readonly uimage3D src_light_aniso;
 layout(r32ui, set = 0, binding = 6) uniform restrict readonly uimage3D src_facing;
@@ -150,7 +150,7 @@ src_process_voxels;
 
 #ifdef MODE_SCROLL_OCCLUSION
 
-layout(r8, set = 0, binding = 1) uniform restrict image3D dst_occlusion[8];
+layout(r8, set = 0, binding = 1) uniform restrict image3D dst_occlusion; // 8 volumes stacked along Z
 layout(r16ui, set = 0, binding = 2) uniform restrict readonly uimage3D src_occlusion;
 
 #endif
@@ -169,6 +169,12 @@ layout(push_constant, std430) uniform Params {
 	uint pad;
 }
 params;
+
+// The eight per-direction occlusion volumes share one texture, stacked along
+// Z: volume i covers z in [i * grid_size, (i + 1) * grid_size).
+ivec3 occlusion_pos(uint p_index, ivec3 p_pos) {
+	return p_pos + ivec3(0, 0, int(p_index) * params.grid_size);
+}
 
 void main() {
 #ifdef MODE_SCROLL
@@ -219,7 +225,7 @@ void main() {
 
 	for (uint i = 0; i < 8; i++) {
 		float o = float((occlusion >> occlusion_shift[i]) & 0xF) / 15.0;
-		imageStore(dst_occlusion[i], write_pos, vec4(o));
+		imageStore(dst_occlusion, occlusion_pos(i, write_pos), vec4(o));
 	}
 
 #endif
@@ -609,7 +615,7 @@ void main() {
 							uint facing_x = get_facing(read_x - region_offset);
 							if (facing_x == 0) {
 								if (all(greaterThanEqual(read_x, ivec3(0))) && all(lessThan(read_x, ivec3(params.grid_size)))) {
-									occ += imageLoad(dst_occlusion[params.occlusion_index], read_x).r;
+									occ += imageLoad(dst_occlusion, occlusion_pos(params.occlusion_index, read_x)).r;
 									avg += 1.0;
 								}
 							} else {
@@ -621,7 +627,7 @@ void main() {
 							uint facing_y = get_facing(read_y - region_offset);
 							if (facing_y == 0) {
 								if (all(greaterThanEqual(read_y, ivec3(0))) && all(lessThan(read_y, ivec3(params.grid_size)))) {
-									occ += imageLoad(dst_occlusion[params.occlusion_index], read_y).r;
+									occ += imageLoad(dst_occlusion, occlusion_pos(params.occlusion_index, read_y)).r;
 									avg += 1.0;
 								}
 							} else {
@@ -633,7 +639,7 @@ void main() {
 							uint facing_z = get_facing(read_z - region_offset);
 							if (facing_z == 0) {
 								if (all(greaterThanEqual(read_z, ivec3(0))) && all(lessThan(read_z, ivec3(params.grid_size)))) {
-									occ += imageLoad(dst_occlusion[params.occlusion_index], read_z).r;
+									occ += imageLoad(dst_occlusion, occlusion_pos(params.occlusion_index, read_z)).r;
 									avg += 1.0;
 								}
 							} else {
@@ -647,7 +653,7 @@ void main() {
 							}
 						}
 
-						imageStore(dst_occlusion[params.occlusion_index], offset, vec4(occ));
+						imageStore(dst_occlusion, occlusion_pos(params.occlusion_index, offset), vec4(occ));
 					}
 				}
 			}
@@ -700,7 +706,7 @@ void main() {
 						if (f == 0) {
 							read_offset += region_offset;
 							if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-								occ += imageLoad(dst_occlusion[params.occlusion_index], read_offset).r;
+								occ += imageLoad(dst_occlusion, occlusion_pos(params.occlusion_index, read_offset)).r;
 								avg += 1.0;
 							}
 						}
@@ -712,7 +718,7 @@ void main() {
 						if (f == 0) {
 							read_offset += region_offset;
 							if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-								occ += imageLoad(dst_occlusion[params.occlusion_index], read_offset).r;
+								occ += imageLoad(dst_occlusion, occlusion_pos(params.occlusion_index, read_offset)).r;
 								avg += 1.0;
 							}
 						}
@@ -724,7 +730,7 @@ void main() {
 						if (f == 0) {
 							read_offset += region_offset;
 							if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-								occ += imageLoad(dst_occlusion[params.occlusion_index], read_offset).r;
+								occ += imageLoad(dst_occlusion, occlusion_pos(params.occlusion_index, read_offset)).r;
 								avg += 1.0;
 							}
 						}
@@ -738,7 +744,7 @@ void main() {
 						if (f == 0) {
 							read_offset += region_offset;
 							if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-								occ += imageLoad(dst_occlusion[params.occlusion_index], read_offset).r;
+								occ += imageLoad(dst_occlusion, occlusion_pos(params.occlusion_index, read_offset)).r;
 								avg += 1.0;
 							}
 						}
@@ -750,7 +756,7 @@ void main() {
 						if (f == 0) {
 							read_offset += region_offset;
 							if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-								occ += imageLoad(dst_occlusion[params.occlusion_index], read_offset).r;
+								occ += imageLoad(dst_occlusion, occlusion_pos(params.occlusion_index, read_offset)).r;
 								avg += 1.0;
 							}
 						}
@@ -762,7 +768,7 @@ void main() {
 						if (f == 0) {
 							read_offset += region_offset;
 							if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-								occ += imageLoad(dst_occlusion[params.occlusion_index], read_offset).r;
+								occ += imageLoad(dst_occlusion, occlusion_pos(params.occlusion_index, read_offset)).r;
 								avg += 1.0;
 							}
 						}
@@ -776,7 +782,7 @@ void main() {
 						if (f == 0) {
 							read_offset += region_offset;
 							if (all(greaterThanEqual(read_offset, ivec3(0))) && all(lessThan(read_offset, ivec3(params.grid_size)))) {
-								occ += imageLoad(dst_occlusion[params.occlusion_index], read_offset).r;
+								occ += imageLoad(dst_occlusion, occlusion_pos(params.occlusion_index, read_offset)).r;
 								avg += 1.0;
 							}
 						}
@@ -786,7 +792,7 @@ void main() {
 						occ /= avg;
 					}
 
-					imageStore(dst_occlusion[params.occlusion_index], offset, vec4(occ));
+					imageStore(dst_occlusion, occlusion_pos(params.occlusion_index, offset), vec4(occ));
 				}
 			}
 		}
@@ -920,9 +926,9 @@ void main() {
 				}
 
 				if (occlude_total > 0.0) {
-					float occ = imageLoad(dst_occlusion[params.occlusion_index], offset).r;
+					float occ = imageLoad(dst_occlusion, occlusion_pos(params.occlusion_index, offset)).r;
 					occ *= visible / occlude_total;
-					imageStore(dst_occlusion[params.occlusion_index], offset, vec4(occ));
+					imageStore(dst_occlusion, occlusion_pos(params.occlusion_index, offset), vec4(occ));
 				}
 			}
 		}
@@ -972,7 +978,7 @@ void main() {
 	uint occlusion = 0;
 	const uint occlusion_shift[8] = uint[](12, 8, 4, 0, 28, 24, 20, 16);
 	for (int i = 0; i < 8; i++) {
-		float occ = imageLoad(src_occlusion[i], pos).r;
+		float occ = imageLoad(src_occlusion, occlusion_pos(uint(i), pos)).r;
 		occlusion |= uint(clamp(occ * 15.0, 0.0, 15.0)) << occlusion_shift[i];
 	}
 	{
