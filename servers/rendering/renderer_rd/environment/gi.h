@@ -295,6 +295,9 @@ private:
 		SdfgiPreprocessShaderRD preprocess;
 		RID preprocess_shader;
 		PipelineDeferredRD preprocess_pipeline[PRE_PROCESS_MAX];
+		// The float-storage twins follow the regular variants: store, then scroll occlusion.
+		int preprocess_store_variant = PRE_PROCESS_STORE;
+		int preprocess_scroll_occlusion_variant = PRE_PROCESS_SCROLL_OCCLUSION;
 
 		struct DebugPushConstant {
 			float grid_size[3];
@@ -391,6 +394,7 @@ private:
 		SdfgiDirectLightShaderRD direct_light;
 		RID direct_light_shader;
 		PipelineDeferredRD direct_light_pipeline[DIRECT_LIGHT_MODE_MAX];
+		int direct_light_variant_base = 0; // DIRECT_LIGHT_MODE_MAX when the float-storage twins are in use.
 
 		enum {
 			INTEGRATE_MODE_PROCESS,
@@ -435,6 +439,7 @@ private:
 		SdfgiIntegrateShaderRD integrate;
 		RID integrate_shader;
 		PipelineDeferredRD integrate_pipeline[INTEGRATE_MODE_MAX];
+		int integrate_variant_base = 0; // INTEGRATE_MODE_MAX when the float-storage twins are in use.
 
 		RID integrate_default_sky_uniform_set;
 
@@ -823,6 +828,11 @@ public:
 	RID default_voxel_gi_buffer;
 
 	bool half_resolution = false;
+	// The driver cannot read a texture through a view of another format, so
+	// SDFGI keeps its radiance and occlusion in plain float formats (RGBA16F,
+	// RGBA8) instead of RGBE/nibble-packed integers reinterpreted at sampling
+	// time; only the writers change (their SDFGI_FLOAT_STORAGE twins).
+	bool sdfgi_float_storage = false;
 	GiShaderRD shader;
 	RID shader_version;
 	PipelineDeferredRD pipelines[SHADER_SPECIALIZATION_VARIATIONS][MODE_MAX];
