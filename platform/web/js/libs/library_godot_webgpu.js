@@ -226,6 +226,21 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('nodiff') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_use_subgroups__sig: 'i',
+	godot_js_webgpu_use_subgroups: function () {
+		// Native wave ops are OPT-IN (?subgroups) for now: Chrome 152's D3D12
+		// backend crashes its GPU process (dxcompiler.dll assert, exit code
+		// 0x80000003) compiling the clustered light loop's wave ops, which
+		// takes the whole page's device down. Default = the per-invocation
+		// variants; flip the default once the DXC bug is fixed or a
+		// construct-level workaround lands. ?nosubgroups always wins.
+		const search = window.location.search;
+		if (search.indexOf('nosubgroups') >= 0) {
+			return 0;
+		}
+		return search.indexOf('subgroups') >= 0 ? 1 : 0;
+	},
+
 	godot_js_webgpu_perf_counters__sig: 'i',
 	godot_js_webgpu_perf_counters: function () {
 		// ?perfcounters prints a parseable per-window driver counter line

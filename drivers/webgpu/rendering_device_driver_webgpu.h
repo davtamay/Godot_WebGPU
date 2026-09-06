@@ -427,6 +427,7 @@ private:
 	// Whether the loader obtained the device with the shader-f16 feature;
 	// gates SUPPORTS_HALF_FLOAT and acceptance of `enable f16` modules.
 	bool device_has_shader_f16 = false;
+	bool device_has_subgroups = false;
 	bool device_has_depth_clip_control = false;
 	bool device_has_timestamp_query = false;
 	bool device_has_texture_swizzle = false;
@@ -644,6 +645,7 @@ public:
 		uint32_t indirect_param_writes = 0;
 		uint32_t bind_groups_created = 0;
 		uint32_t pipelines_created = 0;
+		uint32_t native_subgroup_modules = 0;
 	};
 	PerfCounters perf;
 	bool perf_counters_enabled = false;
