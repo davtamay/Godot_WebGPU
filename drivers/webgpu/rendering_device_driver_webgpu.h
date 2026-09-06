@@ -748,6 +748,11 @@ public:
 				// compute bokeh (and any future rw-storage effect) needs;
 				// without it the renderer takes the raster paths (patch 72).
 				return device_has_texture_formats_tier2;
+			case SUPPORTS_TEXTURE_FORMAT_REINTERPRETATION:
+				// viewFormats may only name the sRGB/linear sibling, so a
+				// u32 texture cannot be read back as rgb9e5 (SDFGI's RGBE
+				// radiance); the renderer decodes those textures itself.
+				return false;
 			default:
 				// SUPPORTS_FRAGMENT_SHADER_WITH_ONLY_SIDE_EFFECTS must stay
 				// false: WebGPU render pipelines require at least one
