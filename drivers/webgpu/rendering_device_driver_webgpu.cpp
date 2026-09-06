@@ -1976,8 +1976,11 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 	// the declaration instead is what made decals sample without the
 	// sRGB->linear conversion, roughly doubling their mid-tones until they
 	// saturated into a hard-edged block.
+	// Only a real sibling counts: a shareable format WebGPU has no mapping
+	// for (SDFGI's R4G4B4A4 occlusion view) must not read as "sibling
+	// shareable" through two Undefined values comparing equal.
 	bool srgb_sibling_shareable = false;
-	for (uint32_t i = 0; i < (uint32_t)p_format.shareable_formats.size(); i++) {
+	for (uint32_t i = 0; srgb_sibling != WGPUTextureFormat_Undefined && i < (uint32_t)p_format.shareable_formats.size(); i++) {
 		if (_data_format_to_wgpu(p_format.shareable_formats[i]) == srgb_sibling) {
 			srgb_sibling_shareable = true;
 			break;
@@ -2782,6 +2785,51 @@ static WGPUTextureViewDimension _texture_type_to_wgpu_view_dimension(RenderingDe
 	}
 }
 
+// The sample class a texture format serves: integer formats can only be bound
+// where the shader declares an integer texture, and the reverse.
+static WGPUTextureSampleType _wgpu_format_sample_class(WGPUTextureFormat p_format) {
+	switch (p_format) {
+		case WGPUTextureFormat_R8Uint:
+		case WGPUTextureFormat_RG8Uint:
+		case WGPUTextureFormat_RGBA8Uint:
+		case WGPUTextureFormat_R16Uint:
+		case WGPUTextureFormat_RG16Uint:
+		case WGPUTextureFormat_RGBA16Uint:
+		case WGPUTextureFormat_R32Uint:
+		case WGPUTextureFormat_RG32Uint:
+		case WGPUTextureFormat_RGBA32Uint:
+		case WGPUTextureFormat_Stencil8:
+			return WGPUTextureSampleType_Uint;
+		case WGPUTextureFormat_R8Sint:
+		case WGPUTextureFormat_RG8Sint:
+		case WGPUTextureFormat_RGBA8Sint:
+		case WGPUTextureFormat_R16Sint:
+		case WGPUTextureFormat_RG16Sint:
+		case WGPUTextureFormat_RGBA16Sint:
+		case WGPUTextureFormat_R32Sint:
+		case WGPUTextureFormat_RG32Sint:
+		case WGPUTextureFormat_RGBA32Sint:
+			return WGPUTextureSampleType_Sint;
+		default:
+			return WGPUTextureSampleType_Float;
+	}
+}
+
+static bool _wgpu_sample_class_matches(WGPUTextureSampleType p_declared, WGPUTextureFormat p_format) {
+	const WGPUTextureSampleType cls = _wgpu_format_sample_class(p_format);
+	switch (p_declared) {
+		case WGPUTextureSampleType_Uint:
+			return cls == WGPUTextureSampleType_Uint;
+		case WGPUTextureSampleType_Sint:
+			return cls == WGPUTextureSampleType_Sint;
+		case WGPUTextureSampleType_Float:
+		case WGPUTextureSampleType_UnfilterableFloat:
+			return cls == WGPUTextureSampleType_Float;
+		default:
+			return true; // Depth slots follow the depth-specific rules at bind time.
+	}
+}
+
 static WGPUTextureSampleType _data_format_to_wgpu_sample_type(RenderingDeviceCommons::DataFormat p_format) {
 switch (p_format) {
 		case RenderingDeviceCommons::DATA_FORMAT_D16_UNORM:
@@ -3346,8 +3394,13 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 					if (uniform.type == UNIFORM_TYPE_SAMPLER) {
 						single_entry.sampler.type = WGPUSamplerBindingType_Filtering;
 					} else if (uniform.type == UNIFORM_TYPE_TEXTURE) {
-						single_entry.texture.sampleType = _data_format_to_wgpu_sample_type(uniform.texture_format);
+						// The WGSL declaration types the binding (integer
+						// textures such as SDFGI's packed radiance); reflection
+						// only knows the format for storage images.
+						const WGPUTextureSampleType *sampled_decl = sampled_texture_decls.getptr(((uint64_t)set_index << 32) | remapped_binding);
+						single_entry.texture.sampleType = depth_texture_bindings.has(((uint64_t)set_index << 32) | remapped_binding) ? WGPUTextureSampleType_Depth : (sampled_decl != nullptr ? *sampled_decl : _data_format_to_wgpu_sample_type(uniform.texture_format));
 						single_entry.texture.viewDimension = _texture_type_to_wgpu_view_dimension(uniform.texture_type);
+						shader->texture_slot_types.insert(((uint64_t)set_index << 32) | remapped_binding, ShaderInfo::TextureSlotType{ single_entry.texture.sampleType, single_entry.texture.viewDimension });
 					} else {
 						const Pair<WGPUTextureFormat, WGPUStorageTextureAccess> *decl = storage_texture_decls.getptr(((uint64_t)set_index << 32) | remapped_binding);
 						single_entry.storageTexture.access = decl != nullptr ? decl->second : (uniform.writable ? WGPUStorageTextureAccess_ReadWrite : WGPUStorageTextureAccess_ReadOnly);
@@ -3369,8 +3422,10 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 					if (uniform.type == UNIFORM_TYPE_SAMPLER) {
 						element_entry.sampler.type = comparison_sampler_bindings.has(((uint64_t)set_index << 32) | element_entry.binding) ? WGPUSamplerBindingType_Comparison : (shader->nonfiltering_samplers.has(((uint64_t)set_index << 32) | element_entry.binding) ? WGPUSamplerBindingType_NonFiltering : WGPUSamplerBindingType_Filtering);
 					} else if (uniform.type == UNIFORM_TYPE_TEXTURE) {
-						element_entry.texture.sampleType = depth_texture_bindings.has(((uint64_t)set_index << 32) | element_entry.binding) ? WGPUTextureSampleType_Depth : _data_format_to_wgpu_sample_type(uniform.texture_format);
+						const WGPUTextureSampleType *sampled_decl = sampled_texture_decls.getptr(((uint64_t)set_index << 32) | element_entry.binding);
+						element_entry.texture.sampleType = depth_texture_bindings.has(((uint64_t)set_index << 32) | element_entry.binding) ? WGPUTextureSampleType_Depth : (sampled_decl != nullptr ? *sampled_decl : _data_format_to_wgpu_sample_type(uniform.texture_format));
 						element_entry.texture.viewDimension = _texture_type_to_wgpu_view_dimension(uniform.texture_type);
+						shader->texture_slot_types.insert(((uint64_t)set_index << 32) | element_entry.binding, ShaderInfo::TextureSlotType{ element_entry.texture.sampleType, element_entry.texture.viewDimension });
 					} else {
 						const Pair<WGPUTextureFormat, WGPUStorageTextureAccess> *decl = storage_texture_decls.getptr(((uint64_t)set_index << 32) | element_entry.binding);
 						element_entry.storageTexture.access = decl != nullptr ? decl->second : (uniform.writable ? WGPUStorageTextureAccess_ReadWrite : WGPUStorageTextureAccess_ReadOnly);
@@ -3401,6 +3456,7 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 						// depth-aspect views (all float formats stay valid).
 						entry.texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
 					}
+					shader->texture_slot_types.insert(((uint64_t)set_index << 32) | entry.binding, ShaderInfo::TextureSlotType{ entry.texture.sampleType, entry.texture.viewDimension });
 				} break;
 				case UNIFORM_TYPE_IMAGE: {
 					// Tint converts read-only storage images into sampled
@@ -3824,6 +3880,19 @@ RenderingDeviceDriver::RenderPassID RenderingDeviceDriverWebGPU::render_pass_cre
 		pass_attachment.stencil_store_op = attachment.stencil_store_op == ATTACHMENT_STORE_OP_STORE ? WGPUStoreOp_Store : WGPUStoreOp_Discard;
 		pass->attachments.push_back(pass_attachment);
 	}
+	if (p_attachments.size() == 0) {
+		// An attachment-less pass (fragment side effects only): WebGPU needs
+		// at least one attachment, so the pass carries a synthetic R8 color
+		// target that pipelines never write (see framebuffer_create).
+		RenderPassAttachment dummy;
+		dummy.format = WGPUTextureFormat_R8Unorm;
+		dummy.is_depth_stencil = false;
+		dummy.texture_samples = 1;
+		dummy.load_op = WGPULoadOp_Clear;
+		dummy.store_op = WGPUStoreOp_Discard;
+		pass->attachments.push_back(dummy);
+		pass->attachment_less = true;
+	}
 	if (p_subpasses.size() == 1) {
 		const Subpass &subpass = p_subpasses[0];
 		for (uint32_t c = 0; c < subpass.color_references.size(); c++) {
@@ -3864,6 +3933,25 @@ RenderingDeviceDriver::FramebufferID RenderingDeviceDriverWebGPU::framebuffer_cr
 	for (uint32_t i = 0; i < p_attachments.size(); i++) {
 		framebuffer->views.push_back(((TextureInfo *)p_attachments[i].id)->view);
 	}
+	const RenderPassInfo *pass = (const RenderPassInfo *)p_render_pass.id;
+	if (pass != nullptr && pass->attachment_less && p_attachments.size() == 0) {
+		// The synthetic color target of an attachment-less pass, sized like
+		// the framebuffer so the rasterizer covers the same area.
+		WGPUTextureDescriptor desc = WGPU_TEXTURE_DESCRIPTOR_INIT;
+		desc.usage = WGPUTextureUsage_RenderAttachment;
+		desc.dimension = WGPUTextureDimension_2D;
+		desc.size = { MAX(1u, p_width), MAX(1u, p_height), 1 };
+		desc.format = WGPUTextureFormat_R8Unorm;
+		desc.mipLevelCount = 1;
+		desc.sampleCount = 1;
+		framebuffer->dummy_texture = wgpuDeviceCreateTexture(device, &desc);
+		if (framebuffer->dummy_texture == nullptr) {
+			memdelete(framebuffer);
+			ERR_FAIL_V_MSG(FramebufferID(), "Failed to create the dummy attachment of an attachment-less framebuffer.");
+		}
+		framebuffer->dummy_view = wgpuTextureCreateView(framebuffer->dummy_texture, nullptr);
+		framebuffer->views.push_back(framebuffer->dummy_view);
+	}
 	return FramebufferID(framebuffer);
 }
 
@@ -3878,7 +3966,13 @@ void RenderingDeviceDriverWebGPU::framebuffer_free(FramebufferID p_framebuffer) 
 			wgpuBufferRelease(entry.params_buffer);
 		}
 	}
-	// Views are owned by their textures.
+	// Views are owned by their textures; only the dummy target is ours.
+	if (framebuffer->dummy_view != nullptr) {
+		wgpuTextureViewRelease(framebuffer->dummy_view);
+	}
+	if (framebuffer->dummy_texture != nullptr) {
+		wgpuTextureRelease(framebuffer->dummy_texture);
+	}
 	memdelete(framebuffer);
 }
 
@@ -3895,6 +3989,43 @@ WGPUTextureView RenderingDeviceDriverWebGPU::_get_placeholder_float_view() {
 		placeholder_float_view = wgpuTextureCreateView(placeholder_float_texture, nullptr);
 	}
 	return placeholder_float_view;
+}
+
+WGPUTextureView RenderingDeviceDriverWebGPU::_get_placeholder_class_view(WGPUTextureSampleType p_sample_type, WGPUTextureViewDimension p_dimension) {
+	const uint32_t key = ((uint32_t)p_sample_type << 8) | (uint32_t)p_dimension;
+	WGPUTextureView *existing = placeholder_class_views.getptr(key);
+	if (existing != nullptr) {
+		return *existing;
+	}
+	const bool cube = p_dimension == WGPUTextureViewDimension_Cube || p_dimension == WGPUTextureViewDimension_CubeArray;
+	WGPUTextureDescriptor desc = WGPU_TEXTURE_DESCRIPTOR_INIT;
+	desc.usage = WGPUTextureUsage_TextureBinding;
+	desc.dimension = p_dimension == WGPUTextureViewDimension_3D ? WGPUTextureDimension_3D : WGPUTextureDimension_2D;
+	desc.size = { 4, 4, (uint32_t)(p_dimension == WGPUTextureViewDimension_3D ? 4 : (cube ? 6 : 1)) };
+	desc.format = p_sample_type == WGPUTextureSampleType_Uint ? WGPUTextureFormat_R32Uint : (p_sample_type == WGPUTextureSampleType_Sint ? WGPUTextureFormat_R32Sint : WGPUTextureFormat_RGBA8Unorm);
+	desc.mipLevelCount = 1;
+	desc.sampleCount = 1;
+	WGPUTexture texture = wgpuDeviceCreateTexture(device, &desc);
+	ERR_FAIL_NULL_V(texture, nullptr);
+	WGPUTextureViewDescriptor view_desc = WGPU_TEXTURE_VIEW_DESCRIPTOR_INIT;
+	view_desc.dimension = p_dimension;
+	WGPUTextureView view = wgpuTextureCreateView(texture, &view_desc);
+	placeholder_class_textures.push_back(texture);
+	placeholder_class_views.insert(key, view);
+	return view;
+}
+
+WGPUTextureView RenderingDeviceDriverWebGPU::_texture_view_for_slot(const ShaderInfo *p_shader, uint32_t p_set, uint32_t p_binding, const TextureInfo *p_texture) {
+	// A texture whose sample class disagrees with the layout's declaration
+	// (an integer texture in a float slot or the reverse) would make the
+	// whole bind group invalid; such slots are bindings the variant never
+	// reads (typed from reflection) or debug paths, so a placeholder of the
+	// declared class keeps the frame valid.
+	const ShaderInfo::TextureSlotType *slot = p_shader->texture_slot_types.getptr(((uint64_t)p_set << 32) | p_binding);
+	if (slot != nullptr && !_wgpu_sample_class_matches(slot->sample_type, p_texture->wgpu_format)) {
+		return _get_placeholder_class_view(slot->sample_type, slot->dimension);
+	}
+	return p_texture->view;
 }
 
 WGPUTextureView RenderingDeviceDriverWebGPU::_get_placeholder_storage_view() {
@@ -3962,7 +4093,7 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_uniform_set_build(VectorView<BoundUn
 					if (uniform.type == UNIFORM_TYPE_SAMPLER) {
 						entry.sampler = (WGPUSampler)uniform.ids[0].id;
 					} else {
-						entry.textureView = ((TextureInfo *)uniform.ids[0].id)->view;
+						entry.textureView = _texture_view_for_slot(shader, p_set_index, remapped_binding, (const TextureInfo *)uniform.ids[0].id);
 					}
 					entries.push_back(entry);
 					continue;
@@ -3979,7 +4110,7 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_uniform_set_build(VectorView<BoundUn
 						if (uniform.type == UNIFORM_TYPE_SAMPLER) {
 							element_entry.sampler = shader->nonfiltering_samplers.has(((uint64_t)p_set_index << 32) | element_entry.binding) ? _get_nonfiltering_sampler() : (WGPUSampler)uniform.ids[element].id;
 						} else {
-							element_entry.textureView = ((TextureInfo *)uniform.ids[element].id)->view;
+							element_entry.textureView = _texture_view_for_slot(shader, p_set_index, element_entry.binding, (const TextureInfo *)uniform.ids[element].id);
 						}
 						entries.push_back(element_entry);
 					}
@@ -4022,7 +4153,7 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_uniform_set_build(VectorView<BoundUn
 						}
 						entry.textureView = mutable_texture->depth_only_view != nullptr ? mutable_texture->depth_only_view : mutable_texture->view;
 					} else {
-						entry.textureView = bound_texture->view;
+						entry.textureView = _texture_view_for_slot(shader, p_set_index, remapped_binding, bound_texture);
 					}
 				}
 			} break;
@@ -4537,11 +4668,6 @@ WGPURenderPipeline RenderingDeviceDriverWebGPU::_build_render_pipeline(const Sha
 		if (blend_index < p_blend_state.attachments.size()) {
 			const PipelineColorBlendState::Attachment &blend = p_blend_state.attachments[blend_index];
 			target.writeMask = (blend.write_r ? WGPUColorWriteMask_Red : WGPUColorWriteMask_None) | (blend.write_g ? WGPUColorWriteMask_Green : WGPUColorWriteMask_None) | (blend.write_b ? WGPUColorWriteMask_Blue : WGPUColorWriteMask_None) | (blend.write_a ? WGPUColorWriteMask_Alpha : WGPUColorWriteMask_None);
-			if ((shader->fragment_output_mask & (1u << blend_index)) == 0) {
-				// No fragment output feeds this target; a nonzero write mask
-				// is a validation error on WebGPU.
-				target.writeMask = WGPUColorWriteMask_None;
-			}
 			if (blend.enable_blend) {
 				WGPUBlendState &blend_state = blend_states[blend_index];
 				blend_state.color.srcFactor = _blend_factor_to_wgpu(blend.src_color_blend_factor);
@@ -4552,6 +4678,12 @@ WGPURenderPipeline RenderingDeviceDriverWebGPU::_build_render_pipeline(const Sha
 				blend_state.alpha.operation = _blend_op_to_wgpu(blend.alpha_blend_op);
 				target.blend = &blend_state;
 			}
+		}
+		if ((shader->fragment_output_mask & (1u << blend_index)) == 0 || pass->attachment_less) {
+			// No fragment output feeds this target (or the target is the
+			// synthetic one of an attachment-less pass); a nonzero write mask
+			// is a validation error on WebGPU.
+			target.writeMask = WGPUColorWriteMask_None;
 		}
 		targets.push_back(target);
 	}
