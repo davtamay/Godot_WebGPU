@@ -9,6 +9,13 @@
 #
 # Runs on demand only; re-run with a new dawn_ref when the emdawnwebgpu port
 # pin moves (the upstream-sync issue will flag Emscripten pin drift).
+#
+# The build carries one fork patch: tint's WGSL writer already has an option
+# to allow subgroup builtins in non-uniform control flow (Godot's clustered
+# light loop needs it), but the command line never exposed it. The step below
+# adds --allow-non-uniform-subgroup-operations next to the existing
+# --allow-non-uniform-derivatives flag; that binary is what
+# GODOT_TINT_PATH_SUBGROUPS points at.
 
 name: WebGPU stack - tint builder
 
@@ -19,6 +26,10 @@ on:
         description: "Dawn tag/ref to build tint from"
         required: true
         default: "v20250531.224602"
+      release_suffix:
+        description: "Appended to the release tag (tint-<ref><suffix>), so a patched build never overwrites a pristine one"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -43,6 +54,33 @@ jobs:
         with:
           repository: google/dawn
           ref: ${{ github.event.inputs.dawn_ref }}
+
+      - name: Expose the subgroup-uniformity writer option on the command line
+        shell: python
+        run: |
+          import io
+          p = "src/tint/cmd/tint/main.cc"
+          s = io.open(p, encoding="utf-8").read()
+          if "allow-non-uniform-subgroup-operations" in s:
+              print("already present"); raise SystemExit
+          anchor = "opts->wgsl_writer_options.allow_non_uniform_derivatives = true;\n        }\n    });\n"
+          assert s.count(anchor) == 1, "derivatives option block not found - the tint CLI moved, update this step"
+          add = anchor + (
+              "\n"
+              "    auto& allow_nus = options.Add<BoolOption>(\n"
+              '        "allow-non-uniform-subgroup-operations",\n'
+              '        R"(Allow subgroup builtins in non-uniform control flow by inserting a module-scope directive to\n'
+              'suppress any uniformity violations that may be produced)",\n'
+              "        Default{false});\n"
+              "    TINT_DEFER({\n"
+              "        if (allow_nus.value.value_or(false)) {\n"
+              "            opts->wgsl_writer_options.allow_non_uniform_subgroup_operations = true;\n"
+              "        }\n"
+              "    });\n"
+          )
+          s = s.replace(anchor, add)
+          io.open(p, "w", encoding="utf-8", newline="\n").write(s)
+          print("patched", p)
 
       - name: Configure (tint command-line tools only)
         run: >
@@ -97,7 +135,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="tint-${{ github.event.inputs.dawn_ref }}"
+          TAG="tint-${{ github.event.inputs.dawn_ref }}${{ github.event.inputs.release_suffix }}"
           gh release view "$TAG" -R "${{ github.repository }}" >/dev/null 2>&1 || \
             gh release create "$TAG" -R "${{ github.repository }}" \
               --title "tint (Dawn ${{ github.event.inputs.dawn_ref }})" \
