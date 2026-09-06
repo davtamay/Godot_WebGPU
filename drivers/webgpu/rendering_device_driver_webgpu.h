@@ -131,6 +131,7 @@ private:
 		// Created for shaders whose set 0 holds nothing but the reserved
 		// push-constant binding, so draws can still bind the ring buffer.
 		WGPUBindGroup push_constant_bind_group = nullptr;
+		uint32_t push_constant_bind_group_epoch = 0; // Ring generation it was built against.
 		// Sampler bindings (set << 32 | binding) the WGSL statically pairs
 		// with depth textures outside comparison sampling: WebGPU forbids
 		// filtering depth textures, so these slots are declared NonFiltering
@@ -178,10 +179,11 @@ private:
 
 	static const uint32_t MAX_BIND_GROUPS = 4;
 	static const uint32_t PUSH_CONSTANT_SLOT_SIZE = 256; // Matches the dynamic offset alignment limit.
-	// One slot per push-constant-carrying draw, so this bounds the frame's
-	// draw count (headset room scans alone stream 500+ mesh patches, each a
-	// draw per eye). 1 MiB = 4096 slots.
+	// One slot per push-constant-carrying draw, so the ring bounds the frame's
+	// draw count. It starts at 1 MiB = 4096 slots and doubles on the frame
+	// after an overflow (see begin_segment) up to the maximum below.
 	static const uint32_t PUSH_CONSTANT_RING_SIZE = 1024 * 1024;
+	static const uint32_t PUSH_CONSTANT_RING_MAX_SIZE = 32 * 1024 * 1024; // 131072 slots.
 
 	struct UniformSetInfo;
 
@@ -380,6 +382,9 @@ private:
 		// True when the group carries the push-constant ring buffer entry and
 		// therefore needs the current dynamic offset when bound.
 		bool has_push_constant_offset = false;
+		// Ring generation the cached groups were built against; a grown ring
+		// is a new buffer, so stale groups are dropped and rebuilt lazily.
+		uint32_t push_constant_epoch = 0;
 	};
 
 	struct PipelineInfo;
@@ -538,6 +543,12 @@ private:
 	uint32_t push_constant_capacity = 0;
 	uint32_t push_constant_used = 0;
 	bool push_constant_overflow_reported = false;
+	// Bumped whenever the ring is reallocated; bind groups built against an
+	// older generation reference the released buffer and are rebuilt.
+	uint32_t push_constant_epoch = 1;
+	bool push_constant_grow_pending = false;
+	bool _push_constant_ring_allocate(uint32_t p_capacity);
+	WGPUBindGroup _shader_build_push_constant_bind_group(const ShaderInfo *p_shader);
 
 	void _flush_bind_groups(CommandBufferInfo *p_cb_info);
 	void _end_compute_pass(CommandBufferInfo *p_cb_info);
