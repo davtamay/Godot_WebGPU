@@ -449,9 +449,12 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 
 		tf_render.format = RD::DATA_FORMAT_R8_UNORM; //at least its easy to visualize
 
-		for (int i = 0; i < 8; i++) {
-			render_occlusion[i] = create_clear_texture(tf_render, String("SDFGI Render Occlusion ") + itos(i));
-		}
+		// One texture holds the eight per-direction occlusion volumes, stacked
+		// along Z, so the preprocess passes stay within 8 storage images per
+		// stage (the WebGPU ceiling, and below some mobile Vulkan limits).
+		tf_render.depth = cascade_size * 8;
+		render_occlusion = create_clear_texture(tf_render, "SDFGI Render Occlusion");
+		tf_render.depth = cascade_size;
 
 		tf_render.format = RD::DATA_FORMAT_R32_UINT;
 		tf_render.usage_bits |= RD::TEXTURE_USAGE_STORAGE_ATOMIC_BIT;
@@ -610,9 +613,7 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 				RD::Uniform u;
 				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
 				u.binding = 3;
-				for (int j = 0; j < 8; j++) {
-					u.append_id(render_occlusion[j]);
-				}
+				u.append_id(render_occlusion);
 				uniforms.push_back(u);
 			}
 			{
@@ -722,9 +723,7 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 				RD::Uniform u;
 				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
 				u.binding = 1;
-				for (int j = 0; j < 8; j++) {
-					u.append_id(render_occlusion[j]);
-				}
+				u.append_id(render_occlusion);
 				uniforms.push_back(u);
 			}
 			{
@@ -972,9 +971,7 @@ void GI::SDFGI::create(RID p_env, const Vector3 &p_world_position, uint32_t p_re
 			RD::Uniform u;
 			u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
 			u.binding = 2;
-			for (int i = 0; i < 8; i++) {
-				u.append_id(render_occlusion[i]);
-			}
+			u.append_id(render_occlusion);
 			uniforms.push_back(u);
 		}
 		{
@@ -1159,9 +1156,7 @@ GI::SDFGI::~SDFGI() {
 	RD::get_singleton()->free_rid(render_sdf_half[0]);
 	RD::get_singleton()->free_rid(render_sdf_half[1]);
 
-	for (int i = 0; i < 8; i++) {
-		RD::get_singleton()->free_rid(render_occlusion[i]);
-	}
+	RD::get_singleton()->free_rid(render_occlusion);
 
 	RD::get_singleton()->free_rid(render_geom_facing);
 
