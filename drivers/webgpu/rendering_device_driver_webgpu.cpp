@@ -142,13 +142,7 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 
 	frame_count = MAX(1u, p_frame_count);
 
-	WGPUBufferDescriptor pc_desc = WGPU_BUFFER_DESCRIPTOR_INIT;
-	pc_desc.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
-	pc_desc.size = PUSH_CONSTANT_RING_SIZE;
-	push_constant_buffer = wgpuDeviceCreateBuffer(device, &pc_desc);
-	ERR_FAIL_NULL_V(push_constant_buffer, ERR_CANT_CREATE);
-	push_constant_shadow = (uint8_t *)memalloc(PUSH_CONSTANT_RING_SIZE);
-	push_constant_capacity = PUSH_CONSTANT_RING_SIZE;
+	ERR_FAIL_COND_V(!_push_constant_ring_allocate(PUSH_CONSTANT_RING_SIZE), ERR_CANT_CREATE);
 
 	capabilities.device_family = DEVICE_UNKNOWN;
 	capabilities.version_major = 1;
@@ -3598,15 +3592,8 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 	// Set 0 with nothing but the reserved binding never gets a
 	// uniform_set_create call; give the shader a ready-made bind group.
 	if (set0_only_push_constant) {
-		WGPUBindGroupEntry pc_group_entry = WGPU_BIND_GROUP_ENTRY_INIT;
-		pc_group_entry.binding = RenderingShaderContainerWebGPU::PUSH_CONSTANT_BINDING;
-		pc_group_entry.buffer = push_constant_buffer;
-		pc_group_entry.size = PUSH_CONSTANT_SLOT_SIZE;
-		WGPUBindGroupDescriptor pc_group_desc = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
-		pc_group_desc.layout = shader->bind_group_layouts[0];
-		pc_group_desc.entryCount = 1;
-		pc_group_desc.entries = &pc_group_entry;
-		shader->push_constant_bind_group = wgpuDeviceCreateBindGroup(device, &pc_group_desc);
+		shader->push_constant_bind_group = _shader_build_push_constant_bind_group(shader);
+		shader->push_constant_bind_group_epoch = push_constant_epoch;
 		if (shader->push_constant_bind_group == nullptr) {
 			shader_free(ShaderID(shader));
 			ERR_FAIL_V_MSG(ShaderID(), "Failed to create the push-constant bind group.");
@@ -4253,6 +4240,7 @@ RenderingDeviceDriver::UniformSetID RenderingDeviceDriverWebGPU::uniform_set_cre
 		ERR_FAIL_V(UniformSetID());
 	}
 	uniform_set->layout_groups.insert((void *)shader->bind_group_layouts[p_set_index], bind_group);
+	uniform_set->push_constant_epoch = push_constant_epoch;
 	return UniformSetID(uniform_set);
 }
 
@@ -4271,12 +4259,15 @@ void RenderingDeviceDriverWebGPU::command_bind_push_constants(CommandBufferID p_
 	const uint32_t data_size = p_data.size() * sizeof(uint32_t);
 	ERR_FAIL_COND(data_size > PUSH_CONSTANT_SLOT_SIZE);
 	// Wrapping mid-frame would corrupt earlier draws; drop the draw's
-	// constants instead, reporting once per frame (a big scene can overflow
-	// by hundreds of draws - per-draw spam would bury the console).
+	// constants instead and ask begin_segment to grow the ring for the next
+	// frame. Reported once per frame (a big scene can overflow by hundreds
+	// of draws - per-draw spam would bury the console) and only at the cap:
+	// below it the next frame simply has room.
 	if (unlikely(push_constant_used + PUSH_CONSTANT_SLOT_SIZE > push_constant_capacity)) {
-		if (!push_constant_overflow_reported) {
+		push_constant_grow_pending = true;
+		if (!push_constant_overflow_reported && push_constant_capacity >= PUSH_CONSTANT_RING_MAX_SIZE) {
 			push_constant_overflow_reported = true;
-			ERR_PRINT(vformat("Push constant ring buffer exhausted for this frame (%d slots); draws beyond the ring are dropped.", push_constant_capacity / PUSH_CONSTANT_SLOT_SIZE));
+			ERR_PRINT(vformat("Push constant ring buffer exhausted for this frame (%d slots, the maximum); draws beyond the ring are dropped.", push_constant_capacity / PUSH_CONSTANT_SLOT_SIZE));
 		}
 		return;
 	}
@@ -4301,6 +4292,14 @@ void RenderingDeviceDriverWebGPU::_flush_bind_groups(CommandBufferInfo *p_cb_inf
 		}
 		WGPUBindGroup bind_group = nullptr;
 		if (set != nullptr) {
+			if (unlikely(set->has_push_constant_offset && set->push_constant_epoch != push_constant_epoch)) {
+				// Built against a ring buffer that has since been replaced.
+				for (const KeyValue<void *, WGPUBindGroup> &kv : set->layout_groups) {
+					wgpuBindGroupRelease(kv.value);
+				}
+				set->layout_groups.clear();
+				set->push_constant_epoch = push_constant_epoch;
+			}
 			WGPUBindGroup *cached = set->layout_groups.getptr((void *)shader->bind_group_layouts[i]);
 			if (cached != nullptr) {
 				bind_group = *cached;
@@ -4311,6 +4310,12 @@ void RenderingDeviceDriverWebGPU::_flush_bind_groups(CommandBufferInfo *p_cb_inf
 				}
 			}
 		} else if (i == 0) {
+			if (unlikely(shader->push_constant_bind_group != nullptr && shader->push_constant_bind_group_epoch != push_constant_epoch)) {
+				ShaderInfo *mutable_shader = const_cast<ShaderInfo *>(shader);
+				wgpuBindGroupRelease(mutable_shader->push_constant_bind_group);
+				mutable_shader->push_constant_bind_group = _shader_build_push_constant_bind_group(shader);
+				mutable_shader->push_constant_bind_group_epoch = push_constant_epoch;
+			}
 			bind_group = shader->push_constant_bind_group;
 		}
 		if (bind_group == nullptr) {
@@ -5088,11 +5093,54 @@ void RenderingDeviceDriverWebGPU::semaphore_free(SemaphoreID p_semaphore) {
 /**** MISC ****/
 /**************/
 
+bool RenderingDeviceDriverWebGPU::_push_constant_ring_allocate(uint32_t p_capacity) {
+	WGPUBufferDescriptor pc_desc = WGPU_BUFFER_DESCRIPTOR_INIT;
+	pc_desc.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
+	pc_desc.size = p_capacity;
+	WGPUBuffer buffer = wgpuDeviceCreateBuffer(device, &pc_desc);
+	ERR_FAIL_NULL_V(buffer, false);
+	if (push_constant_buffer != nullptr) {
+		// Frames already submitted keep the browser-side object alive; only
+		// our handle goes.
+		wgpuBufferRelease(push_constant_buffer);
+	}
+	push_constant_buffer = buffer;
+	push_constant_shadow = (uint8_t *)memrealloc(push_constant_shadow, p_capacity);
+	push_constant_capacity = p_capacity;
+	return true;
+}
+
+WGPUBindGroup RenderingDeviceDriverWebGPU::_shader_build_push_constant_bind_group(const ShaderInfo *p_shader) {
+	WGPUBindGroupEntry pc_group_entry = WGPU_BIND_GROUP_ENTRY_INIT;
+	pc_group_entry.binding = RenderingShaderContainerWebGPU::PUSH_CONSTANT_BINDING;
+	pc_group_entry.buffer = push_constant_buffer;
+	pc_group_entry.size = PUSH_CONSTANT_SLOT_SIZE;
+	WGPUBindGroupDescriptor pc_group_desc = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+	pc_group_desc.layout = p_shader->bind_group_layouts[0];
+	pc_group_desc.entryCount = 1;
+	pc_group_desc.entries = &pc_group_entry;
+	return wgpuDeviceCreateBindGroup(device, &pc_group_desc);
+}
+
 void RenderingDeviceDriverWebGPU::begin_segment(uint32_t p_frame_index, uint32_t p_frames_drawn) {
 	// Safe to recycle every frame: wgpuQueueWriteBuffer copies the data at
 	// call time, so previously submitted frames keep the values they saw.
 	push_constant_used = 0;
 	push_constant_overflow_reported = false;
+	if (unlikely(push_constant_grow_pending)) {
+		push_constant_grow_pending = false;
+		if (push_constant_capacity < PUSH_CONSTANT_RING_MAX_SIZE) {
+			// Between frames nothing is bound, so the ring can be replaced
+			// wholesale: a new generation retires every bind group and render
+			// bundle that references the old buffer.
+			const uint32_t capacity = MIN(push_constant_capacity * 2u, PUSH_CONSTANT_RING_MAX_SIZE);
+			if (_push_constant_ring_allocate(capacity)) {
+				push_constant_epoch++;
+				resource_epoch++;
+				print_verbose(vformat("WebGPU: push constant ring grown to %d slots.", capacity / PUSH_CONSTANT_SLOT_SIZE));
+			}
+		}
+	}
 }
 
 void RenderingDeviceDriverWebGPU::end_segment() {
