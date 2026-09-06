@@ -34,11 +34,12 @@
 
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
+#include "core/io/marshalls.h"
 #include "core/os/os.h"
 #include "core/templates/safe_refcount.h"
 #include "core/templates/hash_set.h"
 
-const uint32_t RenderingShaderContainerWebGPU::FORMAT_VERSION = 1;
+const uint32_t RenderingShaderContainerWebGPU::FORMAT_VERSION = 2;
 
 // SPIR-V constants used by the pre-transform.
 enum {
@@ -1168,6 +1169,7 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 
 	const LocalVector<ReflectShaderStage> &spirv_stages = p_shader.shader_stages;
 	shaders.resize(spirv_stages.size());
+	native_shaders.resize(spirv_stages.size());
 	for (uint32_t i = 0; i < spirv_stages.size(); i++) {
 		Vector<uint8_t> spirv = spirv_stages[i].spirv_data();
 		ERR_FAIL_COND_V_MSG(!_transform_spirv(spirv), false, "Malformed SPIR-V module.");
@@ -1195,6 +1197,13 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 		// optimization) and the HelperInvocation builtin unconditionally;
 		// Tint's reader supports neither. Lower both to exact degraded
 		// semantics (wave-of-1, helper check off).
+		// Stages that use subgroup ops can additionally be translated
+		// natively (WGSL `enable subgroups`) when a translator that reads
+		// them is configured; that variant branches off the un-lowered module.
+		Vector<uint8_t> spirv_native;
+		if (!tint_subgroups_path.is_empty() && spirv_preprocess::uses_subgroup_ops(spirv)) {
+			spirv_native = spirv;
+		}
 		spirv = spirv_preprocess::lower_subgroup_ops_to_single_invocation(spirv);
 		spirv = spirv_preprocess::lower_helper_invocation_to_false(spirv);
 		// Tint rejects the ViewIndex builtin (no WebGPU multiview): lower it
@@ -1227,6 +1236,15 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 			Ref<FileAccess> spirv_file = FileAccess::open(spirv_path, FileAccess::WRITE);
 			ERR_FAIL_COND_V(spirv_file.is_null(), false);
 			spirv_file->store_buffer(spirv.ptr(), spirv.size());
+		}
+		if (OS::get_singleton()->has_environment("GODOT_WEBGPU_DUMP_SPV")) {
+			// Keep a copy of every module exactly as handed to tint (the
+			// translator-adoption corpus harness works on these).
+			const String dump_dir = OS::get_singleton()->get_environment("GODOT_WEBGPU_DUMP_SPV");
+			Ref<FileAccess> dump = FileAccess::open(dump_dir.path_join(spirv_path.get_file()), FileAccess::WRITE);
+			if (dump.is_valid()) {
+				dump->store_buffer(spirv.ptr(), spirv.size());
+			}
 		}
 
 		List<String> args;
@@ -1329,29 +1347,9 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 
 		RenderingShaderContainer::Shader &shader = shaders.ptrw()[i];
 		shader.shader_stage = spirv_stages[i].shader_stage;
-		// Newer WGSL reserves words Tint's pinned version still emits as
-		// identifiers (e.g. struct members named 'target'); rename them.
-		{
-			String text;
-			text.append_utf8((const char *)wgsl.ptr(), wgsl.size());
-			if (!_wgsl_storage_textures_supported(text)) {
-				print_verbose(vformat("WebGPU bake: excluding shader '%s' stage #%d: storage texture format/access combination not supported by WebGPU.", String::utf8(shader_name.get_data()), i));
-				return false;
-			}
-			bool directives_changed = false;
-			// Tint stamps its output with a Chromium-internal extension that
-			// browsers only accept behind --enable-unsafe-webgpu; the
-			// standards-track diagnostic filter expresses the same intent
-			// (non-uniform derivatives are deliberate in Godot's shaders).
-			if (text.contains("enable chromium_disable_uniformity_analysis;")) {
-				text = text.replace("enable chromium_disable_uniformity_analysis;", "diagnostic(off, derivative_uniformity);");
-				directives_changed = true;
-			}
-			if (_rename_reserved_words(text) || directives_changed) {
-				CharString utf8 = text.utf8();
-				wgsl.resize(utf8.length());
-				memcpy(wgsl.ptrw(), utf8.get_data(), utf8.length());
-			}
+		if (!_finalize_wgsl(wgsl)) {
+			print_verbose(vformat("WebGPU bake: excluding shader '%s' stage #%d: storage texture format/access combination not supported by WebGPU.", String::utf8(shader_name.get_data()), i));
+			return false;
 		}
 		shader.code_decompressed_size = wgsl.size();
 		shader.code_compressed_bytes.resize(wgsl.size());
@@ -1359,18 +1357,154 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 		const bool compressed = compress_code(wgsl.ptr(), wgsl.size(), shader.code_compressed_bytes.ptrw(), &compressed_size, &shader.code_compression_flags);
 		ERR_FAIL_COND_V_MSG(!compressed, false, vformat("Failed to compress WGSL for stage #%d.", i));
 		shader.code_compressed_bytes.resize(compressed_size);
+
+		if (!spirv_native.is_empty()) {
+			// Same tail as the baseline minus the subgroup lowering, plus the
+			// sampled-image retype the newer reader's validator requires.
+			spirv_native = spirv_preprocess::retype_sampled_image_results(spirv_native);
+			spirv_native = spirv_preprocess::lower_helper_invocation_to_false(spirv_native);
+			spirv_native = spirv_preprocess::lower_view_index_to_zero(spirv_native);
+			spirv_native = spirv_preprocess::lower_spec_constant_ops_to_runtime(spirv_native);
+			spirv_native = spirv_preprocess::negate_position_y(spirv_native);
+			if (_bake_native_subgroups(spirv_native, i, native_shaders.ptrw()[i])) {
+				print_verbose(vformat("WebGPU bake: shader '%s' stage #%d also translated with native subgroup operations.", String::utf8(shader_name.get_data()), i));
+			}
+		}
 	}
 	return true;
+}
+
+bool RenderingShaderContainerWebGPU::_finalize_wgsl(PackedByteArray &r_wgsl) const {
+	String text;
+	text.append_utf8((const char *)r_wgsl.ptr(), r_wgsl.size());
+	if (!_wgsl_storage_textures_supported(text)) {
+		return false;
+	}
+	bool directives_changed = false;
+	// Tint stamps its output with a Chromium-internal extension that
+	// browsers only accept behind --enable-unsafe-webgpu; the
+	// standards-track diagnostic filter expresses the same intent
+	// (non-uniform derivatives are deliberate in Godot's shaders).
+	if (text.contains("enable chromium_disable_uniformity_analysis;")) {
+		text = text.replace("enable chromium_disable_uniformity_analysis;", "diagnostic(off, derivative_uniformity);");
+		directives_changed = true;
+	}
+	// Newer WGSL reserves words Tint's pinned version still emits as
+	// identifiers (e.g. struct members named 'target'); rename them.
+	if (_rename_reserved_words(text) || directives_changed) {
+		CharString utf8 = text.utf8();
+		r_wgsl.resize(utf8.length());
+		memcpy(r_wgsl.ptrw(), utf8.get_data(), utf8.length());
+	}
+	return true;
+}
+
+bool RenderingShaderContainerWebGPU::_bake_native_subgroups(const Vector<uint8_t> &p_spirv, uint32_t p_stage, NativeShader &r_native) const {
+	static SafeNumeric<uint32_t> native_counter;
+	const String spirv_path = OS::get_singleton()->get_temp_path().path_join(vformat("godot_webgpu_%d_%d.native.spv", OS::get_singleton()->get_process_id(), native_counter.increment()));
+	const String wgsl_path = spirv_path + ".wgsl";
+	{
+		Ref<FileAccess> spirv_file = FileAccess::open(spirv_path, FileAccess::WRITE);
+		ERR_FAIL_COND_V(spirv_file.is_null(), false);
+		spirv_file->store_buffer(p_spirv.ptr(), p_spirv.size());
+	}
+	if (OS::get_singleton()->has_environment("GODOT_WEBGPU_DUMP_SPV")) {
+		const String dump_dir = OS::get_singleton()->get_environment("GODOT_WEBGPU_DUMP_SPV");
+		Ref<FileAccess> dump = FileAccess::open(dump_dir.path_join(spirv_path.get_file()), FileAccess::WRITE);
+		if (dump.is_valid()) {
+			dump->store_buffer(p_spirv.ptr(), p_spirv.size());
+		}
+	}
+	List<String> args;
+	args.push_back(spirv_path);
+	args.push_back("--format");
+	args.push_back("wgsl");
+	args.push_back("--allow-non-uniform-derivatives");
+	// Godot issues wave ops inside cluster-dependent control flow (legal in
+	// Vulkan); this inserts WGSL's diagnostic(off, subgroup_uniformity).
+	args.push_back("--allow-non-uniform-subgroup-operations");
+	args.push_back("-o");
+	args.push_back(wgsl_path);
+	String output;
+	int exit_code = -1;
+	Error err = FAILED;
+	// The newer reader's texture lowering carries an order-dependent assert
+	// (lower/texture.cc:581) that fires nondeterministically on some scene
+	// variants: a few attempts recover the flaky ones, the deterministic ones
+	// simply keep the baseline translation.
+	for (int attempt = 0; attempt < 4; attempt++) {
+		output = String();
+		err = OS::get_singleton()->execute(tint_subgroups_path, args, &output, &exit_code, true);
+		if ((err == OK && exit_code == 0) || output.find("internal compiler error") == -1) {
+			break;
+		}
+	}
+	DirAccess::remove_absolute(spirv_path);
+	if (err != OK || exit_code != 0) {
+		DirAccess::remove_absolute(wgsl_path);
+		return false;
+	}
+	PackedByteArray wgsl = FileAccess::get_file_as_bytes(wgsl_path);
+	DirAccess::remove_absolute(wgsl_path);
+	if (wgsl.is_empty() || !_finalize_wgsl(wgsl)) {
+		return false;
+	}
+	r_native.code_decompressed_size = wgsl.size();
+	r_native.code_compressed_bytes.resize(wgsl.size());
+	uint32_t compressed_size = 0;
+	if (!compress_code(wgsl.ptr(), wgsl.size(), r_native.code_compressed_bytes.ptrw(), &compressed_size, &r_native.code_compression_flags)) {
+		r_native = NativeShader();
+		return false;
+	}
+	r_native.code_compressed_bytes.resize(compressed_size);
+	return true;
+}
+
+uint32_t RenderingShaderContainerWebGPU::_from_bytes_shader_extra_data_start(const uint8_t *p_bytes) {
+	native_shaders.clear();
+	native_shaders.resize(shaders.size());
+	return 0;
+}
+
+uint32_t RenderingShaderContainerWebGPU::_from_bytes_shader_extra_data(const uint8_t *p_bytes, uint32_t p_index) {
+	NativeShader &native = native_shaders.ptrw()[p_index];
+	native.code_decompressed_size = decode_uint32(p_bytes);
+	native.code_compression_flags = decode_uint32(p_bytes + 4);
+	const uint32_t compressed_size = decode_uint32(p_bytes + 8);
+	native.code_compressed_bytes.resize(compressed_size);
+	if (compressed_size > 0) {
+		memcpy(native.code_compressed_bytes.ptrw(), p_bytes + 12, compressed_size);
+	}
+	return 12 + compressed_size;
+}
+
+uint32_t RenderingShaderContainerWebGPU::_to_bytes_shader_extra_data(uint8_t *p_bytes, uint32_t p_index) const {
+	const bool present = (int64_t)p_index < native_shaders.size();
+	const uint32_t compressed_size = present ? (uint32_t)native_shaders[p_index].code_compressed_bytes.size() : 0;
+	if (p_bytes != nullptr) {
+		encode_uint32(present ? native_shaders[p_index].code_decompressed_size : 0, p_bytes);
+		encode_uint32(present ? native_shaders[p_index].code_compression_flags : 0, p_bytes + 4);
+		encode_uint32(compressed_size, p_bytes + 8);
+		if (compressed_size > 0) {
+			memcpy(p_bytes + 12, native_shaders[p_index].code_compressed_bytes.ptr(), compressed_size);
+		}
+	}
+	return 12 + compressed_size;
 }
 
 void RenderingShaderContainerFormatWebGPU::set_tint_path(const String &p_tint_path) {
 	tint_path = p_tint_path;
 }
 
+void RenderingShaderContainerFormatWebGPU::set_tint_subgroups_path(const String &p_tint_path) {
+	tint_subgroups_path = p_tint_path;
+}
+
 Ref<RenderingShaderContainer> RenderingShaderContainerFormatWebGPU::create_container() const {
 	Ref<RenderingShaderContainerWebGPU> container;
 	container.instantiate();
 	container->tint_path = tint_path;
+	container->tint_subgroups_path = tint_subgroups_path;
 	return container;
 }
 

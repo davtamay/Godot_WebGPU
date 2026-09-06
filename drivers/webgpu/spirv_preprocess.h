@@ -103,4 +103,14 @@ Vector<uint8_t> fan_out_binding_arrays(const Vector<uint8_t> &p_bytes, uint32_t 
 // each using function, keeping plain OpSpecConstant as live WGSL overrides.
 Vector<uint8_t> lower_spec_constant_ops_to_runtime(const Vector<uint8_t> &p_bytes);
 
+// True when the module declares any GroupNonUniform capability, i.e. it uses
+// subgroup operations.
+bool uses_subgroup_ops(const Vector<uint8_t> &p_bytes);
+
+// Makes every OpSampledImage result type agree with its image operand. glslang
+// types the result as a DEPTH sampled image when a non-depth texture is paired
+// with a shadow sampler; newer Tint readers reject the mismatch in their IR
+// validator and convert Dref-sampled textures to depth textures themselves.
+Vector<uint8_t> retype_sampled_image_results(const Vector<uint8_t> &p_bytes);
+
 } // namespace spirv_preprocess
