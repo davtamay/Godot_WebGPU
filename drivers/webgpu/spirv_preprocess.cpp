@@ -3141,4 +3141,165 @@ Vector<uint8_t> fan_out_binding_arrays(const Vector<uint8_t> &p_bytes, uint32_t 
 	return out;
 }
 
+bool uses_subgroup_ops(const Vector<uint8_t> &p_bytes) {
+	const int64_t len = p_bytes.size();
+	const uint32_t total_words = (uint32_t)(len / 4);
+	if (total_words < 5) {
+		return false;
+	}
+	const uint8_t *data = p_bytes.ptr();
+	uint32_t pos = 5;
+	while (pos < total_words) {
+		const uint32_t w0 = read_word(data, len, pos);
+		const uint32_t wc = (w0 >> 16);
+		const uint16_t op = (uint16_t)(w0 & 0xFFFF);
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		if (op != SG_OP_CAPABILITY) {
+			break; // Capabilities lead the module.
+		}
+		if (wc == 2) {
+			const uint32_t cap = read_word(data, len, pos + 1);
+			if (cap >= 61 && cap <= 68) { // GroupNonUniform .. GroupNonUniformQuad
+				return true;
+			}
+		}
+		pos += wc;
+	}
+	return false;
+}
+
+Vector<uint8_t> retype_sampled_image_results(const Vector<uint8_t> &p_bytes) {
+	const int64_t len = p_bytes.size();
+	const uint32_t total_words = (uint32_t)(len / 4);
+	if (total_words < 5) {
+		return p_bytes;
+	}
+	const uint8_t *data = p_bytes.ptr();
+	constexpr uint16_t RS_OP_UNDEF = 1;
+	constexpr uint16_t RS_OP_FUNCTION_PARAMETER = 55;
+	constexpr uint16_t RS_OP_FUNCTION_CALL = 57;
+	constexpr uint16_t RS_OP_SAMPLED_IMAGE = 86;
+	constexpr uint16_t RS_OP_IMAGE = 100;
+	constexpr uint16_t RS_OP_SELECT = 169;
+	constexpr uint16_t RS_OP_PHI = 245;
+
+	HashMap<uint32_t, uint32_t> image_type_pos; // Image type id -> instruction position.
+	HashMap<uint32_t, uint32_t> image_of_sampled; // Sampled-image type id -> image type id.
+	HashMap<uint32_t, uint32_t> value_type; // Value id -> type id, for the ops that can carry handles.
+	uint32_t pos = 5;
+	while (pos < total_words) {
+		const uint32_t w0 = read_word(data, len, pos);
+		const uint32_t wc = (w0 >> 16);
+		const uint16_t op = (uint16_t)(w0 & 0xFFFF);
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		if (op == OP_TYPE_IMAGE && wc >= 2) {
+			image_type_pos[read_word(data, len, pos + 1)] = pos;
+		} else if (op == OP_TYPE_SAMPLED_IMAGE && wc >= 3) {
+			image_of_sampled[read_word(data, len, pos + 1)] = read_word(data, len, pos + 2);
+		}
+		if (wc >= 3 && (op == OP_LOAD || op == OP_COPY_OBJECT || op == RS_OP_SAMPLED_IMAGE || op == RS_OP_IMAGE || op == RS_OP_FUNCTION_PARAMETER || op == RS_OP_FUNCTION_CALL || op == RS_OP_SELECT || op == RS_OP_PHI || op == RS_OP_UNDEF)) {
+			value_type[read_word(data, len, pos + 2)] = read_word(data, len, pos + 1);
+		}
+		pos += wc;
+	}
+	HashMap<uint32_t, uint32_t> sampled_for_image; // Image type id -> an existing sampled-image type over it.
+	for (const KeyValue<uint32_t, uint32_t> &kv : image_of_sampled) {
+		if (!sampled_for_image.has(kv.value)) {
+			sampled_for_image[kv.value] = kv.key;
+		}
+	}
+
+	uint32_t bound = read_word(data, len, 3);
+	HashMap<uint32_t, uint32_t> word_patches; // Word position -> replacement word.
+	HashMap<uint32_t, LocalVector<uint32_t>> inject_after; // Instruction position -> words appended after it.
+	HashMap<uint32_t, uint32_t> retyped_values; // OpSampledImage result id -> its new type.
+	pos = 5;
+	while (pos < total_words) {
+		const uint32_t w0 = read_word(data, len, pos);
+		const uint32_t wc = (w0 >> 16);
+		const uint16_t op = (uint16_t)(w0 & 0xFFFF);
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		if (op == RS_OP_SAMPLED_IMAGE && wc == 5) {
+			const uint32_t result_type = read_word(data, len, pos + 1);
+			const uint32_t image_value = read_word(data, len, pos + 3);
+			const uint32_t *declared = image_of_sampled.getptr(result_type);
+			const uint32_t *actual = value_type.getptr(image_value);
+			if (declared != nullptr && actual != nullptr && image_type_pos.has(*actual) && *actual != *declared) {
+				// The result type disagrees with the operand: retype toward
+				// the operand, reusing a sampled-image type over it when one
+				// exists and declaring one right after the image type otherwise.
+				const uint32_t actual_image = *actual;
+				uint32_t want;
+				const uint32_t *existing = sampled_for_image.getptr(actual_image);
+				if (existing != nullptr) {
+					want = *existing;
+				} else {
+					want = bound++;
+					LocalVector<uint32_t> &inj = inject_after[image_type_pos[actual_image]];
+					inj.push_back((3u << 16) | OP_TYPE_SAMPLED_IMAGE);
+					inj.push_back(want);
+					inj.push_back(actual_image);
+					sampled_for_image[actual_image] = want;
+					image_of_sampled[want] = actual_image;
+				}
+				word_patches[pos + 1] = want;
+				retyped_values[read_word(data, len, pos + 2)] = want;
+			}
+		}
+		pos += wc;
+	}
+	if (retyped_values.is_empty()) {
+		return p_bytes;
+	}
+	// OpImage re-extractions of retyped values must yield the operand's
+	// image type again.
+	pos = 5;
+	while (pos < total_words) {
+		const uint32_t w0 = read_word(data, len, pos);
+		const uint32_t wc = (w0 >> 16);
+		const uint16_t op = (uint16_t)(w0 & 0xFFFF);
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		if (op == RS_OP_IMAGE && wc == 4) {
+			const uint32_t *new_type = retyped_values.getptr(read_word(data, len, pos + 3));
+			if (new_type != nullptr) {
+				word_patches[pos + 1] = image_of_sampled[*new_type];
+			}
+		}
+		pos += wc;
+	}
+
+	Vector<uint8_t> out;
+	for (uint32_t k = 0; k < 5; k++) {
+		push_word(out, k == 3 ? bound : read_word(data, len, k));
+	}
+	pos = 5;
+	while (pos < total_words) {
+		const uint32_t w0 = read_word(data, len, pos);
+		const uint32_t wc = (w0 >> 16);
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		for (uint32_t k = pos; k < pos + wc; k++) {
+			const uint32_t *patched = word_patches.getptr(k);
+			push_word(out, patched != nullptr ? *patched : read_word(data, len, k));
+		}
+		const LocalVector<uint32_t> *inj = inject_after.getptr(pos);
+		if (inj != nullptr) {
+			for (uint32_t k = 0; k < inj->size(); k++) {
+				push_word(out, (*inj)[k]);
+			}
+		}
+		pos += wc;
+	}
+	return out;
+}
+
 } // namespace spirv_preprocess

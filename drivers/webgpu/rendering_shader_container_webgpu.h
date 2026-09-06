@@ -68,21 +68,43 @@ public:
 
 	// Bake-time only; when empty (runtime), only from_bytes() works.
 	String tint_path;
+	// Optional second translator that understands subgroup operations (a
+	// newer Tint with --allow-non-uniform-subgroup-operations). When set,
+	// stages using subgroup ops also get a native translation.
+	String tint_subgroups_path;
+
+	// Native-subgroup WGSL per stage (WGSL `enable subgroups`); size 0 when
+	// the stage has no subgroup ops, no second translator was configured, or
+	// that translation failed. The driver selects it only on devices with
+	// the feature; the baseline blob in `shaders` serves everything else.
+	struct NativeShader {
+		PackedByteArray code_compressed_bytes;
+		uint32_t code_decompressed_size = 0;
+		uint32_t code_compression_flags = 0;
+	};
+	Vector<NativeShader> native_shaders;
 
 protected:
 	virtual uint32_t _format() const override;
 	virtual uint32_t _format_version() const override;
 	virtual bool _set_code_from_spirv(const ReflectShader &p_shader) override;
+	virtual uint32_t _from_bytes_shader_extra_data_start(const uint8_t *p_bytes) override;
+	virtual uint32_t _from_bytes_shader_extra_data(const uint8_t *p_bytes, uint32_t p_index) override;
+	virtual uint32_t _to_bytes_shader_extra_data(uint8_t *p_bytes, uint32_t p_index) const override;
 
 private:
 	bool _transform_spirv(Vector<uint8_t> &r_spirv) const;
+	bool _finalize_wgsl(PackedByteArray &r_wgsl) const;
+	bool _bake_native_subgroups(const Vector<uint8_t> &p_spirv, uint32_t p_stage, NativeShader &r_native) const;
 };
 
 class RenderingShaderContainerFormatWebGPU : public RenderingShaderContainerFormat {
 	String tint_path;
+	String tint_subgroups_path;
 
 public:
 	void set_tint_path(const String &p_tint_path);
+	void set_tint_subgroups_path(const String &p_tint_path);
 
 	virtual Ref<RenderingShaderContainer> create_container() const override;
 	virtual ShaderLanguageVersion get_shader_language_version() const override;
