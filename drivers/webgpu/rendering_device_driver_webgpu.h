@@ -146,6 +146,16 @@ private:
 		// e.g. the GI pass texelFetches the raw depth buffer through a plain
 		// texture2D, which tint types texture_2d<f32>.
 		HashSet<uint64_t> load_only_float_bindings;
+		// Every sampled-texture layout entry's declared sample type and view
+		// dimension (set << 32 | binding). A bound texture of another class
+		// (an integer texture in a float slot or the reverse - typically a
+		// binding this variant never reads, typed from reflection) gets a
+		// placeholder of the declared class instead of an invalid bind group.
+		struct TextureSlotType {
+			WGPUTextureSampleType sample_type = WGPUTextureSampleType_Float;
+			WGPUTextureViewDimension dimension = WGPUTextureViewDimension_2D;
+		};
+		HashMap<uint64_t, TextureSlotType> texture_slot_types;
 		// Arrayed uniforms whose WGSL was flattened to a single binding by
 		// the bake-time SPIR-V pass: the layout and bind groups use one
 		// entry at the original binding instead of the fan-out range.
@@ -296,6 +306,11 @@ private:
 	struct RenderPassInfo {
 		LocalVector<RenderPassAttachment> attachments;
 		bool from_swap_chain = false;
+		// The engine's attachment-less passes (SDFGI voxelization renders
+		// geometry only for its fragment side effects) carry one synthetic
+		// R8 color target here: WebGPU requires at least one attachment, and
+		// pipelines write nothing to it.
+		bool attachment_less = false;
 	};
 
 	// A cached GPURenderBundle for one previously seen command stream on a
@@ -329,6 +344,10 @@ private:
 		LocalVector<WGPUTextureView> views;
 		uint32_t width = 0;
 		uint32_t height = 0;
+		// Owned dummy color target of an attachment-less framebuffer (see
+		// RenderPassInfo::attachment_less).
+		WGPUTexture dummy_texture = nullptr;
+		WGPUTextureView dummy_view = nullptr;
 		// Frame-sliced dynamic buffers give a static scene a small cycle of
 		// distinct command streams, and scenes alternate a few stream shapes
 		// on top of it; eight entries cover the product (four thrashed on the
@@ -494,6 +513,12 @@ private:
 	WGPUTexture placeholder_float_texture = nullptr;
 	WGPUTextureView placeholder_float_view = nullptr;
 	WGPUTextureView _get_placeholder_float_view();
+	// Sample-class placeholders per (sample type, view dimension), bound
+	// where a texture's class disagrees with the layout's declaration.
+	HashMap<uint32_t, WGPUTextureView> placeholder_class_views;
+	LocalVector<WGPUTexture> placeholder_class_textures;
+	WGPUTextureView _get_placeholder_class_view(WGPUTextureSampleType p_sample_type, WGPUTextureViewDimension p_dimension);
+	WGPUTextureView _texture_view_for_slot(const ShaderInfo *p_shader, uint32_t p_set, uint32_t p_binding, const TextureInfo *p_texture);
 	WGPUTexture placeholder_storage_texture = nullptr;
 	WGPUTextureView placeholder_storage_view = nullptr;
 	WGPUTextureView _get_placeholder_storage_view();
