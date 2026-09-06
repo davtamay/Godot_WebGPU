@@ -57,6 +57,14 @@ RenderingShaderContainerFormat *ShaderBakerExportPluginPlatformWebGPU::create_sh
 
 	RenderingShaderContainerFormatWebGPU *format = memnew(RenderingShaderContainerFormatWebGPU);
 	format->set_tint_path(tint_path);
+	// Optional second translator that reads subgroup operations (a newer
+	// Tint built with --allow-non-uniform-subgroup-operations): stages using
+	// them then also carry a native WGSL translation for devices with the
+	// feature. Without it the bake is identical to a single-translator one.
+	const String tint_subgroups_path = OS::get_singleton()->get_environment("GODOT_TINT_PATH_SUBGROUPS");
+	if (!tint_subgroups_path.is_empty() && FileAccess::exists(tint_subgroups_path)) {
+		format->set_tint_subgroups_path(tint_subgroups_path);
+	}
 	return format;
 }
 
