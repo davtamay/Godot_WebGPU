@@ -628,7 +628,7 @@ public:
 		RID render_albedo;
 		RID render_emission;
 		RID render_emission_aniso;
-		RID render_occlusion[8];
+		RID render_occlusion; // The eight per-direction volumes, stacked along Z.
 		RID render_geom_facing;
 
 		RID render_sdf[2];
