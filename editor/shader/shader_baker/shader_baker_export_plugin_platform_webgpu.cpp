@@ -99,6 +99,12 @@ bool ShaderBakerExportPluginPlatformWebGPU::skips_variant(const Vector<String> &
 		if (source.contains("#define USE_MULTIVIEW")) {
 			return true;
 		}
+		// Scene shaders under the standard binding layout: the loader requests
+		// the core storage-buffer limit, so the web runtime always selects the
+		// compact layout's groups (LightStorage::uses_compact_scene_bindings).
+		if (source.contains("#define MAX_LIGHTMAP_TEXTURES") && !source.contains("#define SCENE_COMPACT_BINDINGS")) {
+			return true;
+		}
 		if (!bake_fp16 && source.contains("#define EXPLICIT_FP16")) {
 			return true;
 		}

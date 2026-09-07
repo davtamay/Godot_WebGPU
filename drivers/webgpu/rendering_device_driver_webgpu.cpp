@@ -2684,7 +2684,10 @@ uint64_t RenderingDeviceDriverWebGPU::limit_get(Limit p_limit) {
 			return device_limits.maxSamplersPerShaderStage;
 		case LIMIT_MAX_STORAGE_BUFFERS_PER_UNIFORM_SET:
 		case LIMIT_MAX_STORAGE_BUFFERS_PER_SHADER_STAGE:
-			return device_limits.maxStorageBuffersPerShaderStage;
+			// One storage buffer per stage is the driver's own: the push
+			// constant ring (PUSH_CONSTANT_BINDING). Report what the engine
+			// may bind.
+			return device_limits.maxStorageBuffersPerShaderStage - 1;
 		case LIMIT_MAX_STORAGE_IMAGES_PER_UNIFORM_SET:
 		case LIMIT_MAX_STORAGE_IMAGES_PER_SHADER_STAGE:
 			return device_limits.maxStorageTexturesPerShaderStage;
