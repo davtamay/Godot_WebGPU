@@ -538,7 +538,7 @@ void vertex_shader(in vec3 vertex,
 	hvec4 specular_light = hvec4(0.0);
 
 	uint omni_light_count = sc_omni_lights(8);
-	uvec2 omni_light_indices = instances.data[instance_index].omni_lights;
+	uvec2 omni_light_indices = instances.data[instance_index].INSTANCE_OMNI_LIGHTS;
 	for (uint i = 0; i < omni_light_count; i++) {
 		uint light_index = (i > 3) ? ((omni_light_indices.y >> ((i - 4) * 8)) & 0xFF) : ((omni_light_indices.x >> (i * 8)) & 0xFF);
 		if (i > 0 && light_index == 0xFF) {
@@ -549,7 +549,7 @@ void vertex_shader(in vec3 vertex,
 	}
 
 	uint spot_light_count = sc_spot_lights(8);
-	uvec2 spot_light_indices = instances.data[instance_index].spot_lights;
+	uvec2 spot_light_indices = instances.data[instance_index].INSTANCE_SPOT_LIGHTS;
 	for (uint i = 0; i < spot_light_count; i++) {
 		uint light_index = (i > 3) ? ((spot_light_indices.y >> ((i - 4) * 8)) & 0xFF) : ((spot_light_indices.x >> (i * 8)) & 0xFF);
 		if (i > 0 && light_index == 0xFF) {
@@ -2234,7 +2234,7 @@ void main() {
 
 #ifndef USE_VERTEX_LIGHTING
 	uint omni_light_count = sc_omni_lights(8);
-	uvec2 omni_indices = instances.data[draw_call.instance_index].omni_lights;
+	uvec2 omni_indices = instances.data[draw_call.instance_index].INSTANCE_OMNI_LIGHTS;
 	for (uint i = 0; i < omni_light_count; i++) {
 		uint light_index = (i > 3) ? ((omni_indices.y >> ((i - 4) * 8)) & 0xFF) : ((omni_indices.x >> (i * 8)) & 0xFF);
 		if (i > 0 && light_index == 0xFF) {
@@ -2266,7 +2266,7 @@ void main() {
 	}
 
 	uint spot_light_count = sc_spot_lights(8);
-	uvec2 spot_indices = instances.data[draw_call.instance_index].spot_lights;
+	uvec2 spot_indices = instances.data[draw_call.instance_index].INSTANCE_SPOT_LIGHTS;
 	for (uint i = 0; i < spot_light_count; i++) {
 		uint light_index = (i > 3) ? ((spot_indices.y >> ((i - 4) * 8)) & 0xFF) : ((spot_indices.x >> (i * 8)) & 0xFF);
 		if (i > 0 && light_index == 0xFF) {
@@ -2298,7 +2298,7 @@ void main() {
 	}
 
 	uint area_light_count = sc_area_lights(8);
-	uvec2 area_indices = instances.data[draw_call.instance_index].area_lights;
+	uvec2 area_indices = instances.data[draw_call.instance_index].INSTANCE_AREA_LIGHTS;
 	for (uint i = 0; i < area_light_count; i++) {
 		uint light_index = (i > 3) ? ((area_indices.y >> ((i - 4) * 8)) & 0xFF) : ((area_indices.x >> (i * 8)) & 0xFF);
 		if (i > 0 && light_index == 0xFF) {
