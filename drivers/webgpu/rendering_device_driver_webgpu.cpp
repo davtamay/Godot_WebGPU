@@ -2746,20 +2746,6 @@ uint64_t RenderingDeviceDriverWebGPU::limit_get(Limit p_limit) {
 /**** SHADERS ****/
 /*****************/
 
-static WGPUShaderStage _shader_stages_to_wgpu(BitField<RenderingDeviceCommons::ShaderStage> p_stages) {
-	WGPUShaderStage visibility = WGPUShaderStage_None;
-	if (p_stages.has_flag(RenderingDeviceCommons::SHADER_STAGE_VERTEX_BIT)) {
-		visibility |= WGPUShaderStage_Vertex;
-	}
-	if (p_stages.has_flag(RenderingDeviceCommons::SHADER_STAGE_FRAGMENT_BIT)) {
-		visibility |= WGPUShaderStage_Fragment;
-	}
-	if (p_stages.has_flag(RenderingDeviceCommons::SHADER_STAGE_COMPUTE_BIT)) {
-		visibility |= WGPUShaderStage_Compute;
-	}
-	return visibility;
-}
-
 static WGPUTextureViewDimension _texture_type_to_wgpu_view_dimension(RenderingDeviceCommons::TextureType p_type) {
 	switch (p_type) {
 		case RenderingDeviceCommons::TEXTURE_TYPE_1D:
@@ -3216,75 +3202,6 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 		}
 	}
 
-	// Validate per-stage binding budgets up front: WebGPU rejects layouts
-	// over the limits, and the resulting error objects would poison every
-	// frame command buffer that binds them. Failing here yields a null
-	// shader, which the engine handles gracefully.
-	{
-		enum { VIS_VERTEX,
-			VIS_FRAGMENT,
-			VIS_COMPUTE,
-			VIS_MAX };
-		uint32_t samplers[VIS_MAX] = {};
-		uint32_t textures[VIS_MAX] = {};
-		uint32_t storage_buffers[VIS_MAX] = {};
-		uint32_t uniform_buffers[VIS_MAX] = {};
-		for (int64_t set_index = 0; set_index < reflection.uniform_sets.size(); set_index++) {
-			for (const ShaderUniform &uniform : reflection.uniform_sets[set_index]) {
-				// length is the element count for textures/samplers but the
-				// BYTE size for buffers; buffers always occupy one binding.
-				const bool is_buffer_type = uniform.type == UNIFORM_TYPE_UNIFORM_BUFFER || uniform.type == UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC || uniform.type == UNIFORM_TYPE_STORAGE_BUFFER || uniform.type == UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC || uniform.type == UNIFORM_TYPE_TEXTURE_BUFFER || uniform.type == UNIFORM_TYPE_SAMPLER_WITH_TEXTURE_BUFFER || uniform.type == UNIFORM_TYPE_IMAGE_BUFFER;
-				const uint32_t count = is_buffer_type ? 1u : MAX(1u, (uint32_t)uniform.length);
-				const WGPUShaderStage visibility = _shader_stages_to_wgpu(uniform.stages);
-				for (uint32_t stage = 0; stage < VIS_MAX; stage++) {
-					const WGPUShaderStage stage_bit = stage == VIS_VERTEX ? WGPUShaderStage_Vertex : (stage == VIS_FRAGMENT ? WGPUShaderStage_Fragment : WGPUShaderStage_Compute);
-					if ((visibility & stage_bit) == 0) {
-						continue;
-					}
-					switch (uniform.type) {
-						case UNIFORM_TYPE_SAMPLER:
-							samplers[stage] += count;
-							break;
-						case UNIFORM_TYPE_SAMPLER_WITH_TEXTURE:
-							samplers[stage] += count;
-							textures[stage] += count;
-							break;
-						case UNIFORM_TYPE_TEXTURE:
-						case UNIFORM_TYPE_INPUT_ATTACHMENT:
-							textures[stage] += count;
-							break;
-						case UNIFORM_TYPE_UNIFORM_BUFFER:
-						case UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC:
-							uniform_buffers[stage] += count;
-							break;
-						case UNIFORM_TYPE_STORAGE_BUFFER:
-						case UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC:
-						case UNIFORM_TYPE_TEXTURE_BUFFER:
-						case UNIFORM_TYPE_SAMPLER_WITH_TEXTURE_BUFFER:
-						case UNIFORM_TYPE_IMAGE_BUFFER:
-							storage_buffers[stage] += count;
-							break;
-						default:
-							break;
-					}
-				}
-			}
-		}
-		const WGPUShaderStage pc_visibility = shader->push_constant_size > 0 ? _shader_stages_to_wgpu(reflection.push_constant_stages) : WGPUShaderStage_None;
-		for (uint32_t stage = 0; stage < VIS_MAX; stage++) {
-			const WGPUShaderStage stage_bit = stage == VIS_VERTEX ? WGPUShaderStage_Vertex : (stage == VIS_FRAGMENT ? WGPUShaderStage_Fragment : WGPUShaderStage_Compute);
-			// The push constant ring adds one storage buffer to every stage
-			// that reads it.
-			const uint32_t pc_extra = (pc_visibility & stage_bit) != 0 ? 1 : 0;
-			// Sampler/texture overflows are handled by the vertex visibility
-			// cap below; only buffer overflows are unfixable here.
-			if (storage_buffers[stage] + pc_extra > device_limits.maxStorageBuffersPerShaderStage || uniform_buffers[stage] > device_limits.maxUniformBuffersPerShaderStage) {
-				shader_free(ShaderID(shader));
-				ERR_FAIL_V_MSG(ShaderID(), vformat("Shader exceeds WebGPU per-stage binding limits (stage %d: %d samplers, %d textures, %d storage buffers, %d uniform buffers).", stage, samplers[stage], textures[stage], storage_buffers[stage] + pc_extra, uniform_buffers[stage]));
-			}
-		}
-	}
-
 	// Visibility from the per-stage WGSL declarations collected above.
 	auto binding_visibility = [&](uint32_t p_group, uint32_t p_binding) -> WGPUShaderStage {
 		WGPUShaderStage visibility = WGPUShaderStage_None;
@@ -3336,6 +3253,49 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 			}
 			vertex_textures_used++;
 		}
+	};
+
+	// Per-stage binding budgets are summed across the whole pipeline layout.
+	// Tally the REAL entries (their visibility is the per-stage WGSL usage the
+	// layouts bind with) and fail before creating a layout that would exceed a
+	// device limit: Dawn would hand back an error object that poisons every
+	// frame binding it, whereas a null shader is handled by the engine.
+	struct StageBudget {
+		uint32_t samplers = 0;
+		uint32_t textures = 0;
+		uint32_t storage_textures = 0;
+		uint32_t storage_buffers = 0;
+		uint32_t uniform_buffers = 0;
+	};
+	StageBudget budgets[3];
+	const WGPUShaderStage budget_stage_bits[3] = { WGPUShaderStage_Vertex, WGPUShaderStage_Fragment, WGPUShaderStage_Compute };
+	const char *budget_stage_names[3] = { "vertex", "fragment", "compute" };
+	auto check_budget = [&](const LocalVector<WGPUBindGroupLayoutEntry> &p_entries, int64_t p_set_index) -> String {
+		for (const WGPUBindGroupLayoutEntry &e : p_entries) {
+			for (uint32_t st = 0; st < 3; st++) {
+				if ((e.visibility & budget_stage_bits[st]) == 0) {
+					continue;
+				}
+				if (e.sampler.type != WGPUSamplerBindingType_BindingNotUsed) {
+					budgets[st].samplers++;
+				} else if (e.texture.sampleType != WGPUTextureSampleType_BindingNotUsed) {
+					budgets[st].textures++;
+				} else if (e.storageTexture.access != WGPUStorageTextureAccess_BindingNotUsed) {
+					budgets[st].storage_textures++;
+				} else if (e.buffer.type == WGPUBufferBindingType_Uniform) {
+					budgets[st].uniform_buffers++;
+				} else if (e.buffer.type != WGPUBufferBindingType_BindingNotUsed) {
+					budgets[st].storage_buffers++;
+				}
+			}
+		}
+		for (uint32_t st = 0; st < 3; st++) {
+			const StageBudget &b = budgets[st];
+			if (b.samplers > device_limits.maxSamplersPerShaderStage || b.textures > device_limits.maxSampledTexturesPerShaderStage || b.storage_textures > device_limits.maxStorageTexturesPerShaderStage || b.storage_buffers > device_limits.maxStorageBuffersPerShaderStage || b.uniform_buffers > device_limits.maxUniformBuffersPerShaderStage) {
+				return vformat("Shader '%s' exceeds this device's per-stage binding limits at set %d (%s stage: %d samplers, %d textures, %d storage textures, %d storage buffers, %d uniform buffers; limits %d/%d/%d/%d/%d).", String(shader->name.get_data()), p_set_index, budget_stage_names[st], b.samplers, b.textures, b.storage_textures, b.storage_buffers, b.uniform_buffers, device_limits.maxSamplersPerShaderStage, device_limits.maxSampledTexturesPerShaderStage, device_limits.maxStorageTexturesPerShaderStage, device_limits.maxStorageBuffersPerShaderStage, device_limits.maxUniformBuffersPerShaderStage);
+			}
+		}
+		return String();
 	};
 
 	// Bind group layouts. Binding numbers follow the fixed remaps described in
@@ -3554,6 +3514,13 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 			entries.push_back(pc_entry);
 		}
 
+		{
+			const String over = check_budget(entries, set_index);
+			if (!over.is_empty()) {
+				shader_free(ShaderID(shader));
+				ERR_FAIL_V_MSG(ShaderID(), over);
+			}
+		}
 		WGPUBindGroupLayoutDescriptor layout_desc = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
 		layout_desc.label = { shader->name.get_data(), WGPU_STRLEN };
 		layout_desc.entryCount = entries.size();
@@ -3578,6 +3545,15 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 		pc_entry.visibility = binding_visibility(RenderingShaderContainerWebGPU::PUSH_CONSTANT_GROUP, RenderingShaderContainerWebGPU::PUSH_CONSTANT_BINDING);
 		pc_entry.buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
 		pc_entry.buffer.hasDynamicOffset = true;
+		{
+			LocalVector<WGPUBindGroupLayoutEntry> pc_entries;
+			pc_entries.push_back(pc_entry);
+			const String over = check_budget(pc_entries, 0);
+			if (!over.is_empty()) {
+				shader_free(ShaderID(shader));
+				ERR_FAIL_V_MSG(ShaderID(), over);
+			}
+		}
 		WGPUBindGroupLayoutDescriptor layout_desc = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
 		layout_desc.label = { shader->name.get_data(), WGPU_STRLEN };
 		layout_desc.entryCount = 1;
