@@ -125,10 +125,12 @@ const Engine = (function () {
 				return null;
 			}
 			// Request the adapter's own limits for the values the engine's
-			// renderer exceeds under the defaults.
+			// renderer exceeds under the defaults. Storage buffers per stage stay
+			// at the core default (8): the scene shaders of every web export are
+			// baked for that budget (their compact binding layout), so a larger
+			// device budget would select shaders the pack does not carry.
 			const requiredLimits = {};
 			[
-				'maxStorageBuffersPerShaderStage',
 				'maxSampledTexturesPerShaderStage',
 				'maxSamplersPerShaderStage',
 				'maxUniformBuffersPerShaderStage',
