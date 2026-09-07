@@ -49,6 +49,11 @@ public:
 	// cache stores them as tolerated holes). Sources are the fully built
 	// per-stage shader code, including the variant's #define block.
 	virtual bool skips_variant(const Vector<String> &p_stage_sources) const { return false; }
+	// Whether groups and variants the host renderer has disabled are baked
+	// too. Group enablement (FP16/FP32, multiview, subgroup size) follows the
+	// host's capabilities, not the target's; a target without a runtime
+	// shader compiler needs every variant it might select in the cache.
+	virtual bool bakes_disabled_groups() const { return false; }
 	virtual ~ShaderBakerExportPluginPlatform() {}
 };
 
