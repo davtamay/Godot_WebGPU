@@ -34,6 +34,7 @@
 #include "core/math/math_defs.h"
 #include "servers/rendering/renderer_rd/forward_mobile/render_forward_mobile.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
+#include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 
 using namespace RendererSceneRenderImplementation;
@@ -482,7 +483,7 @@ RID SceneShaderForwardMobile::ShaderData::get_shader_variant(ShaderVersion p_sha
 	if (version.is_valid()) {
 		MutexLock lock(SceneShaderForwardMobile::singleton_mutex);
 		ERR_FAIL_NULL_V(SceneShaderForwardMobile::singleton, RID());
-		return SceneShaderForwardMobile::singleton->shader.version_get_shader(version, p_shader_version + (SceneShaderForwardMobile::singleton->use_fp16 ? SHADER_VERSION_MAX * 2 : 0) + (p_ubershader ? SHADER_VERSION_MAX : 0));
+		return SceneShaderForwardMobile::singleton->shader.version_get_shader(version, p_shader_version + SceneShaderForwardMobile::singleton->compact_variant_offset + (SceneShaderForwardMobile::singleton->use_fp16 ? SHADER_VERSION_MAX * 2 : 0) + (p_ubershader ? SHADER_VERSION_MAX : 0));
 	} else {
 		return RID();
 	}
@@ -547,7 +548,7 @@ void SceneShaderForwardMobile::MaterialData::set_next_pass(RID p_pass) {
 
 bool SceneShaderForwardMobile::MaterialData::update_parameters(const HashMap<StringName, Variant> &p_parameters, bool p_uniform_dirty, bool p_textures_dirty) {
 	if (shader_data->version.is_valid()) {
-		RID base_shader = SceneShaderForwardMobile::singleton->shader.version_get_shader(shader_data->version, (SceneShaderForwardMobile::singleton->use_fp16 ? SHADER_VERSION_MAX * 2 : 0));
+		RID base_shader = SceneShaderForwardMobile::singleton->shader.version_get_shader(shader_data->version, SceneShaderForwardMobile::singleton->compact_variant_offset + (SceneShaderForwardMobile::singleton->use_fp16 ? SHADER_VERSION_MAX * 2 : 0));
 		MutexLock lock(SceneShaderForwardMobile::singleton_mutex);
 		return update_parameters_uniform_set(p_parameters, p_uniform_dirty, p_textures_dirty, shader_data->uniforms, shader_data->ubo_offsets.ptr(), shader_data->texture_uniforms, shader_data->default_texture_params, shader_data->ubo_size, uniform_set, base_shader, RenderForwardMobile::MATERIAL_UNIFORM_SET, true, true);
 	} else {
@@ -581,6 +582,9 @@ void SceneShaderForwardMobile::init(const String p_defines) {
 
 	// Store whether the shader will prefer using the FP16 variant.
 	use_fp16 = RD::get_singleton()->has_feature(RD::SUPPORTS_HALF_FLOAT);
+	compact_scene_bindings = RendererRD::LightStorage::uses_compact_scene_bindings();
+	compact_variant_offset = compact_scene_bindings ? SHADER_VERSION_MAX * 4 : 0;
+	compact_group_offset = compact_scene_bindings ? SHADER_GROUP_FP32_COMPACT : 0;
 
 	emulate_point_size = !RD::get_singleton()->has_feature(RD::SUPPORTS_POINT_SIZE);
 
@@ -618,6 +622,21 @@ void SceneShaderForwardMobile::init(const String p_defines) {
 				shader_versions.push_back(ShaderRD::VariantDefine(shader_group_multiview, base_define + "\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define SHADOW_PASS\n", false)); // SHADER_VERSION_SHADOW_PASS_MULTIVIEW
 				shader_versions.push_back(ShaderRD::VariantDefine(shader_group_multiview, base_define + "\n#define USE_MULTIVIEW\n#define MODE_RENDER_MOTION_VECTORS\n", false)); // SHADER_VERSION_MOTION_VECTORS_MULTIVIEW
 			}
+		}
+
+		// Compact-layout twins of every variant, in their own groups after the
+		// standard ones; whichever layout the device gets is the enabled set.
+		// LIGHTS_PER_TYPE is the merged light buffer's region size: the same
+		// get_max_elements() LightStorage is sized from at renderer init.
+		const String compact_defines = vformat("\n#define SCENE_COMPACT_BINDINGS\n#define LIGHTS_PER_TYPE %d\n", (int)RenderForwardMobile::get_singleton()->get_max_elements());
+		const int64_t standard_variant_count = shader_versions.size();
+		for (int64_t i = 0; i < standard_variant_count; i++) {
+			ShaderRD::VariantDefine twin = shader_versions[i];
+			twin.group += SHADER_GROUP_FP32_COMPACT;
+			twin.text = (compact_defines + String::utf8(twin.text.get_data())).utf8();
+			twin.default_enabled = twin.default_enabled && compact_scene_bindings;
+			shader_versions.write[i].default_enabled = shader_versions[i].default_enabled && !compact_scene_bindings;
+			shader_versions.push_back(twin);
 		}
 
 		Vector<RD::PipelineImmutableSampler> immutable_samplers;
@@ -888,7 +907,7 @@ void fragment() {
 		material_storage->material_set_shader(default_material, default_shader);
 
 		MaterialData *md = static_cast<MaterialData *>(material_storage->material_get_data(default_material, RendererRD::MaterialStorage::SHADER_TYPE_3D));
-		default_shader_rd = shader.version_get_shader(md->shader_data->version, (use_fp16 ? SHADER_VERSION_MAX * 2 : 0) + SHADER_VERSION_COLOR_PASS);
+		default_shader_rd = shader.version_get_shader(md->shader_data->version, compact_variant_offset + (use_fp16 ? SHADER_VERSION_MAX * 2 : 0) + SHADER_VERSION_COLOR_PASS);
 
 		default_material_shader_ptr = md->shader_data;
 		default_material_uniform_set = md->uniform_set;
@@ -971,7 +990,7 @@ uint32_t SceneShaderForwardMobile::get_pipeline_compilations(RSE::PipelineSource
 }
 
 void SceneShaderForwardMobile::enable_fp32_shader_group() {
-	shader.enable_group(SHADER_GROUP_FP32);
+	shader.enable_group(SHADER_GROUP_FP32 + compact_group_offset);
 
 	if (is_multiview_shader_group_enabled()) {
 		enable_multiview_shader_group();
@@ -979,7 +998,7 @@ void SceneShaderForwardMobile::enable_fp32_shader_group() {
 }
 
 void SceneShaderForwardMobile::enable_fp16_shader_group() {
-	shader.enable_group(SHADER_GROUP_FP16);
+	shader.enable_group(SHADER_GROUP_FP16 + compact_group_offset);
 
 	if (is_multiview_shader_group_enabled()) {
 		enable_multiview_shader_group();
@@ -987,17 +1006,17 @@ void SceneShaderForwardMobile::enable_fp16_shader_group() {
 }
 
 void SceneShaderForwardMobile::enable_multiview_shader_group() {
-	if (shader.is_group_enabled(SHADER_GROUP_FP32)) {
-		shader.enable_group(SHADER_GROUP_FP32_MULTIVIEW);
+	if (shader.is_group_enabled(SHADER_GROUP_FP32 + compact_group_offset)) {
+		shader.enable_group(SHADER_GROUP_FP32_MULTIVIEW + compact_group_offset);
 	}
 
-	if (shader.is_group_enabled(SHADER_GROUP_FP16)) {
-		shader.enable_group(SHADER_GROUP_FP16_MULTIVIEW);
+	if (shader.is_group_enabled(SHADER_GROUP_FP16 + compact_group_offset)) {
+		shader.enable_group(SHADER_GROUP_FP16_MULTIVIEW + compact_group_offset);
 	}
 }
 
 bool SceneShaderForwardMobile::is_multiview_shader_group_enabled() const {
-	return shader.is_group_enabled(SHADER_GROUP_FP32_MULTIVIEW) || shader.is_group_enabled(SHADER_GROUP_FP16_MULTIVIEW);
+	return shader.is_group_enabled(SHADER_GROUP_FP32_MULTIVIEW + compact_group_offset) || shader.is_group_enabled(SHADER_GROUP_FP16_MULTIVIEW + compact_group_offset);
 }
 
 RID SceneShaderForwardMobile::get_default_shader_rd(bool p_is_multiview) {
@@ -1008,7 +1027,7 @@ RID SceneShaderForwardMobile::get_default_shader_rd(bool p_is_multiview) {
 		ERR_FAIL_NULL_V(material_storage, RID());
 		ERR_FAIL_COND_V(!default_material.is_valid(), RID());
 
-		int variant = p_is_multiview ? SHADER_VERSION_COLOR_PASS_MULTIVIEW : SHADER_VERSION_COLOR_PASS;
+		int variant = (p_is_multiview ? SHADER_VERSION_COLOR_PASS_MULTIVIEW : SHADER_VERSION_COLOR_PASS) + compact_variant_offset;
 		if (use_fp16) {
 			variant += SHADER_VERSION_MAX * 2;
 		}
