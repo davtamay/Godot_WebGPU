@@ -72,6 +72,16 @@ bool ShaderBakerExportPluginPlatformWebGPU::matches_driver(const String &p_drive
 	return p_driver == "webgpu";
 }
 
+bool ShaderBakerExportPluginPlatformWebGPU::bakes_disabled_groups() const {
+	// The web runtime has no shader compiler: a variant the device selects
+	// but the cache lacks is a hard failure. Group and variant enablement is
+	// decided by the HOST editor's renderer (its FP16 support, its XR state,
+	// its subgroup and subpass capabilities), which need not match the
+	// browser's, so every group is baked and skips_variant() trims the ones
+	// the web can never select.
+	return true;
+}
+
 bool ShaderBakerExportPluginPlatformWebGPU::skips_variant(const Vector<String> &p_stage_sources) const {
 	// The WebGPU runtime can never select multiview variant groups (WGSL has
 	// no ViewIndex; stereo renders one pass per view), so baking them only
