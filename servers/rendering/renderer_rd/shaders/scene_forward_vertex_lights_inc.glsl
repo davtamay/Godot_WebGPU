@@ -63,6 +63,9 @@ void light_process_omni_vertex(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 norma
 void light_process_spot_vertex(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, half roughness,
 		inout hvec3 diffuse_light,
 		inout hvec3 specular_light) {
+#ifdef SCENE_COMPACT_BINDINGS
+	idx = SPOT_LIGHT_INDEX(idx);
+#endif
 	vec3 light_rel_vec = spot_lights.data[idx].position - vertex;
 	float light_length = length(light_rel_vec);
 	hvec3 light_rel_vec_norm = hvec3(light_rel_vec / light_length);
