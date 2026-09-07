@@ -274,7 +274,15 @@ def configure(env: "SConsEnvironment"):
         # SharedArrayBuffer (COOP/COEP); single-threaded builds render on the main
         # thread and host anywhere with no special headers. The "thread_support"
         # export option picks which template to ship.
+        # SConstruct switches `rendering_device` off for the web platform before
+        # configure runs (no native driver exists there); this option is what
+        # provides one, so re-enable it and define the same renderer switches.
+        env["rendering_device"] = True
         env.AppendUnique(CPPDEFINES=["RD_ENABLED"])
+        if env["forward_mobile_renderer"]:
+            env.AppendUnique(CPPDEFINES=["MOBILE_RD_ENABLED"])
+        if env["forward_plus_renderer"]:
+            env.AppendUnique(CPPDEFINES=["FORWARD_RD_ENABLED"])
 
     if env["javascript_eval"]:
         env.Append(CPPDEFINES=["JAVASCRIPT_EVAL_ENABLED"])
