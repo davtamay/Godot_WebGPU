@@ -444,11 +444,15 @@ void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID 
 	LocalVector<ShaderGroupItem> group_items;
 	group_items.resize(group_count);
 
+	// Platforms whose target cannot compile shaders at runtime ask for the
+	// disabled groups and variants as well (see bakes_disabled_groups()).
+	const bool bake_disabled = shader_container_platform.is_valid() && shader_container_platform->bakes_disabled_groups();
+
 	RBSet<uint32_t> groups_to_compile;
 	for (int64_t i = 0; i < group_count; i++) {
-		// Bake disabled groups too (see the variant note below): group
-		// enablement (FP16/FP32, subgroup size, multiview) follows the HOST
-		// renderer's capabilities, not the target's.
+		if (!bake_disabled && !p_shader->is_group_enabled(i)) {
+			continue;
+		}
 
 		String cache_path = p_shader->version_get_cache_file_relative_path(p_version, i, shader_container_driver);
 		if (shader_paths_processed.has(cache_path)) {
@@ -469,11 +473,7 @@ void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID 
 
 	for (int64_t i = 0; i < variant_count; i++) {
 		int group = p_shader->get_variant_to_group(i);
-		// Bake disabled variants too: the target device's variant enablement
-		// can differ from the host renderer's (e.g. subgroup or subpass
-		// support), and a missing variant cannot be compiled at runtime on
-		// platforms without a shader compiler.
-		if (!groups_to_compile.has(group)) {
+		if (!groups_to_compile.has(group) || (!bake_disabled && !p_shader->is_variant_enabled(i))) {
 			continue;
 		}
 
