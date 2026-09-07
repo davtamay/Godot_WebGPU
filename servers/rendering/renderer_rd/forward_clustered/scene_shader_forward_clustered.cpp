@@ -34,6 +34,7 @@
 #include "core/math/math_defs.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
+#include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 
 using namespace RendererSceneRenderImplementation;
@@ -521,7 +522,7 @@ RD::PolygonCullMode SceneShaderForwardClustered::ShaderData::get_cull_mode_from_
 RID SceneShaderForwardClustered::ShaderData::_get_shader_variant(uint16_t p_shader_version) const {
 	if (version.is_valid()) {
 		ERR_FAIL_NULL_V(SceneShaderForwardClustered::singleton, RID());
-		return SceneShaderForwardClustered::singleton->shader.version_get_shader(version, p_shader_version);
+		return SceneShaderForwardClustered::singleton->shader.version_get_shader(version, p_shader_version + SceneShaderForwardClustered::singleton->compact_variant_offset);
 	} else {
 		return RID();
 	}
@@ -593,7 +594,7 @@ void SceneShaderForwardClustered::MaterialData::set_next_pass(RID p_pass) {
 
 bool SceneShaderForwardClustered::MaterialData::update_parameters(const HashMap<StringName, Variant> &p_parameters, bool p_uniform_dirty, bool p_textures_dirty) {
 	if (shader_data->version.is_valid()) {
-		RID shader_rid = SceneShaderForwardClustered::singleton->shader.version_get_shader(shader_data->version, 0);
+		RID shader_rid = SceneShaderForwardClustered::singleton->shader.version_get_shader(shader_data->version, SceneShaderForwardClustered::singleton->compact_variant_offset);
 
 		MutexLock lock(SceneShaderForwardClustered::singleton_mutex);
 		return update_parameters_uniform_set(p_parameters, p_uniform_dirty, p_textures_dirty, shader_data->uniforms, shader_data->ubo_offsets.ptr(), shader_data->texture_uniforms, shader_data->default_texture_params, shader_data->ubo_size, uniform_set, shader_rid, RenderForwardClustered::MATERIAL_UNIFORM_SET, true, true);
@@ -642,6 +643,9 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 
 	emulate_point_size = !RD::get_singleton()->has_feature(RD::SUPPORTS_POINT_SIZE);
 	supports_image_atomics = RD::get_singleton()->has_feature(RD::SUPPORTS_IMAGE_ATOMIC_32_BIT);
+	compact_scene_bindings = RendererRD::LightStorage::uses_compact_scene_bindings();
+	compact_variant_offset = compact_scene_bindings ? ShaderData::VERTEX_INPUT_MASKS_SIZE : 0;
+	compact_group_offset = compact_scene_bindings ? SHADER_GROUP_BASE_COMPACT : 0;
 
 	depth_prepass_enabled = GLOBAL_GET("rendering/driver/depth_prepass/enable");
 
@@ -696,12 +700,27 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 			shader_versions.push_back(ShaderRD::VariantDefine(group, version, false));
 		}
 
+		// Compact-layout twins of every variant, in their own groups after the
+		// standard ones; whichever layout the device gets is the enabled set.
+		// LIGHTS_PER_TYPE is the merged light buffer's region size: the same
+		// get_max_elements() LightStorage is sized from at renderer init.
+		const String compact_defines = vformat("\n#define SCENE_COMPACT_BINDINGS\n#define LIGHTS_PER_TYPE %d\n", (int)RenderForwardClustered::get_singleton()->get_max_elements());
+		const int64_t standard_variant_count = shader_versions.size();
+		for (int64_t i = 0; i < standard_variant_count; i++) {
+			ShaderRD::VariantDefine twin = shader_versions[i];
+			twin.group += SHADER_GROUP_BASE_COMPACT;
+			twin.text = (compact_defines + String::utf8(twin.text.get_data())).utf8();
+			twin.default_enabled = twin.default_enabled && compact_scene_bindings;
+			shader_versions.write[i].default_enabled = shader_versions[i].default_enabled && !compact_scene_bindings;
+			shader_versions.push_back(twin);
+		}
+
 		Vector<uint64_t> dynamic_buffers;
 		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 2));
 		shader.initialize(shader_versions, p_defines, Vector<RD::PipelineImmutableSampler>(), dynamic_buffers);
 
 		if (RendererCompositorRD::get_singleton()->is_xr_enabled()) {
-			shader.enable_group(SHADER_GROUP_MULTIVIEW);
+			shader.enable_group(SHADER_GROUP_MULTIVIEW + compact_group_offset);
 		}
 	}
 
@@ -1042,25 +1061,25 @@ void SceneShaderForwardClustered::set_default_specialization(const ShaderSpecial
 }
 
 void SceneShaderForwardClustered::enable_multiview_shader_group() {
-	shader.enable_group(SHADER_GROUP_MULTIVIEW);
+	shader.enable_group(SHADER_GROUP_MULTIVIEW + compact_group_offset);
 }
 
 void SceneShaderForwardClustered::enable_advanced_shader_group(bool p_needs_multiview) {
 	if (p_needs_multiview || RendererCompositorRD::get_singleton()->is_xr_enabled()) {
-		shader.enable_group(SHADER_GROUP_ADVANCED_MULTIVIEW);
+		shader.enable_group(SHADER_GROUP_ADVANCED_MULTIVIEW + compact_group_offset);
 	}
-	shader.enable_group(SHADER_GROUP_ADVANCED);
+	shader.enable_group(SHADER_GROUP_ADVANCED + compact_group_offset);
 }
 
 bool SceneShaderForwardClustered::is_multiview_shader_group_enabled() const {
-	return shader.is_group_enabled(SHADER_GROUP_MULTIVIEW);
+	return shader.is_group_enabled(SHADER_GROUP_MULTIVIEW + compact_group_offset);
 }
 
 bool SceneShaderForwardClustered::is_advanced_shader_group_enabled(bool p_multiview) const {
 	if (p_multiview) {
-		return shader.is_group_enabled(SHADER_GROUP_ADVANCED_MULTIVIEW);
+		return shader.is_group_enabled(SHADER_GROUP_ADVANCED_MULTIVIEW + compact_group_offset);
 	} else {
-		return shader.is_group_enabled(SHADER_GROUP_ADVANCED);
+		return shader.is_group_enabled(SHADER_GROUP_ADVANCED + compact_group_offset);
 	}
 }
 

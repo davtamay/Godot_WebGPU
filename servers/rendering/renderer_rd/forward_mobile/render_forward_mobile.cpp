@@ -1946,26 +1946,34 @@ void RenderForwardMobile::_update_render_base_uniform_set() {
 			uniforms.push_back(u);
 		}
 
-		{
+		if (RendererRD::LightStorage::uses_compact_scene_bindings()) {
 			RD::Uniform u;
 			u.binding = 3;
 			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-			u.append_id(RendererRD::LightStorage::get_singleton()->get_omni_light_buffer());
+			u.append_id(RendererRD::LightStorage::get_singleton()->get_light_buffer());
 			uniforms.push_back(u);
-		}
-		{
-			RD::Uniform u;
-			u.binding = 4;
-			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-			u.append_id(RendererRD::LightStorage::get_singleton()->get_spot_light_buffer());
-			uniforms.push_back(u);
-		}
-		{
-			RD::Uniform u;
-			u.binding = 5;
-			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-			u.append_id(RendererRD::LightStorage::get_singleton()->get_area_light_buffer());
-			uniforms.push_back(u);
+		} else {
+			{
+				RD::Uniform u;
+				u.binding = 3;
+				u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+				u.append_id(RendererRD::LightStorage::get_singleton()->get_omni_light_buffer());
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.binding = 4;
+				u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+				u.append_id(RendererRD::LightStorage::get_singleton()->get_spot_light_buffer());
+				uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.binding = 5;
+				u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+				u.append_id(RendererRD::LightStorage::get_singleton()->get_area_light_buffer());
+				uniforms.push_back(u);
+			}
 		}
 
 		{
@@ -1985,7 +1993,7 @@ void RenderForwardMobile::_update_render_base_uniform_set() {
 		{
 			RD::Uniform u;
 			u.binding = 8;
-			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+			u.uniform_type = RendererRD::LightStorage::uses_compact_scene_bindings() ? RD::UNIFORM_TYPE_UNIFORM_BUFFER : RD::UNIFORM_TYPE_STORAGE_BUFFER;
 			u.append_id(scene_state.lightmap_buffer);
 			uniforms.push_back(u);
 		}
@@ -3650,7 +3658,11 @@ RenderForwardMobile::RenderForwardMobile() {
 		defines += "\n#define MAX_LIGHTMAP_TEXTURES " + itos(scene_state.max_lightmaps) + "\n";
 		defines += "\n#define MAX_LIGHTMAPS " + itos(scene_state.max_lightmaps) + "\n";
 
-		scene_state.lightmap_buffer = RD::get_singleton()->storage_buffer_create(sizeof(LightmapData) * scene_state.max_lightmaps);
+		if (RendererRD::LightStorage::uses_compact_scene_bindings()) {
+			scene_state.lightmap_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(LightmapData) * scene_state.max_lightmaps);
+		} else {
+			scene_state.lightmap_buffer = RD::get_singleton()->storage_buffer_create(sizeof(LightmapData) * scene_state.max_lightmaps);
+		}
 	}
 	{
 		//captures
