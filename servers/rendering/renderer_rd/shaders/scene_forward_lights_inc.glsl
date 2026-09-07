@@ -784,6 +784,9 @@ void light_process_spot(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 #endif
 		inout hvec3 diffuse_light,
 		inout hvec3 specular_light) {
+#ifdef SCENE_COMPACT_BINDINGS
+	idx = SPOT_LIGHT_INDEX(idx);
+#endif
 
 	// Spot light attenuation.
 	vec3 light_rel_vec = spot_lights.data[idx].position - vertex;
@@ -974,6 +977,9 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 		hvec3 binormal, hvec3 tangent, half anisotropy,
 #endif
 		inout hvec3 diffuse_light, inout hvec3 specular_light) {
+#ifdef SCENE_COMPACT_BINDINGS
+	idx = AREA_LIGHT_INDEX(idx);
+#endif
 	half EPSILON = half(1e-7);
 	hvec3 area_width = hvec3(area_lights.data[idx].area_width);
 	hvec3 area_height = hvec3(area_lights.data[idx].area_height);

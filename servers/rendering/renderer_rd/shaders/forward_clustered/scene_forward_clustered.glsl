@@ -607,11 +607,11 @@ void vertex_shader(vec3 vertex_input,
 
 				uint light_index = 32 * i + bit;
 
-				if (!bool(spot_lights.data[light_index].mask & instances.data[instance_index].layer_mask)) {
+				if (!bool(spot_lights.data[SPOT_LIGHT_INDEX(light_index)].mask & instances.data[instance_index].layer_mask)) {
 					continue; //not masked
 				}
 
-				if (spot_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
+				if (spot_lights.data[SPOT_LIGHT_INDEX(light_index)].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
 					continue; // Statically baked light and object uses lightmap, skip
 				}
 
@@ -2872,11 +2872,11 @@ void fragment_shader(in SceneData scene_data) {
 
 				uint light_index = 32 * i + bit;
 
-				if (!bool(spot_lights.data[light_index].mask & instances.data[instance_index].layer_mask)) {
+				if (!bool(spot_lights.data[SPOT_LIGHT_INDEX(light_index)].mask & instances.data[instance_index].layer_mask)) {
 					continue; //not masked
 				}
 
-				if (spot_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
+				if (spot_lights.data[SPOT_LIGHT_INDEX(light_index)].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
 					continue; // Statically baked light and object uses lightmap, skip
 				}
 
@@ -2933,11 +2933,11 @@ void fragment_shader(in SceneData scene_data) {
 
 				uint light_index = 32 * i + bit;
 
-				if (!bool(area_lights.data[light_index].mask & instances.data[instance_index].layer_mask)) {
+				if (!bool(area_lights.data[AREA_LIGHT_INDEX(light_index)].mask & instances.data[instance_index].layer_mask)) {
 					continue; //not masked
 				}
 
-				if (area_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
+				if (area_lights.data[AREA_LIGHT_INDEX(light_index)].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
 					continue; // Statically baked light and object uses lightmap, skip
 				}
 

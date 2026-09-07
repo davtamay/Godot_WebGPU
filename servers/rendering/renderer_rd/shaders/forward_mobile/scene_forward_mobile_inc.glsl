@@ -266,6 +266,25 @@ layout(set = 0, binding = 2) uniform sampler shadow_sampler;
 //3 bits of stride
 #define INSTANCE_FLAGS_PARTICLE_TRAIL_MASK 0xFF
 
+#ifdef SCENE_COMPACT_BINDINGS
+// Compact binding layout for devices with few storage buffers per stage
+// (LightStorage::uses_compact_scene_bindings): omni, spot and area lights
+// share one buffer of 3 x LIGHTS_PER_TYPE entries laid out [omni][spot][area];
+// the compact variants define LIGHTS_PER_TYPE to LightStorage's max_lights.
+layout(set = 0, binding = 3, std430) restrict readonly buffer Lights {
+	LightData data[];
+}
+lights;
+#define omni_lights lights
+#define spot_lights lights
+#define area_lights lights
+// InstanceData members that carry the same names as the buffers.
+#define INSTANCE_OMNI_LIGHTS omni_light_indices
+#define INSTANCE_SPOT_LIGHTS spot_light_indices
+#define INSTANCE_AREA_LIGHTS area_light_indices
+#define SPOT_LIGHT_INDEX(index) ((index) + LIGHTS_PER_TYPE)
+#define AREA_LIGHT_INDEX(index) ((index) + 2 * LIGHTS_PER_TYPE)
+#else
 layout(set = 0, binding = 3, std430) restrict readonly buffer OmniLights {
 	LightData data[];
 }
@@ -280,6 +299,12 @@ layout(set = 0, binding = 5, std430) restrict readonly buffer AreaLights {
 	LightData data[];
 }
 area_lights;
+#define SPOT_LIGHT_INDEX(index) index
+#define AREA_LIGHT_INDEX(index) index
+#define INSTANCE_OMNI_LIGHTS omni_lights
+#define INSTANCE_SPOT_LIGHTS spot_lights
+#define INSTANCE_AREA_LIGHTS area_lights
+#endif
 
 layout(set = 0, binding = 6, std430) restrict readonly buffer ReflectionProbeData {
 	ReflectionData data[];
@@ -306,10 +331,19 @@ struct Lightmap {
 	uint flags;
 };
 
+#ifdef SCENE_COMPACT_BINDINGS
+// MAX_LIGHTMAPS entries of 64 bytes: a uniform buffer under the compact
+// binding layout (see LightStorage::uses_compact_scene_bindings).
+layout(set = 0, binding = 8, std140) uniform Lightmaps {
+	Lightmap data[MAX_LIGHTMAPS];
+}
+lightmaps;
+#else
 layout(set = 0, binding = 8, std140) restrict readonly buffer Lightmaps {
 	Lightmap data[];
 }
 lightmaps;
+#endif
 
 struct LightmapCapture {
 	vec4 sh[9];
@@ -363,9 +397,9 @@ struct InstanceData {
 
 	vec4 lightmap_uv_scale; // Doubles as uv_offset when needed.
 	uvec2 reflection_probes;
-	uvec2 omni_lights;
-	uvec2 spot_lights;
-	uvec2 area_lights;
+	uvec2 INSTANCE_OMNI_LIGHTS;
+	uvec2 INSTANCE_SPOT_LIGHTS;
+	uvec2 INSTANCE_AREA_LIGHTS;
 	uvec2 decals;
 	uvec2 padding;
 #ifdef USE_DOUBLE_PRECISION

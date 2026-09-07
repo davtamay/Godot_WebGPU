@@ -202,6 +202,21 @@ layout(set = 0, binding = 2) uniform sampler shadow_sampler;
 #define SCREEN_SPACE_EFFECTS_FLAGS_USE_SSR (1 << 2)
 #define SCREEN_SPACE_EFFECTS_FLAGS_RESOLVE_SSR (1 << 3)
 
+#ifdef SCENE_COMPACT_BINDINGS
+// Compact binding layout for devices with few storage buffers per stage
+// (LightStorage::uses_compact_scene_bindings): omni, spot and area lights
+// share one buffer of 3 x LIGHTS_PER_TYPE entries laid out [omni][spot][area];
+// the compact variants define LIGHTS_PER_TYPE to LightStorage's max_lights.
+layout(set = 0, binding = 3, std430) restrict readonly buffer Lights {
+	LightData data[];
+}
+lights;
+#define omni_lights lights
+#define spot_lights lights
+#define area_lights lights
+#define SPOT_LIGHT_INDEX(index) ((index) + LIGHTS_PER_TYPE)
+#define AREA_LIGHT_INDEX(index) ((index) + 2 * LIGHTS_PER_TYPE)
+#else
 layout(set = 0, binding = 3, std430) restrict readonly buffer OmniLights {
 	LightData data[];
 }
@@ -216,6 +231,9 @@ layout(set = 0, binding = 5, std430) restrict readonly buffer AreaLights {
 	LightData data[];
 }
 area_lights;
+#define SPOT_LIGHT_INDEX(index) index
+#define AREA_LIGHT_INDEX(index) index
+#endif
 
 layout(set = 0, binding = 6, std430) restrict readonly buffer ReflectionProbeData {
 	ReflectionData data[];
@@ -242,10 +260,19 @@ struct Lightmap {
 	uint flags;
 };
 
+#ifdef SCENE_COMPACT_BINDINGS
+// MAX_LIGHTMAPS entries of 64 bytes: a uniform buffer under the compact
+// binding layout (see LightStorage::uses_compact_scene_bindings).
+layout(set = 0, binding = 8, std140) uniform Lightmaps {
+	Lightmap data[MAX_LIGHTMAPS];
+}
+lightmaps;
+#else
 layout(set = 0, binding = 8, std140) restrict readonly buffer Lightmaps {
 	Lightmap data[];
 }
 lightmaps;
+#endif
 
 struct LightmapCapture {
 	vec4 sh[9];

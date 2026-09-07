@@ -190,6 +190,9 @@ private:
 	RID omni_light_buffer;
 	RID spot_light_buffer;
 	RID area_light_buffer;
+	// Compact scene bindings: the three light arrays also live in one buffer
+	// laid out [omni][spot][area], each region max_lights entries.
+	RID light_buffer;
 
 	ForwardIDType _light_type_to_forward_id_type(RSE::LightType p_type);
 
@@ -833,6 +836,17 @@ public:
 	RID get_omni_light_buffer() { return omni_light_buffer; }
 	RID get_spot_light_buffer() { return spot_light_buffer; }
 	RID get_area_light_buffer() { return area_light_buffer; }
+	RID get_light_buffer() { return light_buffer; }
+	// The standard scene binding layout needs this many storage buffers per
+	// stage (lights x3, reflection probes, lightmaps, lightmap captures,
+	// decals, global shader uniforms, instances, cluster, texture streaming
+	// feedback, plus one spare for driver-reserved bindings). Devices offering
+	// fewer get the compact layout: one light buffer and the lightmap table as
+	// a uniform buffer. The scene shaders carry both as variant groups.
+	static const uint32_t STANDARD_SCENE_STORAGE_BUFFERS = 12;
+	static bool uses_compact_scene_bindings() {
+		return RD::get_singleton()->limit_get(RD::LIMIT_MAX_STORAGE_BUFFERS_PER_SHADER_STAGE) < STANDARD_SCENE_STORAGE_BUFFERS;
+	}
 	RID get_directional_light_buffer() { return directional_light_buffer; }
 	uint32_t get_max_directional_lights() { return max_directional_lights; }
 	uint32_t get_directional_light_blend_splits(uint32_t p_directional_light_count) const {

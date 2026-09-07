@@ -653,6 +653,11 @@ void LightStorage::free_light_data() {
 		area_light_buffer = RID();
 	}
 
+	if (light_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(light_buffer);
+		light_buffer = RID();
+	}
+
 	if (directional_lights != nullptr) {
 		memdelete_arr(directional_lights);
 		directional_lights = nullptr;
@@ -704,6 +709,13 @@ void LightStorage::set_max_lights(const uint32_t p_max_lights) {
 	area_lights = memnew_arr(LightData, max_lights);
 	area_light_buffer = RD::get_singleton()->storage_buffer_create(light_buffer_size);
 	area_light_sort = memnew_arr(LightInstanceDepthSort, max_lights);
+
+	if (uses_compact_scene_bindings()) {
+		// The scene shaders read the compact layout's single buffer (their
+		// LIGHTS_PER_TYPE define is this max_lights, from the same project
+		// setting); the fog system keeps binding the three separate ones.
+		light_buffer = RD::get_singleton()->storage_buffer_create(light_buffer_size * 3);
+	}
 
 	max_directional_lights = RendererSceneRender::MAX_DIRECTIONAL_LIGHTS;
 	uint32_t directional_light_buffer_size = max_directional_lights * sizeof(DirectionalLightData);
@@ -1254,6 +1266,19 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 
 	if (area_light_count) {
 		RD::get_singleton()->buffer_update(area_light_buffer, 0, sizeof(LightData) * area_light_count, area_lights);
+	}
+
+	if (light_buffer.is_valid()) {
+		const uint32_t region_size = sizeof(LightData) * max_lights;
+		if (omni_light_count) {
+			RD::get_singleton()->buffer_update(light_buffer, 0, sizeof(LightData) * omni_light_count, omni_lights);
+		}
+		if (spot_light_count) {
+			RD::get_singleton()->buffer_update(light_buffer, region_size, sizeof(LightData) * spot_light_count, spot_lights);
+		}
+		if (area_light_count) {
+			RD::get_singleton()->buffer_update(light_buffer, region_size * 2, sizeof(LightData) * area_light_count, area_lights);
+		}
 	}
 
 	if (r_directional_light_count) {
