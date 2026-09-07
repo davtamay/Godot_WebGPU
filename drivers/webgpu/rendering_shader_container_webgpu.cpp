@@ -768,9 +768,12 @@ static void _spirv_convert_memory_barriers(LocalVector<uint32_t> &p_module) {
 
 // glslang keeps every declared resource in every stage's module; Tint hard
 // errors on declarations it cannot express (arrays of textures/samplers)
-// even when nothing references them. Remove unused UniformConstant
-// variables, then garbage-collect the handle-related types they orphan
-// (Tint also rejects the bare array TYPE).
+// even when nothing references them, and it carries unused buffer
+// declarations into the WGSL, where they still count against the stage's
+// binding budget (the driver derives layout visibility from what each
+// stage's WGSL declares). Remove unused UniformConstant, Uniform and
+// StorageBuffer variables, then garbage-collect the handle-related types
+// they orphan (Tint also rejects the bare array TYPE).
 static void _spirv_remove_unused_resource_bindings(LocalVector<uint32_t> &p_module) {
 	while (true) {
 		HashSet<uint32_t> used;
@@ -783,7 +786,7 @@ static void _spirv_remove_unused_resource_bindings(LocalVector<uint32_t> &p_modu
 				// Skip each instruction's own result id (and result type,
 				// which is a legitimate use of the type).
 				uint32_t skip_result = 0;
-				if (opcode == SPIRV_OP_VARIABLE || opcode == SPIRV_OP_TYPE_POINTER || opcode == SPIRV_OP_TYPE_ARRAY || opcode == SPIRV_OP_TYPE_RUNTIME_ARRAY || opcode == SPIRV_OP_TYPE_IMAGE || opcode == SPIRV_OP_TYPE_SAMPLER || opcode == SPIRV_OP_TYPE_SAMPLED_IMAGE) {
+				if (opcode == SPIRV_OP_VARIABLE || opcode == SPIRV_OP_TYPE_POINTER || opcode == SPIRV_OP_TYPE_ARRAY || opcode == SPIRV_OP_TYPE_RUNTIME_ARRAY || opcode == SPIRV_OP_TYPE_STRUCT || opcode == SPIRV_OP_TYPE_IMAGE || opcode == SPIRV_OP_TYPE_SAMPLER || opcode == SPIRV_OP_TYPE_SAMPLED_IMAGE) {
 					skip_result = opcode == SPIRV_OP_VARIABLE ? 2 : 1;
 				}
 				for (uint32_t w = 1; w < count; w++) {
@@ -806,10 +809,15 @@ static void _spirv_remove_unused_resource_bindings(LocalVector<uint32_t> &p_modu
 			const uint32_t count = p_module[i] >> 16;
 			const uint32_t opcode = p_module[i] & 0xFFFF;
 			bool drop = false;
-			if (opcode == SPIRV_OP_VARIABLE && p_module[i + 3] == SPIRV_STORAGE_CLASS_UNIFORM_CONSTANT && !used.has(p_module[i + 2])) {
+			const bool resource_variable = opcode == SPIRV_OP_VARIABLE && (p_module[i + 3] == SPIRV_STORAGE_CLASS_UNIFORM_CONSTANT || p_module[i + 3] == SPIRV_STORAGE_CLASS_UNIFORM || p_module[i + 3] == SPIRV_STORAGE_CLASS_STORAGE_BUFFER);
+			if (resource_variable && !used.has(p_module[i + 2])) {
 				drop = true;
 				removed.insert(p_module[i + 2]);
-			} else if ((opcode == SPIRV_OP_TYPE_POINTER || opcode == SPIRV_OP_TYPE_ARRAY || opcode == SPIRV_OP_TYPE_RUNTIME_ARRAY || opcode == SPIRV_OP_TYPE_IMAGE || opcode == SPIRV_OP_TYPE_SAMPLER || opcode == SPIRV_OP_TYPE_SAMPLED_IMAGE) && !used.has(p_module[i + 1])) {
+			} else if ((opcode == SPIRV_OP_TYPE_POINTER || opcode == SPIRV_OP_TYPE_ARRAY || opcode == SPIRV_OP_TYPE_RUNTIME_ARRAY || opcode == SPIRV_OP_TYPE_STRUCT || opcode == SPIRV_OP_TYPE_IMAGE || opcode == SPIRV_OP_TYPE_SAMPLER || opcode == SPIRV_OP_TYPE_SAMPLED_IMAGE) && !used.has(p_module[i + 1])) {
+				// Structs are collected too: Tint emits an orphaned block
+				// struct anyway and, with no buffer left to give it a layout
+				// context, decorates matrix members with @stride plus an
+				// @internal attribute browsers refuse to parse.
 				drop = true;
 				removed.insert(p_module[i + 1]);
 			}
