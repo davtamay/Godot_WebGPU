@@ -79,6 +79,12 @@ public:
 		SHADER_GROUP_FP32_MULTIVIEW,
 		SHADER_GROUP_FP16,
 		SHADER_GROUP_FP16_MULTIVIEW,
+		// Twins of the groups above under the compact binding layout
+		// (LightStorage::uses_compact_scene_bindings); one set is active.
+		SHADER_GROUP_FP32_COMPACT,
+		SHADER_GROUP_FP32_MULTIVIEW_COMPACT,
+		SHADER_GROUP_FP16_COMPACT,
+		SHADER_GROUP_FP16_MULTIVIEW_COMPACT,
 	};
 
 	struct ShaderSpecialization {
@@ -348,6 +354,10 @@ public:
 	SceneForwardMobileShaderRD shader;
 	ShaderCompiler compiler;
 	bool use_fp16 = false;
+	// Compact binding layout: variants and groups sit after the standard set.
+	bool compact_scene_bindings = false;
+	uint32_t compact_variant_offset = 0;
+	uint32_t compact_group_offset = 0;
 	bool emulate_point_size = false;
 
 	RID default_shader;
