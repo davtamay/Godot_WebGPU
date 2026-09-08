@@ -303,6 +303,14 @@ void RenderingDeviceDriverWebGPU::command_clear_color_texture(CommandBufferID p_
 		// them, and the texel zero-fill below cannot express block rows.
 		return;
 	}
+	if ((texture->usage & (WGPUTextureUsage)WGPUTextureUsage_TransientAttachment) != 0) {
+		// A transient attachment's contents never outlive the pass that
+		// writes them, so a clear of its own cannot be observed by anything:
+		// whichever pass reads it next supplies its own load op. WebGPU also
+		// forbids the store this clear would need (the multisampled colour
+		// buffer of a mobile scene is cleared this way every frame).
+		return;
+	}
 	if ((texture->usage & WGPUTextureUsage_RenderAttachment) == 0 || wgpuTextureGetDimension(texture->texture) == WGPUTextureDimension_3D) {
 		// Non-renderable (e.g. storage-only fog maps) and 3D textures cannot
 		// take the render-pass clear below; zero them through writeTexture
@@ -500,16 +508,29 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 		if (attachment.is_resolve_target) {
 			continue;
 		}
+		// A transient attachment lives in tile memory and its contents may
+		// not outlive the pass, which is the promise the renderer made by
+		// asking for one: it resolves inside the pass and never reads the
+		// multisampled buffer afterwards. Some of its passes still ask for a
+		// store, which WebGPU rejects outright, and the resolve target
+		// already holds the result, so the store is dropped. Without a
+		// resolve there is nowhere for the contents to go and the promise
+		// was wrong, which is worth saying once.
+		const bool transient = i < framebuffer->transient.size() && framebuffer->transient[i];
+		if (transient && attachment.store_op == WGPUStoreOp_Store && attachment.resolve_attachment < 0 && !transient_store_reported) {
+			transient_store_reported = true;
+			ERR_PRINT(vformat("A transient attachment (%dx%d) is stored by a pass that does not resolve it, so its contents are lost. The renderer asked for tile-memory storage for a buffer it reads later.", framebuffer->width, framebuffer->height));
+		}
 		if (attachment.is_depth_stencil) {
 			depth_attachment.view = framebuffer->views[i];
 			depth_attachment.depthLoadOp = attachment.load_op;
-			depth_attachment.depthStoreOp = attachment.store_op;
+			depth_attachment.depthStoreOp = transient ? WGPUStoreOp_Discard : attachment.store_op;
 			// Stencil ops are only valid on formats with a stencil aspect;
 			// leaving them Undefined is required for depth-only attachments.
 			const bool has_stencil_aspect = attachment.format == WGPUTextureFormat_Depth24PlusStencil8 || attachment.format == WGPUTextureFormat_Depth32FloatStencil8 || attachment.format == WGPUTextureFormat_Stencil8;
 			if (has_stencil_aspect) {
 				depth_attachment.stencilLoadOp = attachment.stencil_load_op;
-				depth_attachment.stencilStoreOp = attachment.stencil_store_op;
+				depth_attachment.stencilStoreOp = transient ? WGPUStoreOp_Discard : attachment.stencil_store_op;
 			}
 			if (i < p_clear_values.size()) {
 				depth_attachment.depthClearValue = p_clear_values[i].depth;
@@ -524,7 +545,7 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 			// The swap chain pass predates render_pass_create and decides its
 			// load op from the presence of clear values.
 			color_attachment.loadOp = pass->from_swap_chain ? (p_clear_values.size() > 0 ? WGPULoadOp_Clear : WGPULoadOp_Load) : attachment.load_op;
-			color_attachment.storeOp = attachment.store_op;
+			color_attachment.storeOp = transient ? WGPUStoreOp_Discard : attachment.store_op;
 			if (attachment.resolve_attachment >= 0) {
 				color_attachment.resolveTarget = framebuffer->views[attachment.resolve_attachment];
 			}
@@ -2522,7 +2543,12 @@ void RenderingDeviceDriverWebGPU::command_resolve_texture(CommandBufferID p_cmd_
 	color_attachment.view = src_view;
 	color_attachment.resolveTarget = dst_view;
 	color_attachment.loadOp = WGPULoadOp_Load;
-	color_attachment.storeOp = WGPUStoreOp_Store;
+	// The resolve target receives the result, so storing the multisampled
+	// source is only needed if something reads it again. A transient one is
+	// never read outside its pass by definition, and WebGPU rejects a store
+	// on it outright.
+	const bool src_transient = (src->usage & (WGPUTextureUsage)WGPUTextureUsage_TransientAttachment) != 0;
+	color_attachment.storeOp = src_transient ? WGPUStoreOp_Discard : WGPUStoreOp_Store;
 	WGPURenderPassDescriptor pass_desc = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
 	pass_desc.colorAttachmentCount = 1;
 	pass_desc.colorAttachments = &color_attachment;
@@ -3922,7 +3948,9 @@ RenderingDeviceDriver::FramebufferID RenderingDeviceDriverWebGPU::framebuffer_cr
 	framebuffer->width = p_width;
 	framebuffer->height = p_height;
 	for (uint32_t i = 0; i < p_attachments.size(); i++) {
-		framebuffer->views.push_back(((TextureInfo *)p_attachments[i].id)->view);
+		const TextureInfo *texture = (const TextureInfo *)p_attachments[i].id;
+		framebuffer->views.push_back(texture->view);
+		framebuffer->transient.push_back((texture->usage & (WGPUTextureUsage)WGPUTextureUsage_TransientAttachment) != 0);
 	}
 	const RenderPassInfo *pass = (const RenderPassInfo *)p_render_pass.id;
 	if (pass != nullptr && pass->attachment_less && p_attachments.size() == 0) {
