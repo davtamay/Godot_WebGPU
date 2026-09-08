@@ -3646,9 +3646,12 @@ RenderForwardMobile::RenderForwardMobile() {
 
 	{
 		//lightmaps
-		scene_state.max_lightmaps = MAX_LIGHTMAPS;
-		defines += "\n#define MAX_LIGHTMAP_TEXTURES " + itos(scene_state.max_lightmaps) + "\n";
-		defines += "\n#define MAX_LIGHTMAPS " + itos(scene_state.max_lightmaps) + "\n";
+		// The slot count has to match the shaders that will be selected: the
+		// floor block declares fewer, and an instance placed in a slot the
+		// shader cannot read would sample nothing.
+		scene_state.max_lightmaps = SceneShaderForwardMobile::uses_floor_lightmap_slots() ? MAX_LIGHTMAPS_FLOOR : MAX_LIGHTMAPS;
+		defines += "\n#define MAX_LIGHTMAP_TEXTURES " + itos(MAX_LIGHTMAPS) + "\n"; // the array size; the floor variants redefine it
+		defines += "\n#define MAX_LIGHTMAPS " + itos(MAX_LIGHTMAPS) + "\n"; // the array size; the floor variants redefine it
 
 		if (RendererRD::LightStorage::uses_compact_scene_bindings()) {
 			scene_state.lightmap_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(LightmapData) * scene_state.max_lightmaps);

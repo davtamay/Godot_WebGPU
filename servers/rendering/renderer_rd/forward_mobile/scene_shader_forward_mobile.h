@@ -85,6 +85,14 @@ public:
 		SHADER_GROUP_FP32_MULTIVIEW_COMPACT,
 		SHADER_GROUP_FP16_COMPACT,
 		SHADER_GROUP_FP16_MULTIVIEW_COMPACT,
+		// The compact groups again with fewer lightmap slots, for devices whose
+		// per-stage texture budget cannot hold the standard count. Only the
+		// lightmap versions differ, so only those are baked (see the WebGPU
+		// baker's skips_variant) and only those select this block.
+		SHADER_GROUP_FP32_FLOOR,
+		SHADER_GROUP_FP32_MULTIVIEW_FLOOR,
+		SHADER_GROUP_FP16_FLOOR,
+		SHADER_GROUP_FP16_MULTIVIEW_FLOOR,
 	};
 
 	struct ShaderSpecialization {
@@ -358,6 +366,25 @@ public:
 	bool compact_scene_bindings = false;
 	uint32_t compact_variant_offset = 0;
 	uint32_t compact_group_offset = 0;
+	// Set when the device's per-stage texture budget cannot hold the standard
+	// lightmap slot count; the lightmap versions then come from the floor block.
+	bool floor_lightmap_slots = false;
+	uint32_t floor_variant_offset = 0;
+	uint32_t floor_group_offset = 0;
+	static bool version_uses_lightmap(ShaderVersion p_version) {
+		return p_version == SHADER_VERSION_LIGHTMAP_COLOR_PASS || p_version == SHADER_VERSION_LIGHTMAP_COLOR_PASS_MULTIVIEW;
+	}
+	// Which variant block a version comes from. Only the lightmap versions
+	// differ between the compact and floor blocks, so only they cross over.
+	uint32_t variant_block_offset(ShaderVersion p_version) const {
+		return version_uses_lightmap(p_version) ? floor_variant_offset : compact_variant_offset;
+	}
+	// The textures the scene shader binds outside the lightmap slots and the
+	// material's own maps, measured from what it declares.
+	static const uint32_t FIXED_SCENE_TEXTURES = 12;
+	// The same decision init makes, callable before the shader exists: the
+	// renderer sizes its lightmap slots from it and the two must agree.
+	static bool uses_floor_lightmap_slots();
 	bool emulate_point_size = false;
 
 	RID default_shader;
