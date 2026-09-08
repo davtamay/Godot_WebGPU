@@ -194,6 +194,13 @@ void RenderSceneBuffersRD::configure(const RenderSceneBuffersConfiguration *p_co
 	// keep the full usage. Depth additionally requires the in-pass depth
 	// resolve feature; without it the resolved depth comes from elsewhere
 	// and the MSAA depth still never escapes, but stay conservative.
+	//
+	// Only the depth half can take it. A transient attachment has no contents
+	// at the start of a pass, and the colour buffer is loaded rather than
+	// cleared whenever the viewport keeps what was drawn before (a transparent
+	// background over the canvas, or a frame that did not request a clear), so
+	// marking it transient would hand that pass an undefined image. Depth is
+	// cleared by every pass that uses it.
 	const bool transient_msaa = msaa_in_pass_resolve;
 
 	// Create our depth buffer.
@@ -207,7 +214,7 @@ void RenderSceneBuffersRD::configure(const RenderSceneBuffersConfiguration *p_co
 		uint32_t color_msaa_usage = get_color_usage_bits(false, true, can_be_storage);
 		uint32_t depth_msaa_usage = get_depth_usage_bits(false, true, can_be_storage);
 		if (transient_msaa) {
-			color_msaa_usage = RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_INPUT_ATTACHMENT_BIT | RD::TEXTURE_USAGE_TRANSIENT_BIT;
+			color_msaa_usage = RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_INPUT_ATTACHMENT_BIT;
 			if (RD::get_singleton()->has_feature(RD::SUPPORTS_FRAMEBUFFER_DEPTH_RESOLVE)) {
 				depth_msaa_usage = RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | RD::TEXTURE_USAGE_INPUT_ATTACHMENT_BIT | RD::TEXTURE_USAGE_TRANSIENT_BIT;
 			}
