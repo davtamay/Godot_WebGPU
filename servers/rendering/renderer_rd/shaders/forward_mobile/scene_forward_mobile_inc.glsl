@@ -369,9 +369,7 @@ global_shader_uniforms;
 
 layout(set = 0, binding = 14) uniform sampler DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP;
 
-layout(set = 0, binding = 15) uniform texture2D ltc_lut1;
-
-layout(set = 0, binding = 16) uniform texture2D ltc_lut2;
+layout(set = 0, binding = 15) uniform texture2DArray ltc_luts; // binding 16 freed
 
 layout(set = 0, binding = 17) uniform texture2D area_light_atlas;
 
