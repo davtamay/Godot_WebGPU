@@ -69,6 +69,8 @@ int godot_js_webgpu_use_indirect();
 int godot_js_webgpu_use_diff_flush();
 // 1 when the page URL carries ?perfcounters (periodic driver counter print).
 int godot_js_webgpu_perf_counters();
+// Publishes one window of driver counters to the page (see the JS library).
+void godot_js_webgpu_publish_perf(int p_frames, int p_write_buffer_calls, int p_write_buffer_kb, int p_bundle_fastpath, int p_bundle_hash_hits, int p_bundle_builds, int p_bundle_direct, int p_param_writes, int p_bind_groups, int p_pipelines, int p_subgroup_modules);
 int godot_js_webgpu_use_subgroups();
 // 0 when the page URL carries ?notiers (benchmark A/B switch for the
 // texture-format-tier paths).
@@ -214,16 +216,24 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 	// the spontaneous completion callbacks also fire).
 	_pump_pipeline_warm_queue();
 	present_count++;
-	if (perf_counters_enabled) {
-		perf.frames++;
-		const uint32_t PERF_WINDOW = 120;
-		if (perf.frames >= PERF_WINDOW) {
+	perf.frames++;
+	const uint32_t PERF_WINDOW = 120;
+	if (perf.frames >= PERF_WINDOW) {
+		// Published to the page every window whether or not the print is on:
+		// the counters describe work no engine-level statistic can see (the
+		// calls the driver makes into the browser, and how often a render
+		// bundle is reused instead of rebuilt), and on a phone the console
+		// that carries the printed line is unreachable.
+		godot_js_webgpu_publish_perf(perf.frames, perf.write_buffer_calls, (int)(perf.write_buffer_bytes / 1024),
+				perf.bundle_fastpath_hits, perf.bundle_hash_hits, perf.bundle_builds, perf.bundle_direct,
+				perf.indirect_param_writes, perf.bind_groups_created, perf.pipelines_created, perf.native_subgroup_modules);
+		if (perf_counters_enabled) {
 			print_line(vformat("WGPUPERF frames=%d wb_calls=%d wb_kb=%d fastpath=%d hash_hit=%d builds=%d direct=%d param_writes=%d bg_new=%d pipe_new=%d sg_new=%d",
 					perf.frames, perf.write_buffer_calls, (int)(perf.write_buffer_bytes / 1024),
 					perf.bundle_fastpath_hits, perf.bundle_hash_hits, perf.bundle_builds, perf.bundle_direct,
 					perf.indirect_param_writes, perf.bind_groups_created, perf.pipelines_created, perf.native_subgroup_modules));
-			perf = PerfCounters();
 		}
+		perf = PerfCounters();
 	}
 	return OK;
 }
