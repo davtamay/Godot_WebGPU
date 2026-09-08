@@ -3279,7 +3279,12 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 		uint32_t storage_textures = 0;
 		uint32_t storage_buffers = 0;
 		uint32_t uniform_buffers = 0;
+		uint32_t material_textures = 0;
 	};
+	// The material's own maps live in this set (MATERIAL_UNIFORM_SET in the
+	// renderers). Naming their share turns an engine limit into something the
+	// person who authored the material can act on.
+	const int64_t MATERIAL_UNIFORM_SET = 3;
 	StageBudget budgets[3];
 	const WGPUShaderStage budget_stage_bits[3] = { WGPUShaderStage_Vertex, WGPUShaderStage_Fragment, WGPUShaderStage_Compute };
 	const char *budget_stage_names[3] = { "vertex", "fragment", "compute" };
@@ -3293,6 +3298,9 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 					budgets[st].samplers++;
 				} else if (e.texture.sampleType != WGPUTextureSampleType_BindingNotUsed) {
 					budgets[st].textures++;
+					if (p_set_index == MATERIAL_UNIFORM_SET) {
+						budgets[st].material_textures++;
+					}
 				} else if (e.storageTexture.access != WGPUStorageTextureAccess_BindingNotUsed) {
 					budgets[st].storage_textures++;
 				} else if (e.buffer.type == WGPUBufferBindingType_Uniform) {
@@ -3305,7 +3313,14 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 		for (uint32_t st = 0; st < 3; st++) {
 			const StageBudget &b = budgets[st];
 			if (b.samplers > device_limits.maxSamplersPerShaderStage || b.textures > device_limits.maxSampledTexturesPerShaderStage || b.storage_textures > device_limits.maxStorageTexturesPerShaderStage || b.storage_buffers > device_limits.maxStorageBuffersPerShaderStage || b.uniform_buffers > device_limits.maxUniformBuffersPerShaderStage) {
-				return vformat("Shader '%s' exceeds this device's per-stage binding limits at set %d (%s stage: %d samplers, %d textures, %d storage textures, %d storage buffers, %d uniform buffers; limits %d/%d/%d/%d/%d).", String(shader->name.get_data()), p_set_index, budget_stage_names[st], b.samplers, b.textures, b.storage_textures, b.storage_buffers, b.uniform_buffers, device_limits.maxSamplersPerShaderStage, device_limits.maxSampledTexturesPerShaderStage, device_limits.maxStorageTexturesPerShaderStage, device_limits.maxStorageBuffersPerShaderStage, device_limits.maxUniformBuffersPerShaderStage);
+				String hint;
+				if (b.textures > device_limits.maxSampledTexturesPerShaderStage && b.material_textures > 0) {
+					// Packing is the standard fix and Godot already ships the
+					// material for it, so say so rather than leaving the author
+					// to guess which of their maps is the expensive one.
+					hint = vformat(" %d of those textures are this material's own maps: an ORMMaterial3D packs occlusion, roughness and metallic into one texture and frees two bindings, and unused maps can be disabled on the material.", b.material_textures);
+				}
+				return vformat("Shader '%s' exceeds this device's per-stage binding limits at set %d (%s stage: %d samplers, %d textures, %d storage textures, %d storage buffers, %d uniform buffers; limits %d/%d/%d/%d/%d).%s", String(shader->name.get_data()), p_set_index, budget_stage_names[st], b.samplers, b.textures, b.storage_textures, b.storage_buffers, b.uniform_buffers, device_limits.maxSamplersPerShaderStage, device_limits.maxSampledTexturesPerShaderStage, device_limits.maxStorageTexturesPerShaderStage, device_limits.maxStorageBuffersPerShaderStage, device_limits.maxUniformBuffersPerShaderStage, hint);
 			}
 		}
 		return String();
