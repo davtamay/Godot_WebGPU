@@ -105,6 +105,12 @@ bool ShaderBakerExportPluginPlatformWebGPU::skips_variant(const Vector<String> &
 		if (source.contains("#define MAX_LIGHTMAP_TEXTURES") && !source.contains("#define SCENE_COMPACT_BINDINGS")) {
 			return true;
 		}
+		// The reduced-lightmap-slot block only differs from the compact one in
+		// its lightmap versions; every other variant in it would be a
+		// duplicate, and they are the largest shaders in the pack.
+		if (source.contains("#define SCENE_FLOOR_LIGHTMAPS") && !source.contains("#define USE_LIGHTMAP")) {
+			return true;
+		}
 		if (!bake_fp16 && source.contains("#define EXPLICIT_FP16")) {
 			return true;
 		}
