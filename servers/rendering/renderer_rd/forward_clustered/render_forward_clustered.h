@@ -193,8 +193,9 @@ private:
 	} dfg_lut;
 
 	struct LTC {
-		RID lut1_texture;
-		RID lut2_texture;
+		// Both LTC tables as layers of one array texture (same size and
+		// format), so the scene shader spends one binding instead of two.
+		RID lut_texture;
 	} ltc;
 
 	enum PassMode {

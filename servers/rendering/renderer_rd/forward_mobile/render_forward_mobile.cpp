@@ -2045,7 +2045,7 @@ void RenderForwardMobile::_update_render_base_uniform_set() {
 		}
 
 		{ // Lookup-table for Area Lights - Linearly transformed cosines (LTC)
-			if (ltc.lut1_texture.is_null() || ltc.lut2_texture.is_null()) {
+			if (ltc.lut_texture.is_null()) {
 				Ref<Image> lut1_image;
 				int dimensions = LTC_LUT_DIMENSIONS;
 				int lut1_bytes = 4 * dimensions * dimensions;
@@ -2057,7 +2057,6 @@ void RenderForwardMobile::_update_render_base_uniform_set() {
 				memcpy(lut1_data.ptrw(), LTC_LUT1, lut1_size);
 				lut1_image = Image::create_from_data(dimensions, dimensions, false, Image::FORMAT_RGBAF, lut1_data);
 
-				ltc.lut1_texture = RS::get_singleton()->texture_2d_create(lut1_image);
 
 				int lut2_bytes = 4 * dimensions * dimensions;
 				size_t lut2_size = lut2_bytes * 4;
@@ -2069,7 +2068,7 @@ void RenderForwardMobile::_update_render_base_uniform_set() {
 				memcpy(lut2_data.ptrw(), LTC_LUT2, lut2_size);
 				lut2_image = Image::create_from_data(dimensions, dimensions, false, Image::FORMAT_RGBAF, lut2_data);
 
-				ltc.lut2_texture = RS::get_singleton()->texture_2d_create(lut2_image);
+				ltc.lut_texture = RS::get_singleton()->texture_2d_layered_create({ lut1_image, lut2_image }, RSE::TEXTURE_LAYERED_2D_ARRAY);
 			}
 		}
 
@@ -2077,17 +2076,10 @@ void RenderForwardMobile::_update_render_base_uniform_set() {
 			RD::Uniform u;
 			u.binding = 15;
 			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-			u.append_id(RendererRD::TextureStorage::get_singleton()->texture_get_rd_texture(ltc.lut1_texture));
+			u.append_id(RendererRD::TextureStorage::get_singleton()->texture_get_rd_texture(ltc.lut_texture));
 			uniforms.push_back(u);
 		}
 
-		{
-			RD::Uniform u;
-			u.binding = 16;
-			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-			u.append_id(RendererRD::TextureStorage::get_singleton()->texture_get_rd_texture(ltc.lut2_texture));
-			uniforms.push_back(u);
-		}
 
 		{
 			RD::Uniform u;
@@ -3701,11 +3693,8 @@ RenderForwardMobile::RenderForwardMobile() {
 RenderForwardMobile::~RenderForwardMobile() {
 	RSG::light_storage->directional_shadow_atlas_set_size(0);
 
-	if (ltc.lut1_texture.is_valid()) {
-		RS::get_singleton()->free_rid(ltc.lut1_texture);
-	}
-	if (ltc.lut2_texture.is_valid()) {
-		RS::get_singleton()->free_rid(ltc.lut2_texture);
+	if (ltc.lut_texture.is_valid()) {
+		RS::get_singleton()->free_rid(ltc.lut_texture);
 	}
 
 	{
