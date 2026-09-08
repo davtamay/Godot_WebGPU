@@ -344,6 +344,9 @@ private:
 
 	struct FramebufferInfo {
 		LocalVector<WGPUTextureView> views;
+		// Per attachment: the texture was created as a transient attachment,
+		// whose contents may not outlive the pass (see command_begin_render_pass).
+		LocalVector<bool> transient;
 		uint32_t width = 0;
 		uint32_t height = 0;
 		// Owned dummy color target of an attachment-less framebuffer (see
@@ -543,6 +546,9 @@ private:
 	uint32_t push_constant_capacity = 0;
 	uint32_t push_constant_used = 0;
 	bool push_constant_overflow_reported = false;
+	// One-shot: a transient attachment asked to be stored by a pass that
+	// does not resolve it (see command_begin_render_pass).
+	bool transient_store_reported = false;
 	// Bumped whenever the ring is reallocated; bind groups built against an
 	// older generation reference the released buffer and are rebuilt.
 	uint32_t push_constant_epoch = 1;
