@@ -4098,6 +4098,12 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_uniform_set_build(VectorView<BoundUn
 					for (uint32_t element = 0; element < uniform.ids.size(); element++) {
 						WGPUBindGroupEntry element_entry = WGPU_BIND_GROUP_ENTRY_INIT;
 						element_entry.binding = RenderingShaderContainerWebGPU::ARRAY_BINDING_BASE + uniform.binding * RenderingShaderContainerWebGPU::ARRAY_BINDING_STRIDE + element;
+						if (p_set_index < shader->layout_bindings.size() && !shader->layout_bindings[p_set_index].has(element_entry.binding)) {
+							// This variant declares a shorter array than the engine
+							// supplies (a shader whose array length follows a device
+							// budget); a bind group may only carry the layout's entries.
+							continue;
+						}
 						if (uniform.type == UNIFORM_TYPE_SAMPLER) {
 							element_entry.sampler = shader->nonfiltering_samplers.has(((uint64_t)p_set_index << 32) | element_entry.binding) ? _get_nonfiltering_sampler() : (WGPUSampler)uniform.ids[element].id;
 						} else {
