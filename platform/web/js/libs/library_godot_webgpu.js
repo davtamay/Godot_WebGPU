@@ -196,6 +196,27 @@ const GodotWebGPU = {
 		window['__godotWebGPUWarmPending'] = pending;
 	},
 
+	godot_js_webgpu_publish_perf__sig: 'viiiiiiiiiii',
+	godot_js_webgpu_publish_perf: function (frames, wbCalls, wbKb, fastpath, hashHit, builds, direct, paramWrites, bgNew, pipeNew, sgNew) {
+		// One window of the driver's own counters, for a page that wants to
+		// display them: the browser console that carries the ?perfcounters
+		// line is unreachable on a phone, which is where the numbers matter.
+		// Counts are per window; divide by frames for a per-frame figure.
+		window['__godotWebGPUPerf'] = {
+			'frames': frames,
+			'write_buffer_calls': wbCalls,
+			'write_buffer_kb': wbKb,
+			'bundle_fastpath': fastpath,
+			'bundle_hash_hits': hashHit,
+			'bundle_builds': builds,
+			'bundle_direct': direct,
+			'param_writes': paramWrites,
+			'bind_groups_created': bgNew,
+			'pipelines_created': pipeNew,
+			'subgroup_modules': sgNew,
+		};
+	},
+
 	godot_js_webgpu_use_warm__sig: 'i',
 	godot_js_webgpu_use_warm: function () {
 		// ?nowarm disables background pipeline warming for A/B of the
