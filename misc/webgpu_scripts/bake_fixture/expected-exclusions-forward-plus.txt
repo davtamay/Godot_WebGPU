@@ -23,15 +23,17 @@
 #                           variants from the driver (bake-hole semantics)
 #                           and the renderer's capability probes take the
 #                           fallback paths there.
-#   VoxelGiDebug            writable storage buffer visible to the vertex
-#                           stage, which WebGPU forbids. Debug view only.
+#   VoxelGiDebug            row GONE as of the read-only storage inference:
+#                           the buffer the vertex stage used was never
+#                           written, so it is now decorated read-only and the
+#                           shader translates. WGSL still forbids a genuinely
+#                           writable storage buffer in a vertex stage.
 #   Fsr2* / FsrUpscale      16-bit integer math; lifts if the loader requests
 #                           shader-f16 where the adapter offers it.
 #   VolumetricFog           FogVolume-node injection: image atomics. The
 #                           environmental fog fallback variants bake and run.
 14 SceneForwardClusteredShaderRD
 4 OctmapFilterShaderRD
-3 VoxelGiDebugShaderRD
 3 Fsr2AccumulatePassShaderRD
 2 VolumetricFogShaderRD
 2 Fsr2ReconstructPreviousDepthPassShaderRD
