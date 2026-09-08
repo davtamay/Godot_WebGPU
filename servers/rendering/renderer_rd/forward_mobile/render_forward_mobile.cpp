@@ -589,10 +589,19 @@ RID RenderForwardMobile::_setup_render_pass_uniform_set(RenderListType p_render_
 
 	/* we have limited ability to keep textures like this so we're moving this to a set we change before drawing geometry and just pushing the needed texture in */
 	{
+		// The array is as long as the shader declares it, which is the constant
+		// even when fewer slots are in use: a set is validated against one
+		// version and bound to all of them, so it has to satisfy the longest
+		// declaration. The slots in use occupy the front of each half, which is
+		// where a reduced-slot shader looks for them (see MAX_LIGHTMAP_TEXTURES
+		// and uses_floor_lightmap_slots).
 		Vector<RID> textures;
-		textures.resize(scene_state.max_lightmaps * 2);
+		textures.resize(MAX_LIGHTMAPS * 2);
 
 		RID default_tex = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE);
+		for (uint32_t i = 0; i < (uint32_t)MAX_LIGHTMAPS * 2; i++) {
+			textures.write[i] = default_tex;
+		}
 		for (uint32_t i = 0; i < scene_state.max_lightmaps * 2; i++) {
 			uint32_t current_lightmap_index = i < scene_state.max_lightmaps ? i : i - scene_state.max_lightmaps;
 
@@ -3653,10 +3662,13 @@ RenderForwardMobile::RenderForwardMobile() {
 		defines += "\n#define MAX_LIGHTMAP_TEXTURES " + itos(MAX_LIGHTMAPS) + "\n"; // the array size; the floor variants redefine it
 		defines += "\n#define MAX_LIGHTMAPS " + itos(MAX_LIGHTMAPS) + "\n"; // the array size; the floor variants redefine it
 
+		// Sized by the constant rather than the slots in use, for the same
+		// reason the texture array is: one buffer has to satisfy the
+		// declaration of every version the set is bound to.
 		if (RendererRD::LightStorage::uses_compact_scene_bindings()) {
-			scene_state.lightmap_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(LightmapData) * scene_state.max_lightmaps);
+			scene_state.lightmap_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(LightmapData) * MAX_LIGHTMAPS);
 		} else {
-			scene_state.lightmap_buffer = RD::get_singleton()->storage_buffer_create(sizeof(LightmapData) * scene_state.max_lightmaps);
+			scene_state.lightmap_buffer = RD::get_singleton()->storage_buffer_create(sizeof(LightmapData) * MAX_LIGHTMAPS);
 		}
 	}
 	{
