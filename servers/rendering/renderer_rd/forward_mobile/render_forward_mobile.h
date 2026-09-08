@@ -59,6 +59,11 @@ private:
 
 	enum {
 		MAX_LIGHTMAPS = 8,
+		// Each lightmap slot costs two sampled textures (the lightmap and its
+		// shadowmask), and WebGPU only guarantees 16 per stage. Devices at that
+		// floor take this count instead; scenes with more lightmaps than slots
+		// already render the surplus without one, on any backend.
+		MAX_LIGHTMAPS_FLOOR = 2,
 		MAX_RDL_CULL = 8, // maximum number of reflection probes, decals or lights we can cull per geometry instance
 		INSTANCE_DATA_BUFFER_MIN_SIZE = 4096
 	};
