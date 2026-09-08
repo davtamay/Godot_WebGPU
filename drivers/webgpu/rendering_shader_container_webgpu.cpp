@@ -100,6 +100,21 @@ enum {
 	SPIRV_OP_CONTROL_BARRIER = 224,
 	SPIRV_OP_MEMORY_BARRIER = 225,
 	SPIRV_OP_MODULE_PROCESSED = 330,
+	// Read-only storage inference needs to see every way a pointer can be
+	// derived from a variable, and every way one can be written through.
+	SPIRV_OP_FUNCTION_CALL = 57,
+	SPIRV_OP_COPY_MEMORY = 63,
+	SPIRV_OP_COPY_MEMORY_SIZED = 64,
+	SPIRV_OP_IN_BOUNDS_ACCESS_CHAIN = 66,
+	SPIRV_OP_PTR_ACCESS_CHAIN = 67,
+	SPIRV_OP_IN_BOUNDS_PTR_ACCESS_CHAIN = 70,
+	SPIRV_OP_COPY_OBJECT = 83,
+	SPIRV_OP_ATOMIC_FIRST = 227, // OpAtomicLoad
+	SPIRV_OP_ATOMIC_LAST = 242, // OpAtomicXor
+	SPIRV_OP_ATOMIC_LOAD = 227,
+	SPIRV_OP_ATOMIC_FLAG_TEST_AND_SET = 318,
+	SPIRV_OP_ATOMIC_FLAG_CLEAR = 319,
+	SPIRV_STORAGE_CLASS_UNIFORM_BUFFER = 12, // StorageBuffer
 	SPIRV_STORAGE_CLASS_UNIFORM_CONSTANT = 0,
 	SPIRV_DECORATION_BUILT_IN = 11,
 	SPIRV_BUILT_IN_POINT_SIZE = 1,
@@ -854,6 +869,198 @@ static void _spirv_remove_unused_resource_bindings(LocalVector<uint32_t> &p_modu
 	}
 }
 
+// WGSL forbids a storage buffer with read_write access in the vertex stage,
+// and glslang only marks a buffer read-only when the GLSL said so. A shader
+// that merely reads a storage buffer it forgot to declare `readonly` is
+// therefore untranslatable, even though nothing writes it.
+//
+// This pass proves the read-only case: it follows every pointer derived from
+// each storage buffer variable and looks for a write through any of them.
+// Where none exists the variable and its block members are decorated
+// NonWritable, which is what the GLSL would have produced, and Tint then emits
+// var<storage, read>. The driver reads the access mode back out of the WGSL,
+// so the bind group layout follows automatically.
+//
+// Conservative in the safe direction: anything the pass cannot follow (a
+// pointer handed to a function, an untracked copy) counts as a write, so a
+// buffer is left writable rather than wrongly frozen.
+static void _spirv_infer_readonly_storage(LocalVector<uint32_t> &p_module) {
+	HashMap<uint32_t, uint32_t> pointer_pointees; // pointer type id -> pointee type id
+	HashMap<uint32_t, uint32_t> struct_member_counts;
+	HashMap<uint32_t, uint32_t> variable_types; // storage variable id -> pointer type id
+	HashSet<uint32_t> derived; // every pointer id reaching a storage variable
+	HashSet<uint32_t> written;
+	HashSet<uint32_t> already_marked;
+
+	uint32_t i = 5;
+	uint32_t last_decoration_end = 0;
+	while (i < p_module.size()) {
+		const uint32_t count = p_module[i] >> 16;
+		const uint32_t opcode = p_module[i] & 0xFFFF;
+		if (count == 0) {
+			return;
+		}
+		switch (opcode) {
+			case SPIRV_OP_DECORATE:
+			case SPIRV_OP_MEMBER_DECORATE:
+				last_decoration_end = i + count;
+				break;
+			case SPIRV_OP_TYPE_POINTER:
+				if (count >= 4) {
+					pointer_pointees[p_module[i + 1]] = p_module[i + 3];
+				}
+				break;
+			case SPIRV_OP_TYPE_STRUCT:
+				struct_member_counts[p_module[i + 1]] = count - 2;
+				break;
+			case SPIRV_OP_VARIABLE:
+				if (count >= 4 && p_module[i + 3] == SPIRV_STORAGE_CLASS_UNIFORM_BUFFER) {
+					variable_types[p_module[i + 2]] = p_module[i + 1];
+					derived.insert(p_module[i + 2]);
+				}
+				break;
+			default:
+				break;
+		}
+		i += count;
+	}
+	if (variable_types.is_empty() || last_decoration_end == 0) {
+		return;
+	}
+
+	// Variables the GLSL already declared read-only need no work.
+	i = 5;
+	while (i < p_module.size()) {
+		const uint32_t count = p_module[i] >> 16;
+		const uint32_t opcode = p_module[i] & 0xFFFF;
+		if (opcode == SPIRV_OP_DECORATE && count == 3 && p_module[i + 2] == SPIRV_DECORATION_NON_WRITABLE) {
+			already_marked.insert(p_module[i + 1]);
+		} else if (opcode == SPIRV_OP_MEMBER_DECORATE && count == 4 && p_module[i + 3] == SPIRV_DECORATION_NON_WRITABLE) {
+			already_marked.insert(p_module[i + 1]);
+		}
+		i += count;
+	}
+
+	// Grow the derived-pointer set to a fixed point, then look for writes.
+	bool grew = true;
+	while (grew) {
+		grew = false;
+		i = 5;
+		while (i < p_module.size()) {
+			const uint32_t count = p_module[i] >> 16;
+			const uint32_t opcode = p_module[i] & 0xFFFF;
+			const bool chain = opcode == SPIRV_OP_ACCESS_CHAIN || opcode == SPIRV_OP_IN_BOUNDS_ACCESS_CHAIN || opcode == SPIRV_OP_PTR_ACCESS_CHAIN || opcode == SPIRV_OP_IN_BOUNDS_PTR_ACCESS_CHAIN || opcode == SPIRV_OP_COPY_OBJECT;
+			if (chain && count >= 4 && derived.has(p_module[i + 3]) && !derived.has(p_module[i + 2])) {
+				derived.insert(p_module[i + 2]);
+				grew = true;
+			}
+			i += count;
+		}
+	}
+
+	i = 5;
+	while (i < p_module.size()) {
+		const uint32_t count = p_module[i] >> 16;
+		const uint32_t opcode = p_module[i] & 0xFFFF;
+		if (opcode == SPIRV_OP_STORE && count >= 3 && derived.has(p_module[i + 1])) {
+			written.insert(p_module[i + 1]);
+		} else if ((opcode == SPIRV_OP_COPY_MEMORY || opcode == SPIRV_OP_COPY_MEMORY_SIZED) && count >= 3 && derived.has(p_module[i + 1])) {
+			written.insert(p_module[i + 1]);
+		} else if (opcode >= SPIRV_OP_ATOMIC_FIRST && opcode <= SPIRV_OP_ATOMIC_LAST) {
+			// Every atomic but a plain load writes; the pointer is operand 3
+			// for the result-bearing forms and operand 1 for OpAtomicStore.
+			const uint32_t ptr = opcode == SPIRV_OP_ATOMIC_LOAD ? 0 : (count >= 4 ? p_module[i + 3] : 0);
+			if (ptr != 0 && derived.has(ptr)) {
+				written.insert(ptr);
+			}
+		} else if ((opcode == SPIRV_OP_ATOMIC_FLAG_TEST_AND_SET || opcode == SPIRV_OP_ATOMIC_FLAG_CLEAR) && count >= 2) {
+			const uint32_t ptr = opcode == SPIRV_OP_ATOMIC_FLAG_CLEAR ? p_module[i + 1] : (count >= 4 ? p_module[i + 3] : 0);
+			if (ptr != 0 && derived.has(ptr)) {
+				written.insert(ptr);
+			}
+		} else if (opcode == SPIRV_OP_FUNCTION_CALL) {
+			// A pointer passed to a function could be written inside it.
+			for (uint32_t w = 4; w < count; w++) {
+				if (derived.has(p_module[i + w])) {
+					written.insert(p_module[i + w]);
+				}
+			}
+		}
+		i += count;
+	}
+
+	// A write anywhere in the derived set taints its whole variable, so the
+	// mapping from derived pointers back to their variable has to be rebuilt.
+	// Cheapest correct form: if anything at all was written, walk the chains
+	// again and mark the roots those writes came from.
+	HashSet<uint32_t> tainted_roots;
+	if (!written.is_empty()) {
+		HashMap<uint32_t, uint32_t> chain_parent;
+		i = 5;
+		while (i < p_module.size()) {
+			const uint32_t count = p_module[i] >> 16;
+			const uint32_t opcode = p_module[i] & 0xFFFF;
+			const bool chain = opcode == SPIRV_OP_ACCESS_CHAIN || opcode == SPIRV_OP_IN_BOUNDS_ACCESS_CHAIN || opcode == SPIRV_OP_PTR_ACCESS_CHAIN || opcode == SPIRV_OP_IN_BOUNDS_PTR_ACCESS_CHAIN || opcode == SPIRV_OP_COPY_OBJECT;
+			if (chain && count >= 4) {
+				chain_parent[p_module[i + 2]] = p_module[i + 3];
+			}
+			i += count;
+		}
+		for (const uint32_t &w : written) {
+			uint32_t root = w;
+			for (uint32_t guard = 0; guard < 64; guard++) {
+				const uint32_t *parent = chain_parent.getptr(root);
+				if (parent == nullptr) {
+					break;
+				}
+				root = *parent;
+			}
+			tainted_roots.insert(root);
+		}
+	}
+
+	LocalVector<uint32_t> inject;
+	for (const KeyValue<uint32_t, uint32_t> &kv : variable_types) {
+		if (tainted_roots.has(kv.key) || already_marked.has(kv.key)) {
+			continue;
+		}
+		const uint32_t *pointee = pointer_pointees.getptr(kv.value);
+		const uint32_t struct_id = pointee != nullptr ? *pointee : 0;
+		if (struct_id == 0 || already_marked.has(struct_id)) {
+			continue;
+		}
+		const uint32_t *member_count = struct_member_counts.getptr(struct_id);
+		if (member_count == nullptr) {
+			continue;
+		}
+		inject.push_back((3 << 16) | SPIRV_OP_DECORATE);
+		inject.push_back(kv.key);
+		inject.push_back(SPIRV_DECORATION_NON_WRITABLE);
+		for (uint32_t m = 0; m < *member_count; m++) {
+			inject.push_back((4 << 16) | SPIRV_OP_MEMBER_DECORATE);
+			inject.push_back(struct_id);
+			inject.push_back(m);
+			inject.push_back(SPIRV_DECORATION_NON_WRITABLE);
+		}
+	}
+	if (inject.is_empty()) {
+		return;
+	}
+
+	LocalVector<uint32_t> injected;
+	injected.reserve(p_module.size() + inject.size());
+	for (uint32_t w = 0; w < last_decoration_end; w++) {
+		injected.push_back(p_module[w]);
+	}
+	for (uint32_t w = 0; w < inject.size(); w++) {
+		injected.push_back(inject[w]);
+	}
+	for (uint32_t w = last_decoration_end; w < p_module.size(); w++) {
+		injected.push_back(p_module[w]);
+	}
+	p_module = injected;
+}
+
 // Makes a Godot-compiled SPIR-V module acceptable to Tint's reader (SPIR-V
 // 1.3 under Vulkan 1.1 semantics):
 // - The version is downgraded to 1.3 and, per 1.3 rules, OpEntryPoint
@@ -991,6 +1198,7 @@ bool RenderingShaderContainerWebGPU::_transform_spirv(Vector<uint8_t> &r_spirv) 
 	_spirv_strip_point_size_stores(out);
 	_spirv_convert_memory_barriers(out);
 	_spirv_remove_unused_resource_bindings(out);
+	_spirv_infer_readonly_storage(out);
 
 	r_spirv.resize(out.size() * 4);
 	memcpy(r_spirv.ptrw(), out.ptr(), r_spirv.size());
