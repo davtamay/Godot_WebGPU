@@ -167,6 +167,16 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		 */
 		fileSizes: {},
 		/**
+		 * Format of the precompressed copies the export wrote next to the
+		 * payloads, if any: the loader asks for those instead when the browser
+		 * can decode them itself.
+		 *
+		 * @ignore
+		 * @export
+		 * @type {string}
+		 */
+		compression: '',
+		/**
 		 * @ignore
 		 * @export
 		 * @type {number}
