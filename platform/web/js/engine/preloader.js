@@ -26,13 +26,48 @@ const Preloader = /** @constructor */ function () { // eslint-disable-line no-un
 		}), { headers: response.headers });
 	}
 
+	// Extension of the precompressed copies this export carries, if any (see
+	// the "compression/mode" export option). Empty when the export has none,
+	// or when the browser cannot decode the format they use.
+	let compressedExt = '';
+
+	// Ask for the precompressed copy directly and decode it here, rather than
+	// leaving it to the host to negotiate an encoding: a static host that
+	// serves files exactly as they are on disk cannot do that, and most of
+	// them are. A host that DOES negotiate has already sent the plain bytes,
+	// which the content-encoding header says, so they are passed through.
+	function fetchPayload(file) {
+		if (compressedExt === '') {
+			return fetch(file);
+		}
+		return fetch(file + compressedExt).then(function (response) {
+			if (!response.ok) {
+				// No such copy after all; the original is still there.
+				return fetch(file);
+			}
+			if (response.headers.get('content-encoding')) {
+				return response;
+			}
+			return new Response(response.body.pipeThrough(new DecompressionStream('gzip')), { headers: response.headers });
+		});
+	}
+
+	// Called by the engine before anything is fetched.
+	this.setCompression = function (mode) {
+		// Only what the browser can decode itself is worth asking for; brotli
+		// has no DecompressionStream format, so those exports fall back to the
+		// originals and rely on the host to serve the compressed copy.
+		const supported = typeof DecompressionStream !== 'undefined' && mode === 'gzip';
+		compressedExt = supported ? '.gz' : '';
+	};
+
 	function loadFetch(file, tracker, fileSize, raw) {
 		tracker[file] = {
 			total: fileSize || 0,
 			loaded: 0,
 			done: false,
 		};
-		return fetch(file).then(function (response) {
+		return fetchPayload(file).then(function (response) {
 			if (!response.ok) {
 				return Promise.reject(new Error(`Failed loading file '${file}'`));
 			}
