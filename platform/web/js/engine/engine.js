@@ -253,6 +253,7 @@ const Engine = (function () {
 				if (initPromise) {
 					return initPromise;
 				}
+				preloader.setCompression(this.config.compression);
 				if (loadPromise == null) {
 					if (!basePath) {
 						initPromise = Promise.reject(new Error('A base path must be provided when calling `init` and the engine is not loaded.'));
@@ -305,6 +306,7 @@ const Engine = (function () {
 			 * @returns {Promise} A Promise that resolves once the file is loaded.
 			 */
 			preloadFile: function (file, path) {
+				preloader.setCompression(this.config.compression);
 				return preloader.preload(file, path, this.config.fileSizes[file]);
 			},
 
