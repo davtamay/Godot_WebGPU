@@ -216,6 +216,16 @@ void EditorExportPlatformWeb::_fix_html(Vector<uint8_t> &p_html, const Ref<Edito
 	config["executable"] = p_name;
 	config["args"] = args;
 	config["fileSizes"] = p_file_sizes;
+	{
+		// Tells the loader that precompressed copies exist, so it can ask
+		// for them rather than depending on the host to negotiate.
+		const int mode = p_preset->get("compression/mode");
+		if (mode == COMPRESSION_GZIP) {
+			config["compression"] = "gzip";
+		} else if (mode == COMPRESSION_BROTLI) {
+			config["compression"] = "brotli";
+		}
+	}
 	config["ensureCrossOriginIsolationHeaders"] = (bool)p_preset->get("progressive_web_app/ensure_cross_origin_isolation_headers");
 
 	if (get_project_setting(p_preset, "rendering/rendering_device/driver.web") == "webgpu") {
