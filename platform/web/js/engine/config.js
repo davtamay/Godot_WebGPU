@@ -155,6 +155,15 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		 */
 		fileSizes: [],
 		/**
+		 * Format of the precompressed copies the export wrote next to the
+		 * payloads, if any: the loader asks for those instead when the browser
+		 * can decode them itself.
+		 *
+		 * @ignore
+		 * @type {string}
+		 */
+		compression: '',
+		/**
 		 * @ignore
 		 * @type {number}
 		 */
@@ -292,6 +301,7 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 		this.serviceWorker = parse('serviceWorker', this.serviceWorker);
 		this.gdextensionLibs = parse('gdextensionLibs', this.gdextensionLibs);
 		this.fileSizes = parse('fileSizes', this.fileSizes);
+		this.compression = parse('compression', this.compression);
 		this.emscriptenPoolSize = parse('emscriptenPoolSize', this.emscriptenPoolSize);
 		this.godotPoolSize = parse('godotPoolSize', this.godotPoolSize);
 		this.args = parse('args', this.args);
