@@ -226,6 +226,25 @@ else
 	fail "strict probe (nothreads)" "could not stage artifacts"
 fi
 
+# The CI web builds run the loader sources through the Closure compiler, which
+# rejects things a plain parse accepts (a duplicate extern, a renamed property
+# crossing a boundary). Godot's own invocation cannot run here - it calls the
+# node_modules shim, which is a shell script on Windows - so call the compiler
+# directly with the same flags. A skip is not a pass.
+phase "Closure"
+CLOSURE_CLI="${EMSDK:-$HOME/emsdk}/upstream/emscripten/node_modules/google-closure-compiler/cli.js"
+if [ -f "$CLOSURE_CLI" ]; then
+	CLOSURE_LOG="$LOGDIR/closure.log"
+	if "$NODE" "$CLOSURE_CLI" --compilation_level ADVANCED_OPTIMIZATIONS 			--externs "$REPO/platform/web/js/engine/engine.externs.js" 			--js "$REPO/platform/web/js/engine/features.js" 			--js "$REPO/platform/web/js/engine/preloader.js" 			--js "$REPO/platform/web/js/engine/config.js" 			--js "$REPO/platform/web/js/engine/engine.js" 			--js_output_file "$LOGDIR/closure-engine.js" > "$CLOSURE_LOG" 2>&1; then
+		pass "closure" "(loader sources)"
+	else
+		fail "closure" "see $CLOSURE_LOG"
+		tail -8 "$CLOSURE_LOG" >&2
+	fi
+else
+	skip "closure" "compiler not found beside emsdk - CI is then the only check"
+fi
+
 phase "Loader smoke"
 LOADER_LOG="$LOGDIR/loader-smoke.log"
 if ( cd "$TESTBED" && "$NODE" "$REPO/misc/webgpu_scripts/loader-smoke.mjs" "$LOGDIR/probebin-threaded" ) > "$LOADER_LOG" 2>&1; then
