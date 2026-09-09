@@ -53,6 +53,37 @@ if env["brotli"] and env["builtin_brotli"]:
     ]
     thirdparty_brotli_sources = [thirdparty_brotli_dir + file for file in thirdparty_brotli_sources]
 
+    # The encoder is only used to compress files at export time, so it is left
+    # out of the exported binaries, where it would be dead weight.
+    thirdparty_brotli_enc_sources = []
+    if env.editor_build:
+        thirdparty_brotli_enc_sources = [
+            "enc/backward_references.c",
+            "enc/backward_references_hq.c",
+            "enc/bit_cost.c",
+            "enc/block_splitter.c",
+            "enc/brotli_bit_stream.c",
+            "enc/cluster.c",
+            "enc/command.c",
+            "enc/compound_dictionary.c",
+            "enc/compress_fragment.c",
+            "enc/compress_fragment_two_pass.c",
+            "enc/dictionary_hash.c",
+            "enc/encode.c",
+            "enc/encoder_dict.c",
+            "enc/entropy_encode.c",
+            "enc/fast_log.c",
+            "enc/histogram.c",
+            "enc/literal_cost.c",
+            "enc/memory.c",
+            "enc/metablock.c",
+            "enc/static_dict.c",
+            "enc/static_dict_lut.c",
+            "enc/static_init.c",
+            "enc/utf8_util.c",
+        ]
+        thirdparty_brotli_enc_sources = [thirdparty_brotli_dir + file for file in thirdparty_brotli_enc_sources]
+
     env_thirdparty.Prepend(CPPPATH=[thirdparty_brotli_dir + "include"])
     env.Prepend(CPPPATH=[thirdparty_brotli_dir + "include"])
 
@@ -60,6 +91,9 @@ if env["brotli"] and env["builtin_brotli"]:
         env_thirdparty.Append(CPPDEFINES=["BROTLI_BUILD_PORTABLE"])
 
     env_thirdparty.add_source_files(thirdparty_obj, thirdparty_brotli_sources)
+
+    if thirdparty_brotli_enc_sources:
+        env_thirdparty.add_source_files(thirdparty_obj, thirdparty_brotli_enc_sources)
 
 # PCRE2
 if env["builtin_pcre2"]:

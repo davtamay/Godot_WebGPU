@@ -101,9 +101,19 @@ Patches:
 
 Files extracted from upstream source:
 
-- `common/`, `dec/` and `include/` folders from `c/`,
+- `common/`, `dec/`, `enc/` and `include/` folders from `c/`,
   minus the `dictionary.bin*` files
 - `LICENSE`
+
+Patches:
+
+- MSVC rejects a block-scope `static` initialized from a floating-point
+  expression, so three such constants in `enc/` were made automatic:
+  `block_splitter_inc.h`, `encode.c` and `literal_cost.c`. The values are
+  unchanged.
+
+The encoder is only compiled into editor builds (see `core/SCsub`); exported
+binaries keep the decoder alone.
 
 
 ## certs
