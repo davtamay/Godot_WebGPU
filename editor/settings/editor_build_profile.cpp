@@ -1385,6 +1385,14 @@ EditorBuildProfileManager *EditorBuildProfileManager::singleton = nullptr;
 
 void EditorBuildProfileManager::_bind_methods() {
 	ClassDB::bind_method("_update_selected_profile", &EditorBuildProfileManager::_update_edited_profile);
+
+	// A build profile is a compile-time contract with one project: the classes
+	// it leaves out are gone from the binary, so a project that grows past the
+	// profile it was built against fails at load. Keeping detection reachable
+	// only from this dialog means the contract can be authored but never
+	// re-checked, so editor tooling gets the same entry point the button uses.
+	ClassDB::bind_method(D_METHOD("detect_from_project"), &EditorBuildProfileManager::_detect_from_project);
+	ClassDB::bind_method(D_METHOD("get_current_profile"), &EditorBuildProfileManager::get_current_profile);
 }
 
 EditorBuildProfileManager::EditorBuildProfileManager() {
