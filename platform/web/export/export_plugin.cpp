@@ -34,6 +34,7 @@
 #include "run_icon_svg.gen.h"
 
 #include "core/config/project_settings.h"
+#include "core/io/compression.h"
 #include "core/io/dir_access.h"
 #include "core/io/zip_io.h"
 #include "core/os/os.h"
@@ -42,6 +43,19 @@
 #include "editor/file_system/editor_paths.h"
 #include "editor/import/resource_importer_texture_settings.h"
 #include "editor/settings/editor_settings.h"
+
+#ifdef BROTLI_ENABLED
+#include <brotli/encode.h>
+#endif
+
+namespace {
+// Values of the "compression/mode" export option.
+enum WebCompressionMode {
+	COMPRESSION_DISABLED,
+	COMPRESSION_GZIP,
+	COMPRESSION_BROTLI,
+};
+} // namespace
 #include "editor/themes/editor_scale.h"
 #include "scene/resources/image_texture.h"
 
@@ -102,6 +116,57 @@ Error EditorExportPlatformWeb::_extract_template(const String &p_template, const
 	} while (unzGoToNextFile(pkg) == UNZ_OK);
 	unzClose(pkg);
 	return OK;
+}
+
+Error EditorExportPlatformWeb::_precompress_file(const String &p_path, int p_mode, uint64_t &r_raw, uint64_t &r_compressed) {
+	Vector<uint8_t> src;
+	{
+		Ref<FileAccess> f = FileAccess::open(p_path, FileAccess::READ);
+		if (f.is_null()) {
+			return ERR_FILE_CANT_OPEN;
+		}
+		src.resize(f->get_length());
+		if (src.size() > 0) {
+			f->get_buffer(src.ptrw(), src.size());
+		}
+	}
+	r_raw = src.size();
+
+	Vector<uint8_t> dst;
+	String extension;
+	if (p_mode == COMPRESSION_GZIP) {
+		extension = ".gz";
+		// The export is a release step, so trade time for bytes; the level is a
+		// global default that other callers rely on, hence the restore.
+		const int previous_level = Compression::gzip_level;
+		Compression::gzip_level = 9;
+		const int64_t bound = Compression::get_max_compressed_buffer_size(src.size(), Compression::MODE_GZIP);
+		dst.resize(bound);
+		const int64_t written = Compression::compress(dst.ptrw(), src.ptr(), src.size(), Compression::MODE_GZIP);
+		Compression::gzip_level = previous_level;
+		if (written < 0) {
+			return ERR_INVALID_DATA;
+		}
+		dst.resize(written);
+	} else {
+#ifdef BROTLI_ENABLED
+		extension = ".br";
+		size_t written = BrotliEncoderMaxCompressedSize(src.size());
+		dst.resize(written);
+		// The window stays at the default: a browser decoding Content-Encoding
+		// br is not required to accept the large-window variant.
+		const BROTLI_BOOL ok = BrotliEncoderCompress(BROTLI_MAX_QUALITY, BROTLI_DEFAULT_WINDOW, BROTLI_MODE_GENERIC,
+				src.size(), src.ptr(), &written, dst.ptrw());
+		if (!ok) {
+			return ERR_INVALID_DATA;
+		}
+		dst.resize(written);
+#else
+		return ERR_UNAVAILABLE;
+#endif
+	}
+	r_compressed = dst.size();
+	return _write_or_error(dst.ptr(), dst.size(), p_path + extension);
 }
 
 Error EditorExportPlatformWeb::_write_or_error(const uint8_t *p_content, int p_size, String p_path) {
@@ -392,6 +457,7 @@ void EditorExportPlatformWeb::get_export_options(List<ExportOption> *r_options) 
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "shader_baker/enabled"), false)); // Bake shaders (required by the WebGPU driver).
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "webxr/uses_webxr"), false)); // Keep a WebXR-capable driver on browsers where WebGPU cannot render immersive sessions.
 
+	r_options->push_back(ExportOption(PropertyInfo(Variant::INT, "compression/mode", PROPERTY_HINT_ENUM, "Disabled,Gzip,Brotli"), 0));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "html/export_icon"), true));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, "html/custom_html_shell", PROPERTY_HINT_FILE, "*.html"), ""));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, "html/head_include", PROPERTY_HINT_MULTILINE_TEXT, "monospace,no_wrap"), ""));
@@ -629,6 +695,47 @@ Error EditorExportPlatformWeb::export_project(const Ref<EditorExportPreset> &p_p
 		if (err != OK) {
 			// Message is supplied by the subroutine method.
 			return err;
+		}
+	}
+
+	// Precompress the payloads a browser downloads. The originals stay in
+	// place, so a host that serves them as-is keeps working; a host that can
+	// serve the sibling (nginx brotli_static, or any rule that maps the
+	// extension to Content-Encoding) hands over far less. Compressing here
+	// rather than at request time is what buys the maximum ratio: a server
+	// compressing on the fly has to pick a fast setting.
+	const int compression_mode = p_preset->get("compression/mode");
+	if (compression_mode != COMPRESSION_DISABLED) {
+		Vector<String> compress_paths;
+		compress_paths.push_back(pck_path);
+		compress_paths.push_back(base_path + ".wasm");
+		compress_paths.push_back(base_path + ".js");
+		compress_paths.push_back(base_path + ".audio.worklet.js");
+		compress_paths.push_back(base_path + ".audio.position.worklet.js");
+		uint64_t total_raw = 0;
+		uint64_t total_compressed = 0;
+		for (const String &path : compress_paths) {
+			if (!FileAccess::exists(path)) {
+				continue;
+			}
+			uint64_t raw = 0;
+			uint64_t compressed = 0;
+			const Error compress_err = _precompress_file(path, compression_mode, raw, compressed);
+			if (compress_err == ERR_UNAVAILABLE) {
+				add_message(EXPORT_MESSAGE_ERROR, TTR("Export"), TTR("This editor was built without Brotli support, so it cannot compress the export. Rebuild with `brotli=yes`, or choose Gzip."));
+				return compress_err;
+			}
+			if (compress_err != OK) {
+				add_message(EXPORT_MESSAGE_ERROR, TTR("Export"), vformat(TTR("Could not compress file: \"%s\"."), path.get_file()));
+				return compress_err;
+			}
+			total_raw += raw;
+			total_compressed += compressed;
+		}
+		if (total_raw > 0) {
+			add_message(EXPORT_MESSAGE_INFO, TTR("Export"),
+					vformat(TTR("Wrote %s of precompressed files alongside %s of originals. Serve the compressed copies with a matching Content-Encoding header."),
+							String::humanize_size(total_compressed), String::humanize_size(total_raw)));
 		}
 	}
 
