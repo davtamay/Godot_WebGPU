@@ -70,6 +70,12 @@ private:
 	// multiview; the active draw pass then selects the view.
 	uint32_t current_draw_pass = 0;
 	bool _uses_per_view_passes() const;
+	// Near and far planes from the camera node's last request, so a pass can
+	// rebuild its projection with the same planes the frame was set up with.
+	double pass_z_near = 0.05;
+	double pass_z_far = 4000.0;
+	bool _view_projection(uint32_t p_view, double p_z_near, double p_z_far, Projection &r_projection) const;
+	bool _view_offset(uint32_t p_view, Transform3D &r_offset);
 #ifdef WEBGPU_ENABLED
 	// Per-view slices of the wrapped layer texture, one per draw pass
 	// (freed before their owner in texture_cache).
@@ -162,6 +168,7 @@ public:
 	virtual uint32_t get_view_count() override;
 	virtual uint32_t get_draw_pass_count() override;
 	virtual void set_current_draw_pass(uint32_t p_pass) override;
+	virtual bool get_draw_pass_camera(TypedArray<Projection> &r_projections, TypedArray<Transform3D> &r_offsets) override;
 	virtual Transform3D get_camera_transform() override;
 	virtual TypedArray<Projection> get_camera_projections(const StringName &p_tracker_name, double p_aspect, double p_z_near, double p_z_far) override;
 	virtual TypedArray<Transform3D> get_camera_offsets(const StringName &p_tracker_name) override;
