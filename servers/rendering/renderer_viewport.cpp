@@ -885,6 +885,15 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 			const uint32_t draw_pass_count = xr_interface->get_draw_pass_count();
 			for (uint32_t draw_pass = 0; draw_pass < draw_pass_count; draw_pass++) {
 				xr_interface->set_current_draw_pass(draw_pass);
+				if (draw_pass_count > 1 && vp->camera.is_valid()) {
+					// The camera carries the projections its node set for the
+					// frame; each pass renders one view of it.
+					TypedArray<Projection> pass_projections;
+					TypedArray<Transform3D> pass_offsets;
+					if (xr_interface->get_draw_pass_camera(pass_projections, pass_offsets)) {
+						RSG::scene->camera_set_xr_projections(vp->camera, pass_projections, pass_offsets);
+					}
+				}
 				// Inform XR interface we're about to render its viewport,
 				// if this returns false we don't render.
 				// This usually is a result of the player taking off their headset and OpenXR telling us to skip
