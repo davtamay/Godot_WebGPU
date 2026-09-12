@@ -574,37 +574,78 @@ Transform3D WebXRInterfaceJS::get_camera_transform() {
 	return camera_transform;
 }
 
+// One view's projection, from the frame's matrix cache when it holds the
+// view and from the browser otherwise (a call before the first frame).
+bool WebXRInterfaceJS::_view_projection(uint32_t p_view, double p_z_near, double p_z_far, Projection &r_projection) const {
+	float js_matrix[16];
+	if (p_view < frame_matrix_view_count) {
+		memcpy(js_matrix, frame_matrices + 16 + p_view * 32 + 16, sizeof(js_matrix));
+	} else if (!godot_webxr_get_projection_for_view(p_view, js_matrix)) {
+		return false;
+	}
+
+	int k = 0;
+	for (int i = 0; i < 4; i++) {
+		for (int j = 0; j < 4; j++) {
+			r_projection.columns[i][j] = js_matrix[k++];
+		}
+	}
+
+	// Copied from godot_oculus_mobile's ovr_mobile_session.cpp
+	r_projection.columns[2][2] = -(p_z_far + p_z_near) / (p_z_far - p_z_near);
+	r_projection.columns[3][2] = -(2.0f * p_z_far * p_z_near) / (p_z_far - p_z_near);
+	return true;
+}
+
+// One view's offset from the head, likewise.
+bool WebXRInterfaceJS::_view_offset(uint32_t p_view, Transform3D &r_offset) {
+	XRServer *xr_server = XRServer::get_singleton();
+	ERR_FAIL_NULL_V(xr_server, false);
+
+	float js_matrix[16];
+	Transform3D head;
+	Transform3D view;
+	if (p_view < frame_matrix_view_count) {
+		head = _js_matrix_to_transform(frame_matrices);
+		memcpy(js_matrix, frame_matrices + 16 + p_view * 32, sizeof(js_matrix));
+		view = _js_matrix_to_transform(js_matrix);
+	} else {
+		if (!godot_webxr_get_transform_for_view(-1, js_matrix)) {
+			return false;
+		}
+		head = _js_matrix_to_transform(js_matrix);
+		if (!godot_webxr_get_transform_for_view(p_view, js_matrix)) {
+			return false;
+		}
+		view = _js_matrix_to_transform(js_matrix);
+	}
+
+	r_offset = head.inverse() * view;
+	r_offset.origin *= xr_server->get_world_scale();
+	return true;
+}
+
 TypedArray<Projection> WebXRInterfaceJS::get_camera_projections(const StringName &p_tracker_name, double p_aspect, double p_z_near, double p_z_far) {
 	TypedArray<Projection> camera_projections;
 
 	if (p_tracker_name != XR_TRACKER_HEAD) {
 		return camera_projections;
 	}
-
-	XRServer *xr_server = XRServer::get_singleton();
-	ERR_FAIL_NULL_V(xr_server, camera_projections);
 	ERR_FAIL_COND_V(!initialized, camera_projections);
 
+	// Remembered for the draw passes, which rebuild the pass's view with the
+	// planes the frame was set up with.
+	pass_z_near = p_z_near;
+	pass_z_far = p_z_far;
+
+	// Per-view draw passes report one view and serve the active pass's as
+	// view 0, which is what get_view_count() counts below.
+	const uint32_t first_view = _uses_per_view_passes() ? current_draw_pass : 0;
 	for (uint32_t v = 0; v < get_view_count(); v++) {
 		Projection view;
-
-		float js_matrix[16];
-		bool has_projection = godot_webxr_get_projection_for_view(v, js_matrix);
-		if (!has_projection) {
+		if (!_view_projection(first_view + v, p_z_near, p_z_far, view)) {
 			return camera_projections;
 		}
-
-		int k = 0;
-		for (int i = 0; i < 4; i++) {
-			for (int j = 0; j < 4; j++) {
-				view.columns[i][j] = js_matrix[k++];
-			}
-		}
-
-		// Copied from godot_oculus_mobile's ovr_mobile_session.cpp
-		view.columns[2][2] = -(p_z_far + p_z_near) / (p_z_far - p_z_near);
-		view.columns[3][2] = -(2.0f * p_z_far * p_z_near) / (p_z_far - p_z_near);
-
 		camera_projections.push_back(view);
 	}
 
@@ -617,41 +658,38 @@ TypedArray<Transform3D> WebXRInterfaceJS::get_camera_offsets(const StringName &p
 	if (p_tracker_name != XR_TRACKER_HEAD) {
 		return camera_offsets;
 	}
-
-	XRServer *xr_server = XRServer::get_singleton();
-	ERR_FAIL_NULL_V(xr_server, camera_offsets);
 	ERR_FAIL_COND_V(!initialized, camera_offsets);
 
-	// Get our world scale
-	double world_scale = xr_server->get_world_scale();
-
-	// Get our head transform
-	float js_matrix[16];
-	bool has_transform = godot_webxr_get_transform_for_view(-1, js_matrix);
-	if (!has_transform) {
-		return camera_offsets;
-	}
-
-	Transform3D inv_head_transform = _js_matrix_to_transform(js_matrix).inverse();
-
+	const uint32_t first_view = _uses_per_view_passes() ? current_draw_pass : 0;
 	for (uint32_t v = 0; v < get_view_count(); v++) {
-		// Get our view transform
-		has_transform = godot_webxr_get_transform_for_view(v, js_matrix);
-		if (!has_transform) {
+		Transform3D offset;
+		if (!_view_offset(first_view + v, offset)) {
 			return camera_offsets;
 		}
-
-		Transform3D transform_for_view = _js_matrix_to_transform(js_matrix);
-
-		// Calculate the offset
-		Transform3D offset = inv_head_transform * transform_for_view;
-
-		offset.origin *= world_scale;
-
 		camera_offsets.push_back(offset);
 	}
 
 	return camera_offsets;
+}
+
+bool WebXRInterfaceJS::get_draw_pass_camera(TypedArray<Projection> &r_projections, TypedArray<Transform3D> &r_offsets) {
+	if (!_uses_per_view_passes() || !initialized) {
+		return false;
+	}
+
+	// The camera node set the camera before this frame's passes, from
+	// whichever pass was current then; the pass being drawn now needs its
+	// own view.
+	Projection projection;
+	Transform3D offset;
+	if (!_view_projection(current_draw_pass, pass_z_near, pass_z_far, projection) || !_view_offset(current_draw_pass, offset)) {
+		return false;
+	}
+	r_projections.clear();
+	r_offsets.clear();
+	r_projections.push_back(projection);
+	r_offsets.push_back(offset);
+	return true;
 }
 
 #ifndef DISABLE_DEPRECATED
