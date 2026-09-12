@@ -71,6 +71,12 @@ private:
 	// Renderer-independent - the WebGPU backend takes the same path for its
 	// own reason, since WGSL cannot express multiview either.
 	uint32_t current_draw_pass = 0;
+	// Near and far planes from the camera node's last request, so a pass can
+	// rebuild its projection with the same planes the frame was set up with.
+	double pass_z_near = 0.05;
+	double pass_z_far = 4000.0;
+	bool _view_projection(uint32_t p_view, double p_z_near, double p_z_far, Projection &r_projection) const;
+	bool _view_offset(uint32_t p_view, Transform3D &r_offset);
 	bool gl_per_view_passes = false;
 	uint32_t gl_blit_fbos[2] = {};
 	void _gl_blit_pass_to_layer(RID p_render_target);
@@ -167,6 +173,7 @@ public:
 	virtual uint32_t get_view_count() override;
 	virtual uint32_t get_draw_pass_count() override;
 	virtual void set_current_draw_pass(uint32_t p_pass) override;
+	virtual bool get_draw_pass_camera(TypedArray<Projection> &r_projections, TypedArray<Transform3D> &r_offsets) override;
 	virtual Transform3D get_camera_transform() override;
 	virtual TypedArray<Projection> get_camera_projections(const StringName &p_tracker_name, double p_aspect, double p_z_near, double p_z_far) override;
 	virtual TypedArray<Transform3D> get_camera_offsets(const StringName &p_tracker_name) override;
