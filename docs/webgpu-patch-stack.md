@@ -161,6 +161,7 @@
 | 152 | [shared] web: Add a compression mode to the web export | Web exports ship uncompressed, so what reaches a player depends on the host, and a host compressing per request must pick a fast setting over a good one. A compression/mode option writes gzip or brotli copies of the pack, wasm, loader and worklets at maximum quality beside the originals. Measured on a 78.5 MiB export: 21.3 MiB gzip, 15.5 MiB brotli, and the brotli copy is 12.7% smaller than what a server generates per request. Off by default; it costs about a minute | 0 |
 | 153 | [shared] web: Fetch the precompressed copy from the loader | Precompressed files only help when the host maps the extension to a Content-Encoding header, which a plain static host cannot be told to do. The loader now asks for the copy directly and decodes it through the browser's own DecompressionStream, so a gzip export is small on any host with no configuration at all. Brotli has no such format, so those exports keep asking for the original and rely on the host, as before | 0 |
 | 154 | misc: Run the loader sources through Closure in the local gates | The CI web builds compile the loader with Closure, which rejects what a plain parse accepts; the local gates did not, so a duplicate extern reached CI. Godot's own invocation cannot run on Windows (it calls a shell-script shim), so the gate calls the compiler directly with the same flags, and says so rather than passing when it is absent | 0 |
+| 155 | misc: Follow upstream's multi-layer projection camera | Upstream (godotengine 9d0b0a6738, merged 2026-09-10) moved every view's projection and offset onto the Camera (XRCamera3D computes them on the main thread through the new get_camera_projections/get_camera_offsets and camera_set_xr_projections) and deleted the render-thread per-view loop patch 35 hooked, which is why the 2026-09-14 sync conflicted at patch 35. Patch 35 now selects the active pass's entry in render_camera and patch 48 reads the frame-matrix cache from the new getters; this patch registers renderer_scene_cull.cpp as a shared file in check-stack and the rules. Own files and tooling only | 0 | n/a (fork-only) |
 
 (Rows 53-61 pending backfill. Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
 experimental WebXR-WebGPU since April 2026. NOTE: upstream
@@ -322,9 +323,12 @@ depends on them.
   `editor/export/shader_baker/shader_baker_export_plugin.cpp/.h` (upstream moved it into `shader_baker/` in the week of 2026-09-07; patch 136 follows) (cpp added in patch 15;
   h added in patch 31 for the variant-veto hook),
   `modules/webxr/*` (added in patch 34: the WebXR implementation itself),
-  `servers/xr/xr_interface.h` and
-  `servers/rendering/renderer_viewport.cpp` (added in patch 35: the
-  per-view draw-pass hook and its single call site).
+  `servers/xr/xr_interface.h`,
+  `servers/rendering/renderer_viewport.cpp` and
+  `servers/rendering/renderer_scene_cull.cpp` (added in patch 35: the
+  per-view draw-pass hook, its single call site, and the per-pass view
+  selection in render_camera that upstream's multi-layer projection camera
+  (2026-09-10) made necessary; patch 155 registers the file).
 - **Never touched:** `servers/rendering/rendering_device.cpp`,
   `rendering_device_graph.*`, `shader_compiler*`, `modules/glslang`,
   existing drivers, renderer_rd scene/effects code outside the designated
