@@ -1,0 +1,125 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://main.gd" id="1_script"]
+
+[sub_resource type="StandardMaterial3D" id="mat_floor"]
+albedo_color = Color(0.78, 0.8, 0.84, 1)
+roughness = 0.9
+
+[sub_resource type="PlaneMesh" id="mesh_floor"]
+size = Vector2(12, 12)
+
+[sub_resource type="StandardMaterial3D" id="mat_metal"]
+albedo_color = Color(0.85, 0.45, 0.15, 1)
+metallic = 0.8
+roughness = 0.3
+
+[sub_resource type="BoxMesh" id="mesh_box"]
+
+[sub_resource type="BoxMesh" id="mesh_pillar"]
+size = Vector3(0.5, 2, 0.5)
+
+[sub_resource type="StandardMaterial3D" id="mat_glass"]
+transparency = 1
+albedo_color = Color(0.3, 0.6, 1, 0.45)
+
+[sub_resource type="SphereMesh" id="mesh_sphere"]
+radius = 0.4
+height = 0.8
+
+[sub_resource type="StandardMaterial3D" id="mat_hand"]
+albedo_color = Color(0.2, 0.9, 0.4, 1)
+
+[sub_resource type="BoxMesh" id="mesh_hand"]
+size = Vector3(0.06, 0.06, 0.12)
+
+[sub_resource type="ProceduralSkyMaterial" id="sky_mat"]
+
+[sub_resource type="Sky" id="sky"]
+sky_material = SubResource("sky_mat")
+
+[sub_resource type="Environment" id="env"]
+background_mode = 2
+sky = SubResource("sky")
+ambient_light_source = 3
+tonemap_mode = 2
+glow_enabled = true
+
+[node name="XRSmoke" type="Node3D"]
+script = ExtResource("1_script")
+
+[node name="XROrigin3D" type="XROrigin3D" parent="."]
+
+[node name="XRCamera3D" type="XRCamera3D" parent="XROrigin3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)
+
+[node name="LeftHand" type="XRController3D" parent="XROrigin3D"]
+tracker = &"left_hand"
+
+[node name="LeftMesh" type="MeshInstance3D" parent="XROrigin3D/LeftHand"]
+material_override = SubResource("mat_hand")
+mesh = SubResource("mesh_hand")
+
+[node name="RightHand" type="XRController3D" parent="XROrigin3D"]
+tracker = &"right_hand"
+
+[node name="RightMesh" type="MeshInstance3D" parent="XROrigin3D/RightHand"]
+material_override = SubResource("mat_hand")
+mesh = SubResource("mesh_hand")
+
+[node name="Floor" type="MeshInstance3D" parent="."]
+material_override = SubResource("mat_floor")
+mesh = SubResource("mesh_floor")
+
+[node name="Box" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, -2)
+material_override = SubResource("mat_metal")
+mesh = SubResource("mesh_box")
+
+[node name="Pillar" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.5, 1, -2.5)
+material_override = SubResource("mat_metal")
+mesh = SubResource("mesh_pillar")
+
+[node name="Glass" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.5, 1.2, -2)
+material_override = SubResource("mat_glass")
+mesh = SubResource("mesh_sphere")
+
+[node name="Counter" type="Label3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.9, -2)
+pixel_size = 0.004
+text = "0"
+font_size = 96
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.8253356, -0.44229966, 0.3509874, 0, 0.62161, 0.7833269, -0.5646425, -0.6465076, 0.51303685, 0, 3, 0)
+shadow_enabled = true
+
+[node name="Lamp" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.5, 2.2, -1)
+shadow_enabled = true
+omni_range = 8.0
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("env")
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="Panel" type="PanelContainer" parent="HUD"]
+offset_left = 16.0
+offset_top = 16.0
+offset_right = 616.0
+offset_bottom = 120.0
+
+[node name="VBox" type="VBoxContainer" parent="HUD/Panel"]
+layout_mode = 2
+
+[node name="Status" type="Label" parent="HUD/Panel/VBox"]
+layout_mode = 2
+text = "WebGPU XR smoke fixture"
+autowrap_mode = 3
+
+[node name="EnterVR" type="Button" parent="HUD/Panel/VBox"]
+layout_mode = 2
+text = "Enter VR"

@@ -104,6 +104,44 @@ Pixel readback findings (recorded 2026-07-08, the hard way):
   pattern check at the corner). Re-verify after driver changes to the
   presentation, upload, or draw paths.
 
+## Headset check (per-view stereo)
+
+The one gate no CI can run: an immersive session on a real headset through
+the WebGPU backend's one-pass-per-view stereo (patch 35) and, on Android XR
+browsers, the WebGL per-view blit (patch 49). `misc/webgpu_scripts/xr_fixture`
+is a minimal WebXR scene exported for exactly this: tracked camera, both
+controllers, shadowed and transparent geometry, a sky, and a Label3D frame
+counter. Export it from an editor built at the SAME commit as the template
+(the bake keys on the engine version hash):
+
+    GODOT_TINT_PATH=<tint> <editor> --path misc/webgpu_scripts/xr_fixture \
+        --export-release "Web" <out>/index.html \
+        --rendering-method mobile --rendering-driver vulkan
+
+(not headless - the baker needs a real RD renderer; on a GPU-less box use
+`xvfb-run -a` with lavapipe as CI does). The preset enables the shader
+baker, the WebXR export flag, gzip precompression, and the cross-origin
+isolation service worker, so any plain HTTPS static host serves it
+(Quest Browser needs HTTPS for WebXR). Then, in the headset:
+
+1. Page loads, console clean, HUD reads "immersive-vr is supported".
+2. Enter VR: the console prints `XR smoke: session started ... renderer_views=1`
+   on the WebGPU path (and on WebGL without multiview); `renderer_views=2`
+   means WebGL multiview took over - expected on Quest when the export fell
+   back to WebGL, not on WebGPU.
+3. Stereo: the box, pillar and glass sphere fuse at the right depth with
+   no eye swapped, offset or mirrored; look around and the head tracks.
+4. Both eyes show the SAME frame counter, and it keeps counting: a stale
+   or frozen number in one eye means a draw pass stopped rendering.
+5. Both controller cubes track; hand tracking (if granted) replaces them.
+6. Shadows under the box and pillar, sky in the background, the sphere
+   transparent - the lit, shadowed, transparent and sky paths all ran
+   per view.
+7. Leave the session and Enter VR again (the resume check): a second
+   session must render, not stay black.
+8. Console at the inert floor for the whole session (no per-frame errors,
+   no invalid command buffers).
+
 ## Size policy
 
 Brotli-compressed size is the user-facing number. Flag-off builds must not

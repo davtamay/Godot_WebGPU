@@ -1,0 +1,34 @@
+; Headset smoke fixture for the WebGPU stack's per-view stereo path.
+;
+; A minimal WebXR scene (tracked camera, both controllers, lit and shadowed
+; geometry, a transparent sphere, a sky, and a Label3D frame counter) exported
+; with the WebGPU driver, the shader baker and the WebXR export flag. It is
+; the in-headset check CI cannot run: serve the export over HTTPS, open it in
+; Quest Browser or an Android XR browser, press Enter VR, and walk the
+; checklist in docs/webgpu-testing.md ("Headset check").
+;
+;   GODOT_TINT_PATH=<tint> godot --path misc/webgpu_scripts/xr_fixture \
+;       --export-release "Web" <out>/index.html \
+;       --rendering-method mobile --rendering-driver vulkan
+;
+; The export must NOT be headless: the shader baker only runs under a real
+; RenderingDevice renderer (CI uses xvfb + lavapipe for the same reason).
+
+config_version=5
+
+[application]
+
+config/name="WebGPU XR smoke fixture"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.8")
+
+[rendering]
+
+renderer/rendering_method="mobile"
+renderer/rendering_method.web="mobile"
+rendering_device/driver.web="webgpu"
+anti_aliasing/quality/msaa_3d=2
+
+[xr]
+
+shaders/enabled=true
