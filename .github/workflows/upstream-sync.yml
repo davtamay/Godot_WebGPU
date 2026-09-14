@@ -1,6 +1,6 @@
 # Fork-local workflow for the WebGPU patch stack; not intended for upstream.
 #
-# Weekly upstream auto-rebase: fetches godotengine/godot master, replays the
+# Daily upstream auto-rebase: fetches godotengine/godot master, replays the
 # patch stack onto it, and - only when every patch applies cleanly and
 # check-stack passes - pushes the result to a dated auto-rebase/ candidate
 # branch (plus a backup tag of the pre-rebase head). The baseline workflow
@@ -8,6 +8,11 @@
 # automation: promotion stays a human step because CI cannot run the
 # local-only gates (tint bakes, strict pixel probe on a real GPU, in-headset
 # checks). Run misc/webgpu_scripts/promote-candidate.sh to promote.
+#
+# Daily rather than weekly because a conflict is cheapest the day it appears:
+# the replay costs two minutes, an upstream merge that breaks a patch is
+# reported the next morning instead of up to a week later, and the conflict
+# spans one day of upstream churn instead of seven.
 #
 # A faithful replay carries upstream's own .github/workflows/ updates, and the
 # token GitHub hands to a workflow run is never allowed to push those. Pushing
@@ -24,8 +29,10 @@
 #
 # Resilience measures:
 # - A conflicted rebase or failed verification opens/updates the tracking
-#   issue (label: upstream-sync) naming the failing patch; a fresh candidate
-#   updates the same issue with a promotion checklist.
+#   issue (label: upstream-sync) with the conflicting patch and files in the
+#   title, and repeats that line daily until the replay is clean again; a
+#   fresh candidate retitles the same issue and posts the promotion checklist
+#   once per transition, not once per day.
 # - GH_REPO pins every gh call to this fork. Once the upstream remote exists,
 #   gh's own remote ranking prefers a remote named "upstream", so unpinned
 #   calls resolve to godotengine/godot - which is where the reporting steps
@@ -35,7 +42,8 @@
 #   (a real rebase/verify failure still fails the run).
 # - The workflow re-enables itself every run (GitHub disables schedules
 #   after 60 days of repo inactivity).
-# - Old candidates/backup tags are pruned (newest 3 kept).
+# - Old candidates/backup tags are pruned (newest 7 kept: a week of daily
+#   candidates, so the one being promoted outlives the promotion).
 # - The Emscripten pin is diffed against upstream's web_builds.yml so pin
 #   drift is flagged before it becomes a mysterious build failure.
 
@@ -43,7 +51,7 @@ name: WebGPU stack - upstream sync
 
 on:
   schedule:
-    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+    - cron: "17 6 * * *" # daily, 06:17 UTC
   workflow_dispatch:
 
 permissions:
@@ -121,7 +129,11 @@ jobs:
           # head is what recovery wants.
           git tag -f "backup/auto-$STAMP" HEAD
           if ! git rebase upstream/master; then
-            echo "::error::Rebase conflicted on: $(git log -1 --format=%s REBASE_HEAD 2>/dev/null || echo '(unknown patch)')"
+            PATCH=$(git log -1 --format=%s REBASE_HEAD 2>/dev/null || echo '(unknown patch)')
+            FILES=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
+            echo "conflict_patch=$PATCH" >> "$GITHUB_OUTPUT"
+            echo "conflict_files=$FILES" >> "$GITHUB_OUTPUT"
+            echo "::error::Rebase conflicted on: $PATCH (files: $FILES)"
             git rebase --abort || true
             exit 1
           fi
@@ -149,13 +161,13 @@ jobs:
             echo "::warning::The replay is clean but the candidate branch could not be pushed. A rejection naming 'workflows permission' means upstream changed a file under .github/workflows/ and this run's default token may not push those - add the SYNC_PAT secret described in the workflow header to restore automatic candidates. Rebase locally in the meantime: the replay is deterministic and reproduces exactly."
           fi
 
-      - name: Prune old candidates and backup tags (keep newest 3)
+      - name: Prune old candidates and backup tags (keep newest 7)
         if: steps.fresh.outputs.count != '0' && steps.candidate.outputs.pushed == 'yes'
         run: |
-          git ls-remote --heads origin "auto-rebase/*" | awk '{print $2}' | sed 's|refs/heads/||' | sort | head -n -3 | while read -r b; do
+          git ls-remote --heads origin "auto-rebase/*" | awk '{print $2}' | sed 's|refs/heads/||' | sort | head -n -7 | while read -r b; do
             echo "pruning branch $b"; git push origin --delete "$b" || true
           done
-          git ls-remote --tags origin "backup/auto-*" | awk '{print $2}' | sed 's|refs/tags/||' | grep -v '\^{}' | sort | head -n -3 | while read -r t; do
+          git ls-remote --tags origin "backup/auto-*" | awk '{print $2}' | sed 's|refs/tags/||' | grep -v '\^{}' | sort | head -n -7 | while read -r t; do
             echo "pruning tag $t"; git push origin --delete "$t" || true
           done
 
@@ -177,24 +189,49 @@ jobs:
             L2="Rebase locally (\`git fetch upstream && git rebase upstream/master\`) and run the local gates. To restore automatic candidates, add the SYNC_PAT secret described in the workflow header."
           fi
           BODY=$(printf '%s\n\n%s\n\n%s' "$L1" "$L2" "$DRIFT")
+          TITLE="Upstream sync: candidate ready - auto-rebase/$STAMP"
           N=$(gh issue list --label upstream-sync --state open --json number --jq length 2>/dev/null || echo 0)
           if [ "$N" = "0" ]; then
-            gh issue create --title "Upstream sync: candidate ready" --label upstream-sync --body "$BODY" || echo "::warning::could not create the tracking issue (rebase result is unaffected)"
+            gh issue create --title "$TITLE" --label upstream-sync --body "$BODY" || echo "::warning::could not create the tracking issue (rebase result is unaffected)"
           else
             NUM=$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number' 2>/dev/null || echo "")
-            [ -n "$NUM" ] && gh issue comment "$NUM" --body "$BODY" || echo "::warning::could not update the tracking issue (rebase result is unaffected)"
+            OLD=$(gh issue view "$NUM" --json title --jq .title 2>/dev/null || echo "")
+            # A clean replay every day would otherwise post the same checklist
+            # daily: comment on the transition into "candidate ready" only, and
+            # keep the title pointing at the newest candidate.
+            case "$OLD" in
+              "Upstream sync: candidate ready"*) echo "already reporting a candidate; retitling to $STAMP only" ;;
+              *) [ -n "$NUM" ] && gh issue comment "$NUM" --body "$BODY" || echo "::warning::could not update the tracking issue (rebase result is unaffected)" ;;
+            esac
+            [ -n "$NUM" ] && gh issue edit "$NUM" --title "$TITLE" >/dev/null || true
           fi
 
       - name: Report failure
         if: failure()
         continue-on-error: true
+        env:
+          # Through env rather than inline so a patch subject with shell
+          # metacharacters cannot break the script.
+          CONFLICT_PATCH: ${{ steps.rebase.outputs.conflict_patch }}
+          CONFLICT_FILES: ${{ steps.rebase.outputs.conflict_files }}
+          DRIFT: ${{ steps.empin.outputs.drift }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          L1="The scheduled upstream rebase FAILED (run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}). Either a patch conflicted with new upstream changes or stack verification failed - see the log for the offending patch. The stack itself is untouched; resolve locally (backup tag was pushed if the rebase step ran)."
-          BODY=$(printf '%s\n\n%s' "$L1" "${{ steps.empin.outputs.drift }}")
+          TODAY=$(date -u +%Y-%m-%d)
+          if [ -n "$CONFLICT_PATCH" ]; then
+            TITLE="Upstream sync: conflict at $CONFLICT_PATCH"
+            L1="$TODAY: the rebase onto upstream master conflicted at \`$CONFLICT_PATCH\` in: \`${CONFLICT_FILES:-?}\` ([run]($RUN_URL))."
+          else
+            TITLE="Upstream sync: FAILED - needs manual rebase"
+            L1="$TODAY: the rebase FAILED outside the replay (stack verification or tooling) - see the [run]($RUN_URL)."
+          fi
+          L2="The stack itself is untouched; resolve locally (the backup tag was pushed if the rebase step ran). This runs daily and repeats the line above until a replay is clean, so an unresolved conflict never goes quiet."
+          BODY=$(printf '%s\n\n%s\n\n%s' "$L1" "$L2" "$DRIFT")
           N=$(gh issue list --label upstream-sync --state open --json number --jq length 2>/dev/null || echo 0)
           if [ "$N" = "0" ]; then
-            gh issue create --title "Upstream sync: FAILED - needs manual rebase" --label upstream-sync --body "$BODY" || echo "::warning::could not create the tracking issue"
+            gh issue create --title "$TITLE" --label upstream-sync --body "$BODY" || echo "::warning::could not create the tracking issue"
           else
             NUM=$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number' 2>/dev/null || echo "")
             [ -n "$NUM" ] && gh issue comment "$NUM" --body "$BODY" || echo "::warning::could not update the tracking issue"
+            [ -n "$NUM" ] && gh issue edit "$NUM" --title "$TITLE" >/dev/null || true
           fi
