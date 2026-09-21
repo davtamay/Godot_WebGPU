@@ -44,6 +44,7 @@ namespace GLES3 {
 class TextureStorage;
 }
 
+class WebXRCompositionLayer;
 class XRHandTracker;
 
 class WebXRInterfaceJS : public WebXRInterface {
@@ -123,6 +124,35 @@ private:
 	float frame_matrices[16 + 2 * 32] = {};
 	uint32_t frame_matrix_view_count = 0;
 
+	// Composition layers: each registered node's SubViewport renders into a
+	// layer texture the browser's compositor samples at display time. The
+	// node pushes its state from the scene side once per frame; pre_render()
+	// creates the browser layer, fetches this frame's texture and points the
+	// viewport's render target at it (the OpenXR composition layer pattern).
+	struct CompositionLayerState {
+		bool active = false;
+		int layer_type = 0;
+		float params[16] = {};
+		RID viewport;
+		Size2i size;
+		int js_id = 0;
+		Size2i js_size;
+		bool create_failed = false;
+		unsigned int generation = 0;
+		unsigned int own_generation = 0;
+		RBMap<unsigned int, RID> textures;
+		RID override_texture;
+		RID override_rt;
+	};
+	HashMap<WebXRCompositionLayer *, CompositionLayerState> composition_layers;
+	bool composition_layer_size_warned = false;
+	void _update_composition_layers();
+	void _set_composition_layer_override(CompositionLayerState &p_state, RID p_texture);
+	void _free_composition_layer_textures(CompositionLayerState &p_state);
+	void _free_composition_layer(CompositionLayerState &p_state);
+	RID _wrap_layer_texture(unsigned int p_handle, const Size2i &p_size);
+	void _free_layer_texture(RID p_texture);
+
 	RID _get_color_texture();
 	RID _get_depth_texture();
 	RID _get_texture(unsigned int p_texture_id);
@@ -188,6 +218,15 @@ public:
 	virtual RID get_velocity_texture() override;
 
 	virtual void process() override;
+	virtual void pre_render() override;
+
+	// Composition layer nodes register while in the tree and push their
+	// state every frame; supported means the session granted "layers".
+	void composition_layer_register(WebXRCompositionLayer *p_layer);
+	void composition_layer_unregister(WebXRCompositionLayer *p_layer);
+	void composition_layer_update(WebXRCompositionLayer *p_layer, bool p_active, const float *p_params, RID p_viewport, const Size2i &p_size);
+	bool composition_layers_supported() const;
+	void _on_session_state_changed();
 
 	void _on_input_event(int p_event_type, int p_input_source_id);
 

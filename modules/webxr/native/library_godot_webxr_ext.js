@@ -231,6 +231,284 @@ const GodotWebXRExt = {
 		return GodotWebXR.fixed_foveation;
 	},
 
+	// Composition layers (the WebXR Layers module): quad, cylinder and
+	// equirect layers the compositor samples at display time, each fed by a
+	// SubViewport through WebXRCompositionLayer nodes. The state lives here
+	// and reaches library_godot_webxr.js through Module['GodotWebXRLayers']
+	// at the two points that must know about it: the projection layer's
+	// render-state update and the session's end. Property names of the
+	// Layers API are accessed by string on purpose: the ones missing from
+	// webxr.externs.js would be renamed by the closure build.
+	$GodotWebXRLayers__deps: ['$GodotRuntime', '$GodotWebXR'],
+	$GodotWebXRLayers__postset: 'Module["GodotWebXRLayers"] = GodotWebXRLayers;',
+	$GodotWebXRLayers: {
+		layers: {},
+		next_id: 1,
+		dirty: false,
+		warned: {},
+
+		hasFeature: () => {
+			const session = GodotWebXR.session;
+			if (!session) {
+				return false;
+			}
+			if (session['enabledFeatures']) {
+				return Array.from(session['enabledFeatures']).includes('layers');
+			}
+			// A browser that does not report its features: the binding tells.
+			const binding = GodotWebXR.gpu_binding || GodotWebXR.gl_binding;
+			return !!(binding && binding['createQuadLayer']);
+		},
+
+		// Layers with a negative sort order sit behind the projection layer,
+		// the others in front; renderState.layers composites lowest index
+		// first.
+		compose: (projection) => {
+			const entries = Object.keys(GodotWebXRLayers.layers).map((id) => GodotWebXRLayers.layers[id]);
+			entries.sort((a, b) => a.sort_order - b.sort_order);
+			const result = [];
+			entries.forEach((e) => {
+				if (e.sort_order < 0) {
+					result.push(e.layer);
+				}
+			});
+			if (projection) {
+				result.push(projection);
+			}
+			entries.forEach((e) => {
+				if (e.sort_order >= 0) {
+					result.push(e.layer);
+				}
+			});
+			return result;
+		},
+
+		apply: () => {
+			GodotWebXRLayers.dirty = false;
+			if (!GodotWebXR.session) {
+				return;
+			}
+			GodotWebXR.session.updateRenderState({ layers: GodotWebXRLayers.compose(GodotWebXR.layer) });
+		},
+
+		readParams: (p_params) => {
+			const params = [];
+			for (let i = 0; i < 16; i++) {
+				params.push(GodotRuntime.getHeapValue(p_params + (i * 4), 'float'));
+			}
+			return params;
+		},
+
+		transformOf: (params) => new XRRigidTransform(
+			{ x: params[0], y: params[1], z: params[2], w: 1.0 },
+			{ x: params[3], y: params[4], z: params[5], w: params[6] }
+		),
+
+		// Shape values by layer type: quad [width, height], cylinder
+		// [radius, centralAngle, aspectRatio], equirect [radius,
+		// centralHorizontalAngle, upperVerticalAngle, lowerVerticalAngle].
+		shapeKeys: [
+			['width', 'height'],
+			['radius', 'centralAngle', 'aspectRatio'],
+			['radius', 'centralHorizontalAngle', 'upperVerticalAngle', 'lowerVerticalAngle'],
+		],
+
+		applyParams: (entry, params) => {
+			const layer = entry.layer;
+			const prev = entry.params;
+			let pose_changed = prev === null;
+			for (let i = 0; i < 7 && !pose_changed; i++) {
+				pose_changed = prev[i] !== params[i];
+			}
+			if (pose_changed) {
+				layer['transform'] = GodotWebXRLayers.transformOf(params);
+			}
+			const keys = GodotWebXRLayers.shapeKeys[entry.type];
+			for (let i = 0; i < keys.length; i++) {
+				if (prev === null || prev[7 + i] !== params[7 + i]) {
+					layer[keys[i]] = params[7 + i];
+				}
+			}
+			if (prev === null || prev[11] !== params[11]) {
+				layer['blendTextureSourceAlpha'] = params[11] > 0.5;
+			}
+			if ((prev === null || prev[12] !== params[12]) && 'opacity' in layer) {
+				layer['opacity'] = params[12];
+			}
+			const sort_order = Math.round(params[13]);
+			if (entry.sort_order !== sort_order) {
+				entry.sort_order = sort_order;
+				GodotWebXRLayers.dirty = true;
+			}
+			entry.params = params;
+		},
+
+		create: (type, params) => {
+			const binding = GodotWebXR.gpu_binding || GodotWebXR.gl_binding;
+			if (!binding || !GodotWebXR.space || !GodotWebXRLayers.hasFeature()) {
+				return 0;
+			}
+			const method = ['createQuadLayer', 'createCylinderLayer', 'createEquirectLayer'][type];
+			if (!method || typeof binding[method] !== 'function') {
+				if (!GodotWebXRLayers.warned[type]) {
+					GodotWebXRLayers.warned[type] = true;
+					GodotRuntime.error(`WebXR: this browser's XR binding has no ${method}(); the composition layer falls back to a mesh.`);
+				}
+				return 0;
+			}
+			const init = {
+				'space': GodotWebXR.space,
+				'viewPixelWidth': Math.max(1, Math.round(params[14])),
+				'viewPixelHeight': Math.max(1, Math.round(params[15])),
+				'layout': 'mono',
+				'transform': GodotWebXRLayers.transformOf(params),
+			};
+			if (GodotWebXR.gpu_binding) {
+				init['colorFormat'] = GodotWebXR.gpu_color_format;
+			}
+			const keys = GodotWebXRLayers.shapeKeys[type];
+			for (let i = 0; i < keys.length; i++) {
+				init[keys[i]] = params[7 + i];
+			}
+			let layer = null;
+			try {
+				layer = binding[method](init);
+			} catch (e) {
+				if (!GodotWebXRLayers.warned[type]) {
+					GodotWebXRLayers.warned[type] = true;
+					GodotRuntime.error(`WebXR: ${method}() failed: ${e}; the composition layer falls back to a mesh.`);
+				}
+				return 0;
+			}
+			if (!layer) {
+				return 0;
+			}
+			const id = GodotWebXRLayers.next_id++;
+			GodotWebXRLayers.layers[id] = {
+				layer,
+				type,
+				sort_order: Math.round(params[13]),
+				params: null,
+				generation: 0,
+			};
+			GodotWebXRLayers.applyParams(GodotWebXRLayers.layers[id], params);
+			GodotWebXRLayers.apply();
+			return id;
+		},
+
+		destroy: (id) => {
+			const entry = GodotWebXRLayers.layers[id];
+			if (!entry) {
+				return;
+			}
+			delete GodotWebXRLayers.layers[id];
+			try {
+				entry.layer['destroy']();
+			} catch (e) {
+				// Already gone with its session.
+			}
+			GodotWebXRLayers.dirty = true;
+		},
+
+		clear: () => {
+			Object.keys(GodotWebXRLayers.layers).forEach((id) => {
+				GodotWebXRLayers.destroy(id);
+			});
+			GodotWebXRLayers.dirty = false;
+		},
+	},
+
+	godot_webxr_layer_create__proxy: 'sync',
+	godot_webxr_layer_create__sig: 'iii',
+	godot_webxr_layer_create__deps: ['$GodotWebXRLayers'],
+	godot_webxr_layer_create: function (p_type, p_params) {
+		return GodotWebXRLayers.create(p_type, GodotWebXRLayers.readParams(p_params));
+	},
+
+	godot_webxr_layer_frame__proxy: 'sync',
+	godot_webxr_layer_frame__sig: 'iiii',
+	godot_webxr_layer_frame__deps: ['$GodotWebXRLayers'],
+	godot_webxr_layer_frame: function (p_id, p_params, r_info) {
+		// Applies this frame's pose and shape, then hands back the layer's
+		// texture for the frame: [projection layer generation, own
+		// generation, color handle, texture width, height, viewport x, y,
+		// width, height] in r_info (9 ints). Returns 0 when the layer has no
+		// texture to draw into this frame.
+		const entry = GodotWebXRLayers.layers[p_id];
+		const session = GodotWebXR.session;
+		const frame = GodotWebXR.frame;
+		if (!entry || !session || !frame) {
+			return 0;
+		}
+		GodotWebXRLayers.applyParams(entry, GodotWebXRLayers.readParams(p_params));
+		if (GodotWebXRLayers.dirty) {
+			GodotWebXRLayers.apply();
+		}
+		// The projection layer's sub-image comes first: on WebGPU sessions
+		// fetching it can clear the texture import table, which would orphan
+		// a handle imported before it.
+		if (GodotWebXR.getSubImage() === null) {
+			return 0;
+		}
+		// A layer handed to updateRenderState() joins the active render
+		// state on the next frame; asking for its sub-image before then is
+		// an error on strict browsers.
+		const active_layers = session['renderState']['layers'];
+		if (!active_layers || Array.prototype.indexOf.call(active_layers, entry.layer) < 0) {
+			return 0;
+		}
+		const binding = GodotWebXR.gpu_binding || GodotWebXR.gl_binding;
+		let subimage = null;
+		try {
+			subimage = binding['getSubImage'](entry.layer, frame);
+		} catch (e) {
+			return 0;
+		}
+		if (!subimage || !subimage['colorTexture']) {
+			return 0;
+		}
+		const texture = subimage['colorTexture'];
+		const handle = GodotWebXR.getTextureHandle(texture);
+		if (!handle) {
+			return 0;
+		}
+		let texture_width = 0;
+		let texture_height = 0;
+		if (GodotWebXR.gpu_binding) {
+			texture_width = texture['width'];
+			texture_height = texture['height'];
+		} else {
+			texture_width = subimage['textureWidth'];
+			texture_height = subimage['textureHeight'];
+		}
+		const viewport = subimage['viewport'];
+		const info = [
+			GodotWebXR.layer_generation,
+			entry.generation,
+			handle,
+			texture_width,
+			texture_height,
+			viewport ? viewport['x'] : 0,
+			viewport ? viewport['y'] : 0,
+			viewport ? viewport['width'] : texture_width,
+			viewport ? viewport['height'] : texture_height,
+		];
+		for (let i = 0; i < info.length; i++) {
+			GodotRuntime.setHeapValue(r_info + (i * 4), info[i], 'i32');
+		}
+		return 1;
+	},
+
+	godot_webxr_layer_free__proxy: 'sync',
+	godot_webxr_layer_free__sig: 'vi',
+	godot_webxr_layer_free__deps: ['$GodotWebXRLayers'],
+	godot_webxr_layer_free: function (p_id) {
+		GodotWebXRLayers.destroy(p_id);
+		if (GodotWebXRLayers.dirty) {
+			GodotWebXRLayers.apply();
+		}
+	},
+
 };
 
 autoAddDeps(GodotWebXRExt, '$GodotWebXR');

@@ -33,6 +33,7 @@
 #ifdef WEB_ENABLED
 
 #include "godot_webxr.h"
+#include "webxr_composition_layer.h"
 
 #include "core/input/input.h"
 #include "core/os/os.h"
@@ -44,6 +45,8 @@
 #include "scene/main/window.h"
 #include "scene/scene_string_names.h"
 #include "servers/display/display_server.h"
+#include "servers/rendering/rendering_server.h"
+#include "servers/rendering/rendering_server_globals.h"
 #include "servers/xr/xr_hand_tracker.h"
 
 #include <emscripten.h>
@@ -82,6 +85,7 @@ void _emwebxr_on_session_started(char *p_reference_space_type, char *p_enabled_f
 	interface->_set_reference_space_type(reference_space_type);
 	interface->_set_enabled_features(p_enabled_features);
 	interface->_set_environment_blend_mode(p_environment_blend_mode);
+	interface->_on_session_state_changed();
 	interface->emit_signal(SNAME("session_started"));
 }
 
@@ -453,6 +457,13 @@ void WebXRInterfaceJS::uninitialize() {
 
 		godot_webxr_uninitialize();
 
+		// Composition layers first: their render-target overrides point at
+		// wrappers freed below, and the browser destroyed the layers with the
+		// session.
+		for (KeyValue<WebXRCompositionLayer *, CompositionLayerState> &E : composition_layers) {
+			_free_composition_layer(E.value);
+		}
+
 #ifdef WEBGPU_ENABLED
 		if (RenderingDevice::get_singleton() != nullptr) {
 			_free_rd_layer_textures();
@@ -487,6 +498,7 @@ void WebXRInterfaceJS::uninitialize() {
 		enabled_features.clear();
 		environment_blend_mode = XRInterface::XR_ENV_BLEND_MODE_OPAQUE;
 		initialized = false;
+		_on_session_state_changed();
 	};
 }
 
@@ -1040,6 +1052,215 @@ RID WebXRInterfaceJS::get_velocity_texture() {
 	}
 
 	return _get_texture(texture_id);
+}
+
+void WebXRInterfaceJS::composition_layer_register(WebXRCompositionLayer *p_layer) {
+	ERR_FAIL_NULL(p_layer);
+	if (!composition_layers.has(p_layer)) {
+		composition_layers.insert(p_layer, CompositionLayerState());
+	}
+}
+
+void WebXRInterfaceJS::composition_layer_unregister(WebXRCompositionLayer *p_layer) {
+	CompositionLayerState *state = composition_layers.getptr(p_layer);
+	if (state == nullptr) {
+		return;
+	}
+	_free_composition_layer(*state);
+	composition_layers.erase(p_layer);
+}
+
+void WebXRInterfaceJS::composition_layer_update(WebXRCompositionLayer *p_layer, bool p_active, const float *p_params, RID p_viewport, const Size2i &p_size) {
+	CompositionLayerState *state = composition_layers.getptr(p_layer);
+	ERR_FAIL_NULL(state);
+	state->active = p_active;
+	state->layer_type = (int)p_layer->get_layer_type();
+	memcpy(state->params, p_params, sizeof(state->params));
+	state->viewport = p_viewport;
+	state->size = p_size;
+}
+
+bool WebXRInterfaceJS::composition_layers_supported() const {
+	if (!initialized || enabled_features.is_empty()) {
+		return false;
+	}
+	// The session-started callback joins the browser's enabledFeatures with
+	// commas; the Layers module reports itself as "layers".
+	const Vector<String> features = enabled_features.split(",");
+	for (const String &feature : features) {
+		if (feature.strip_edges() == "layers") {
+			return true;
+		}
+	}
+	return false;
+}
+
+void WebXRInterfaceJS::_on_session_state_changed() {
+	for (KeyValue<WebXRCompositionLayer *, CompositionLayerState> &E : composition_layers) {
+		E.key->session_state_changed();
+	}
+}
+
+void WebXRInterfaceJS::pre_render() {
+	if (initialized && !composition_layers.is_empty()) {
+		_update_composition_layers();
+	}
+}
+
+void WebXRInterfaceJS::_update_composition_layers() {
+	const bool supported = composition_layers_supported();
+	for (KeyValue<WebXRCompositionLayer *, CompositionLayerState> &E : composition_layers) {
+		CompositionLayerState &state = E.value;
+		const bool wanted = supported && state.active && state.viewport.is_valid() && state.size.width > 0 && state.size.height > 0;
+		if (!wanted) {
+			if (state.js_id != 0 || state.override_texture.is_valid()) {
+				_free_composition_layer(state);
+			}
+			state.create_failed = false;
+			continue;
+		}
+		if (state.js_id != 0 && state.js_size != state.size) {
+			// The layer's texture size is fixed at creation.
+			_free_composition_layer(state);
+		}
+		if (state.js_id == 0) {
+			if (state.create_failed) {
+				continue;
+			}
+			state.js_id = godot_webxr_layer_create(state.layer_type, state.params);
+			state.js_size = state.size;
+			if (state.js_id == 0) {
+				// The browser refused this layer kind; the JS side said why.
+				// Nothing to show until the node's state changes.
+				state.create_failed = true;
+				continue;
+			}
+		}
+
+		unsigned int info[9] = {};
+		if (!godot_webxr_layer_frame(state.js_id, state.params, info)) {
+			// No texture this frame: the layer joins the session's render
+			// state on the frame after it is handed over, or there is no
+			// pose yet. The viewport renders into its own target meanwhile.
+			_set_composition_layer_override(state, RID());
+			continue;
+		}
+		if (info[0] != state.generation || info[1] != state.own_generation) {
+			// The browser recreated its textures (a projection layer resize
+			// on WebGPU sessions clears the import table too); the cached
+			// wrappers point at textures that never come back.
+			_set_composition_layer_override(state, RID());
+			_free_composition_layer_textures(state);
+			state.generation = info[0];
+			state.own_generation = info[1];
+		}
+		RID texture;
+		RBMap<unsigned int, RID>::Element *cached = state.textures.find(info[2]);
+		if (cached != nullptr) {
+			texture = cached->get();
+		} else {
+			const Size2i texture_size((int)info[3], (int)info[4]);
+			texture = _wrap_layer_texture(info[2], texture_size);
+			if (texture.is_valid()) {
+				state.textures.insert(info[2], texture);
+			}
+			const bool full_viewport = info[5] == 0 && info[6] == 0 && (int)info[7] == texture_size.width && (int)info[8] == texture_size.height;
+			if ((texture_size != state.js_size || !full_viewport) && !composition_layer_size_warned) {
+				composition_layer_size_warned = true;
+				WARN_PRINT(vformat("WebXR composition layer texture is %dx%d with viewport (%d, %d, %d, %d) for a %dx%d SubViewport; the layer shows the viewport stretched over the texture.", texture_size.width, texture_size.height, info[5], info[6], info[7], info[8], state.js_size.width, state.js_size.height));
+			}
+		}
+		_set_composition_layer_override(state, texture);
+	}
+}
+
+void WebXRInterfaceJS::_set_composition_layer_override(CompositionLayerState &p_state, RID p_texture) {
+	if (p_state.override_texture == p_texture) {
+		return;
+	}
+	RID rt = p_state.override_rt;
+	if (p_texture.is_valid()) {
+		rt = RenderingServer::get_singleton()->viewport_get_render_target(p_state.viewport);
+	}
+	if (rt.is_valid()) {
+		RSG::texture_storage->render_target_set_override(rt, p_texture, RID(), RID(), RID());
+	}
+	p_state.override_texture = p_texture;
+	p_state.override_rt = p_texture.is_valid() ? rt : RID();
+}
+
+void WebXRInterfaceJS::_free_composition_layer_textures(CompositionLayerState &p_state) {
+	for (KeyValue<unsigned int, RID> &E : p_state.textures) {
+		_free_layer_texture(E.value);
+	}
+	p_state.textures.clear();
+}
+
+void WebXRInterfaceJS::_free_composition_layer(CompositionLayerState &p_state) {
+	// The override goes first: the render target must not keep a wrapper
+	// that is about to be freed.
+	_set_composition_layer_override(p_state, RID());
+	_free_composition_layer_textures(p_state);
+	if (p_state.js_id != 0) {
+		godot_webxr_layer_free(p_state.js_id);
+		p_state.js_id = 0;
+	}
+	p_state.js_size = Size2i();
+	p_state.generation = 0;
+	p_state.own_generation = 0;
+}
+
+RID WebXRInterfaceJS::_wrap_layer_texture(unsigned int p_handle, const Size2i &p_size) {
+	// One layer of one view, sized by the texture itself (same wrapping as
+	// _get_texture() for the eye buffer).
+#ifdef WEBGPU_ENABLED
+	RenderingDevice *rendering_device = RenderingDevice::get_singleton();
+	if (rendering_device != nullptr) {
+		return rendering_device->texture_create_from_extension(
+				RenderingDevice::TEXTURE_TYPE_2D,
+				_webxr_color_format_to_rd(),
+				RenderingDevice::TEXTURE_SAMPLES_1,
+				RenderingDevice::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT,
+				(uint64_t)p_handle,
+				(uint64_t)p_size.width,
+				(uint64_t)p_size.height,
+				1,
+				1,
+				1);
+	}
+#endif
+	GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
+	if (texture_storage == nullptr) {
+		return RID();
+	}
+	return texture_storage->texture_create_from_native_handle(
+			RSE::TEXTURE_TYPE_2D,
+			Image::FORMAT_RGBA8,
+			p_handle,
+			p_size.width,
+			p_size.height,
+			1,
+			1);
+}
+
+void WebXRInterfaceJS::_free_layer_texture(RID p_texture) {
+#ifdef WEBGPU_ENABLED
+	if (RenderingDevice::get_singleton() != nullptr) {
+		// The wrapper only; the texture belongs to the browser.
+		RenderingDevice::get_singleton()->free_rid(p_texture);
+		return;
+	}
+#endif
+	GLES3::TextureStorage *texture_storage = GLES3::TextureStorage::get_singleton();
+	if (texture_storage == nullptr) {
+		return;
+	}
+	GLES3::Texture *texture = texture_storage->get_texture(p_texture);
+	if (texture != nullptr) {
+		// Forcibly mark as not part of a render target so we can free it.
+		texture->is_render_target = false;
+	}
+	texture_storage->texture_free(p_texture);
 }
 
 void WebXRInterfaceJS::process() {

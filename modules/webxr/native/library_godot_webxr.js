@@ -245,7 +245,9 @@ const GodotWebXR = {
 				return null;
 			}
 			GodotWebXR.applyFixedFoveation(layer);
-			GodotWebXR.session.updateRenderState({ layers: [layer] });
+			// Composition layers (library_godot_webxr_ext.js) sort themselves
+			// around the projection layer.
+			GodotWebXR.session.updateRenderState({ layers: Module['GodotWebXRLayers'] ? Module['GodotWebXRLayers'].compose(layer) : [layer] });
 
 			GodotWebXR.layer = layer;
 			GodotWebXR.layer_generation++;
@@ -507,6 +509,9 @@ const GodotWebXR = {
 			GodotWebXR.reportDepthSensingMismatch(session, session_init);
 
 			session.addEventListener('end', function (evt) {
+				if (Module['GodotWebXRLayers']) {
+					Module['GodotWebXRLayers'].clear();
+				}
 				onended();
 			});
 
