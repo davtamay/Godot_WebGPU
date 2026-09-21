@@ -164,6 +164,7 @@
 | 155 | [shared] editor: Expose build-profile detection to tooling | A build profile is what makes a web export small - the engine drops every class the project never names - but detection was reachable only by clicking through the Customize Engine Build Configuration dialog. Since the profile is a compile-time contract with one project, a project that grows past it fails at load, so it has to be regenerated and re-verified, which a dialog cannot do. Two bindings expose the manager's own detection and its edited profile; the dialog is unchanged, and nothing runs unless a caller asks | 0 |
 | 156 | misc: Build the web template against a project build profile | One command detects the project's build profile through the editor's own detection, restores the few build options a web target needs whatever the project uses (rendering device, a renderer, the WebGL fallback), builds the template against it, then exports and boots the project to prove the profile still fits it - a stripped class the project needs reports itself when the scene loads. Measured on a 48-light gallery: 40.5 MB of wasm to 26.8, 7.11 MB brotli to 4.99, same pack, same frame, clean console. The profile is detected fresh every run because it goes stale as soon as the project grows | 0 |
 | 157 | [shared] xr: Narrow the camera to the active draw pass | Upstream's multi-layer projection camera (9d0b0a6738) has the camera node set the camera's projections and offsets once per frame from the main thread, and the renderer read those instead of asking the interface per view - which bypassed the per-view draw passes: both passes would have rendered whichever view was current when the node ran. XRInterface gains get_draw_pass_camera(), the viewport loop narrows the camera to the pass's view before drawing it, and the WebXR interface serves the new camera API through the same pass remap and frame-matrix cache the deprecated per-view getters used, with the near and far planes the node last asked for | 0 |
+| 158 | docs: Record the WebGPU-XR field position | Four engines now ship WebXR sessions rendered by WebGPU (three.js r185+, Babylon.js 9.21-9.25 experimental, PlayCanvas since May 2026, this stack), so claims of being the only one shipping foveation, depth on the GL path or WebGPU-backed stereo are stale; the coverage section gains a dated field-position paragraph that states what is unique to this stack (native engine with an editor, verified on Quest and Galaxy XR, the clustered renderer in a browser) and what nobody ships yet, so external claims draw from one maintained place | 0 |
 
 (Rows 53-61 pending backfill. Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
 experimental WebXR-WebGPU since April 2026. NOTE: upstream
@@ -196,6 +197,25 @@ browsers with no flags, from the same AOT-baked WGSL pipeline:
 
 Firefox (wgpu/naga) validates the same baked WGSL for boot, 2D, 3D,
 and compute.
+
+### Field position (as of 2026-09-20)
+
+Claims made about this stack should draw from this paragraph, which is
+kept current by the weekly landscape watch. WebXR sessions rendered by
+WebGPU (XRGPUBinding) ship in four engines: three.js (r185, with MSAA on
+the XR layer textures since r186), Babylon.js (9.21-9.25, experimental
+behind a flag until 10.0, including fixed foveation on projection layers
+and quad layers), PlayCanvas (per-view frame replay over a texture-array
+projection layer since May 2026, with a Vision Pro fix), and this stack.
+This stack is the only one of the four that is a native engine with an
+editor, the only one verified on both Quest and Galaxy XR, and the only
+one whose desktop-class clustered renderer runs in the browser; it is
+not the only engine with WebGPU-backed stereo, fixed foveation, or
+depth sensing on the GL path. Nobody yet ships depth sensing consumed
+on the WebGPU binding (no browser implements it), space warp on WebGPU,
+raw camera access on a headset browser, or session resume without a
+page reload. Unity 6.6 has WebGPU out of experimental with no WebXR;
+Meta's IWSDK is WebGL-only.
 
 ### Limitation ledger
 
