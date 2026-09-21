@@ -180,9 +180,11 @@ const GodotWebXR = {
 					// CPU depth: the GL render path does not consume the GPU
 					// texture, while cpu-optimized enables
 					// XRFrame.getDepthInformation() for script-side consumers.
-					// WebGPU sessions keep gpu-optimized first for the upcoming
-					// XRGPUBinding sensor-occlusion path.
-					usagePreference: use_webgpu_binding ? ['gpu-optimized', 'cpu-optimized'] : ['cpu-optimized', 'gpu-optimized'],
+					// cpu-optimized comes first on WebGPU sessions too: no
+					// browser serves XRGPUBinding.getDepthInformation() yet, so
+					// a gpu-first request on a browser that honors preferences
+					// only starves the script-side consumers that do work.
+					usagePreference: ['cpu-optimized', 'gpu-optimized'],
 					// luminance-alpha FIRST: it is the spec's guaranteed format
 					// (16-bit value packed L+A, storing millimeters) with a
 					// DOCUMENTED decode - raw = L + A*256, meters = raw *
