@@ -166,6 +166,7 @@
 | 157 | [shared] xr: Narrow the camera to the active draw pass | Upstream's multi-layer projection camera (9d0b0a6738) has the camera node set the camera's projections and offsets once per frame from the main thread, and the renderer read those instead of asking the interface per view - which bypassed the per-view draw passes: both passes would have rendered whichever view was current when the node ran. XRInterface gains get_draw_pass_camera(), the viewport loop narrows the camera to the pass's view before drawing it, and the WebXR interface serves the new camera API through the same pass remap and frame-matrix cache the deprecated per-view getters used, with the near and far planes the node last asked for | 0 |
 | 158 | docs: Record the WebGPU-XR field position | Four engines now ship WebXR sessions rendered by WebGPU (three.js r185+, Babylon.js 9.21-9.25 experimental, PlayCanvas since May 2026, this stack), so claims of being the only one shipping foveation, depth on the GL path or WebGPU-backed stereo are stale; the coverage section gains a dated field-position paragraph that states what is unique to this stack (native engine with an editor, verified on Quest and Galaxy XR, the clustered renderer in a browser) and what nobody ships yet, so external claims draw from one maintained place | 0 |
 | 159 | [shared] webxr: Prefer CPU depth on WebGPU sessions | The depth-sensing request asked WebGPU sessions for gpu-optimized depth first, reserving the XRGPUBinding sensor path that no browser implements yet; on a browser that honors the preference and grants only the first usage (Android XR) that starved the script-side consumers that do work, so a WebGPU session on Galaxy XR had no depth scan at all. Both session kinds now ask for cpu-optimized first; Quest ignores the preference either way | 1 |
+| 160 | docs: Record the immediates measurement | Chrome 150 ships push constants as immediates and the pinned Tint emits the immediate address space, so the push-constant ring became a choice; measured against the bake, the 64-byte cap excludes 21 of 87 push-constant blocks and render bundles bake immediate values (undoing patch 123's parameter-proof reuse), so the ring stays and the future-work list records why. The WebGPU-XR entry no longer reads as parked | 0 |
 
 (Rows 53-61 pending backfill. Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
 experimental WebXR-WebGPU since April 2026. NOTE: upstream
@@ -322,10 +323,25 @@ depends on them.
    frame on clustered (upstream behavior worth a dirty-check); render
    bundles (snapshot-style recording) remain the one technique peers
    ship that this backend lacks; MSAA 2x/8x still need a clamp to 4.
-8. **WebGPU-XR (parked).** The stereo per-view path works end to end on
-   Quest; re-entry is gated on browsers shedding the XRGPUBinding
-   frame-copy tax and the second-session resume bug (see the parked
-   notes in the project memory).
+8. **WebGPU-XR.** The stereo per-view path runs on Quest 3 and Galaxy
+   XR (patches 34-35, 49, 157) and is the shell's opt-in renderer chip;
+   WebGL stays the default while Quest Browser's XRGPUBinding copies
+   every frame (a measured frame-rate cost) and while re-entering a
+   session after ending one still needs a page reload there (patch 95
+   may have closed that; not yet re-tested on the device).
+9. **Immediates (measured, not adopted).** Chrome 150 ships push
+   constants as immediates (`setImmediates()` + `var<immediate>`), and
+   the pinned Tint already maps the PushConstant storage class to the
+   immediate address space, so the storage-buffer ring (patches 07-08
+   and 134) is now a choice rather than the only way. Measured against
+   this stack's bake: Dawn caps `maxImmediateSize` at 64 bytes on every
+   limit tier, and 21 of the 87 push-constant blocks are larger than
+   that, so a second path would be needed regardless; and render bundles
+   bake immediate values at record time, which would undo patch 123's
+   parameter-proof bundle reuse (draw parameters live outside the bundle
+   so that a change is a small write, not a rebuild). The ring stays.
+   Immediates are worth revisiting only for the paths that never bundle
+   (compute dispatches, one-off passes), or if the limit grows.
 
 ## Rules
 
