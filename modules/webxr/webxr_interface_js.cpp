@@ -326,31 +326,33 @@ uint32_t WebXRInterfaceJS::get_capabilities() const {
 	return XRInterface::XR_STEREO | XRInterface::XR_MONO | XRInterface::XR_VR | XRInterface::XR_AR;
 }
 
-uint32_t WebXRInterfaceJS::get_view_count() {
+bool WebXRInterfaceJS::_uses_per_view_passes() const {
 #ifdef WEBGPU_ENABLED
-	if (RenderingDevice::get_singleton() != nullptr) {
-		// No multiview on WebGPU: the renderer sees a single view and the
-		// viewport is drawn once per WebXR view instead (the active draw
-		// pass selects which view the "view 0" data comes from).
+	// The WebGPU backend never has multiview: WGSL cannot express it. GL
+	// stereo uses multiview, or the GLES3 emulation where the browser lacks
+	// the extension.
+	return RenderingDevice::get_singleton() != nullptr;
+#else
+	return false;
+#endif
+}
+
+uint32_t WebXRInterfaceJS::get_view_count() {
+	if (_uses_per_view_passes()) {
+		// The renderer sees a single view and the viewport is drawn once per
+		// WebXR view instead (the active draw pass selects which view the
+		// "view 0" data comes from).
 		return 1;
 	}
-#endif
 	return godot_webxr_get_view_count();
 }
 
 uint32_t WebXRInterfaceJS::get_draw_pass_count() {
-#ifdef WEBGPU_ENABLED
-	if (RenderingDevice::get_singleton() != nullptr) {
-		return godot_webxr_get_view_count();
-	}
-#endif
-	return 1;
+	return _uses_per_view_passes() ? godot_webxr_get_view_count() : 1;
 }
 
 void WebXRInterfaceJS::set_current_draw_pass(uint32_t p_pass) {
-#ifdef WEBGPU_ENABLED
 	current_draw_pass = p_pass;
-#endif
 }
 
 bool WebXRInterfaceJS::is_initialized() const {
@@ -653,12 +655,10 @@ Transform3D WebXRInterfaceJS::get_transform_for_view(uint32_t p_view, const Tran
 	ERR_FAIL_NULL_V(xr_server, p_cam_transform);
 	ERR_FAIL_COND_V(!initialized, p_cam_transform);
 
-#ifdef WEBGPU_ENABLED
-	if (RenderingDevice::get_singleton() != nullptr) {
+	if (_uses_per_view_passes()) {
 		// Per-view draw passes: view 0 of the active pass is the pass's view.
 		p_view += current_draw_pass;
 	}
-#endif
 	float js_matrix[16];
 	if (p_view < frame_matrix_view_count) {
 		memcpy(js_matrix, frame_matrices + 16 + p_view * 32, sizeof(js_matrix));
@@ -675,12 +675,10 @@ Transform3D WebXRInterfaceJS::get_transform_for_view(uint32_t p_view, const Tran
 }
 
 Projection WebXRInterfaceJS::get_projection_for_view(uint32_t p_view, double p_aspect, double p_z_near, double p_z_far) {
-#ifdef WEBGPU_ENABLED
-	if (RenderingDevice::get_singleton() != nullptr) {
+	if (_uses_per_view_passes()) {
 		// Per-view draw passes: view 0 of the active pass is the pass's view.
 		p_view += current_draw_pass;
 	}
-#endif
 	Projection view;
 
 	ERR_FAIL_COND_V(!initialized, view);
@@ -1021,7 +1019,6 @@ void WebXRInterfaceJS::_update_input_source(int p_input_source_id) {
 			xr_server->remove_tracker(input_source.tracker);
 			input_source.tracker.unref();
 		}
-#ifdef WEBGPU_ENABLED
 		if (p_input_source_id < 2 && hand_trackers[p_input_source_id].is_valid() && hand_trackers[p_input_source_id]->get_has_tracking_data()) {
 			// The browser dropped this hand's input source (it does so while
 			// the hand tracker re-acquires, e.g. at session start): without
@@ -1030,7 +1027,6 @@ void WebXRInterfaceJS::_update_input_source(int p_input_source_id) {
 			hand_trackers[p_input_source_id]->set_has_tracking_data(false);
 			hand_trackers[p_input_source_id]->invalidate_pose("default");
 		}
-#endif
 		return;
 	}
 
