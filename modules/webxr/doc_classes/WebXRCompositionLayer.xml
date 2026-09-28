@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="WebXRCompositionLayer" inherits="Node3D" api_type="core" experimental="" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		The parent class of all WebXR composition layer nodes.
+	</brief_description>
+	<description>
+		Composition layers allow 2D viewports to be displayed inside of the headset by the browser's XR compositor through special projections that retain their quality. This allows for rendering clear text while keeping the layer at a native resolution, and the layer is resampled by the compositor at display time instead of through the eye buffer.
+		This is the WebXR counterpart of the [OpenXRCompositionLayer] node family, built on the WebXR Layers module: the session must be requested with the [code]layers[/code] feature (add it to [member WebXRInterface.optional_features]). Layers are positioned in the session's reference space, so they follow the [XROrigin3D] like any other [Node3D].
+		[b]Note:[/b] Outside of a WebXR session, in the editor, and in sessions where the browser did not grant the [code]layers[/code] feature, a fallback mesh with a [ViewportTexture] is shown in the scene instead, in order to emulate the composition layer. On the WebGPU rendering driver the fallback uses a material built at runtime, which a web export cannot bake shaders for; a project that relies on the fallback there should reference an equivalent [StandardMaterial3D] resource from an exported scene so its shader is baked.
+		[b]Note:[/b] While the layer is composited natively, [member layer_viewport] renders straight into the browser's layer texture, which the rest of the scene cannot sample: a [ViewportTexture] of that viewport shows black. Content that must also appear in the scene itself needs its own [SubViewport].
+		[b]Note:[/b] Some browsers perform a longer system transition when a session requests the [code]layers[/code] feature.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="is_natively_supported" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if the active WebXR session supports composition layers, in which case the layer is rendered by the browser's compositor rather than the fallback mesh.
+				[b]Note:[/b] This will only return an accurate result after the WebXR session has started.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="alpha_blend" type="bool" setter="set_alpha_blend" getter="get_alpha_blend" default="false">
+			Enables the blending the layer using its alpha channel.
+			Can be combined with [member Viewport.transparent_bg] to give the layer a transparent background.
+		</member>
+		<member name="layer_viewport" type="SubViewport" setter="set_layer_viewport" getter="get_layer_viewport">
+			The [SubViewport] to render on the composition layer. Its [member SubViewport.render_target_update_mode] must not depend on visibility: a layer is submitted every frame, so the viewport is switched to [constant SubViewport.UPDATE_ALWAYS] when needed.
+		</member>
+		<member name="opacity" type="float" setter="set_opacity" getter="get_opacity" default="1.0">
+			The opacity of the layer, from [code]0.0[/code] (invisible) to [code]1.0[/code] (opaque).
+			[b]Note:[/b] This will have no effect if a fallback mesh is being used, or if the browser does not implement the layer opacity attribute.
+		</member>
+		<member name="sort_order" type="int" setter="set_sort_order" getter="get_sort_order" default="1">
+			The sort order for this composition layer. Higher numbers will be shown in front of lower numbers; layers with a negative value are composited behind what Godot renders.
+			[b]Note:[/b] This will have no effect if a fallback mesh is being used.
+		</member>
+	</members>
+</class>

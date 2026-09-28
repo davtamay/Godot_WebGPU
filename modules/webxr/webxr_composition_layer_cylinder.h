@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  register_types.cpp                                                    */
+/*  webxr_composition_layer_cylinder.h                                    */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -28,62 +28,35 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-#include "register_types.h"
+#pragma once
 
 #include "webxr_composition_layer.h"
-#include "webxr_composition_layer_cylinder.h"
-#include "webxr_composition_layer_equirect.h"
-#include "webxr_composition_layer_quad.h"
-#include "webxr_interface.h"
 
-#ifdef WEB_ENABLED
-#include "webxr_interface_js.h"
-#endif
+class WebXRCompositionLayerCylinder : public WebXRCompositionLayer {
+	GDCLASS(WebXRCompositionLayerCylinder, WebXRCompositionLayer);
 
-#include "core/object/class_db.h"
+	float radius = 1.0;
+	float aspect_ratio = 1.0;
+	float central_angle = Math::PI / 2.0;
+	uint32_t fallback_segments = 10;
 
-#ifdef WEB_ENABLED
-Ref<WebXRInterfaceJS> webxr;
-#endif
+protected:
+	static void _bind_methods();
 
-void initialize_webxr_module(ModuleInitializationLevel p_level) {
-	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
-		return;
-	}
+	virtual Ref<Mesh> _create_fallback_mesh() override;
+	virtual LayerType _get_layer_type() const override { return LAYER_TYPE_CYLINDER; }
+	virtual void _fill_shape_params(float *r_params) const override;
 
-	GDREGISTER_ABSTRACT_CLASS(WebXRInterface);
-	GDREGISTER_ABSTRACT_CLASS(WebXRCompositionLayer);
-	GDREGISTER_CLASS(WebXRCompositionLayerQuad);
-	GDREGISTER_CLASS(WebXRCompositionLayerCylinder);
-	GDREGISTER_CLASS(WebXRCompositionLayerEquirect);
+public:
+	void set_radius(float p_radius);
+	float get_radius() const;
 
-#ifdef WEB_ENABLED
-	if (XRServer::get_singleton()) {
-		webxr.instantiate();
-		XRServer::get_singleton()->add_interface(webxr);
-	}
-#endif
-}
+	void set_aspect_ratio(float p_aspect_ratio);
+	float get_aspect_ratio() const;
 
-void uninitialize_webxr_module(ModuleInitializationLevel p_level) {
-	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
-		return;
-	}
+	void set_central_angle(float p_angle);
+	float get_central_angle() const;
 
-#ifdef WEB_ENABLED
-	if (webxr.is_valid()) {
-		// uninitialize our interface if it is initialized
-		if (webxr->is_initialized()) {
-			webxr->uninitialize();
-		}
-
-		// unregister our interface from the XR server
-		if (XRServer::get_singleton()) {
-			XRServer::get_singleton()->remove_interface(webxr);
-		}
-
-		// and release
-		webxr.unref();
-	}
-#endif
-}
+	void set_fallback_segments(uint32_t p_fallback_segments);
+	uint32_t get_fallback_segments() const;
+};
