@@ -214,7 +214,9 @@ const GodotWebXR = {
 					colorFormat: GodotWebXR.gpu_color_format,
 				});
 				GodotWebXR.applyFixedFoveation(layer);
-				GodotWebXR.session.updateRenderState({ layers: [layer] });
+				// Composition layers (library_godot_webxr_ext.js) sort themselves
+				// around the projection layer.
+				GodotWebXR.session.updateRenderState({ layers: Module['GodotWebXRLayers'] ? Module['GodotWebXRLayers'].compose(layer) : [layer] });
 			} else {
 				const gl = GodotWebXR.gl;
 
@@ -234,7 +236,9 @@ const GodotWebXR = {
 						depthFormat: gl.DEPTH_COMPONENT24,
 					});
 					GodotWebXR.applyFixedFoveation(layer);
-					GodotWebXR.session.updateRenderState({ layers: [layer] });
+					// Composition layers (library_godot_webxr_ext.js) sort themselves
+					// around the projection layer.
+					GodotWebXR.session.updateRenderState({ layers: Module['GodotWebXRLayers'] ? Module['GodotWebXRLayers'].compose(layer) : [layer] });
 				}
 			}
 
@@ -708,6 +712,9 @@ const GodotWebXR = {
 			GodotWebXR.reportDepthSensingMismatch(session, session_init);
 
 			session.addEventListener('end', function (evt) {
+				if (Module['GodotWebXRLayers']) {
+					Module['GodotWebXRLayers'].clear();
+				}
 				onended();
 			});
 
