@@ -113,6 +113,14 @@ extern int godot_webxr_get_supported_frame_rates(float **r_frame_rates);
 extern void godot_webxr_set_fixed_foveation(float p_level);
 extern float godot_webxr_get_fixed_foveation();
 
+// Composition layers (the WebXR Layers module). p_params holds the 16
+// floats WebXRCompositionLayer::fill_params() writes; r_info receives
+// [layer generation, own generation, color handle, texture width, texture
+// height, viewport x, y, width, height].
+extern int godot_webxr_layer_create(int p_type, const float *p_params);
+extern int godot_webxr_layer_frame(int p_id, const float *p_params, unsigned int *r_info);
+extern void godot_webxr_layer_free(int p_id);
+
 #ifdef __cplusplus
 }
 #endif
