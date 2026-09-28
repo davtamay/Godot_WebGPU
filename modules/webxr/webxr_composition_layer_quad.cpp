@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  register_types.cpp                                                    */
+/*  webxr_composition_layer_quad.cpp                                      */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -28,62 +28,36 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-#include "register_types.h"
-
-#include "webxr_composition_layer.h"
-#include "webxr_composition_layer_cylinder.h"
-#include "webxr_composition_layer_equirect.h"
 #include "webxr_composition_layer_quad.h"
-#include "webxr_interface.h"
-
-#ifdef WEB_ENABLED
-#include "webxr_interface_js.h"
-#endif
 
 #include "core/object/class_db.h"
 
-#ifdef WEB_ENABLED
-Ref<WebXRInterfaceJS> webxr;
-#endif
+#include "scene/resources/3d/primitive_meshes.h"
 
-void initialize_webxr_module(ModuleInitializationLevel p_level) {
-	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
-		return;
-	}
+void WebXRCompositionLayerQuad::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("set_quad_size", "size"), &WebXRCompositionLayerQuad::set_quad_size);
+	ClassDB::bind_method(D_METHOD("get_quad_size"), &WebXRCompositionLayerQuad::get_quad_size);
 
-	GDREGISTER_ABSTRACT_CLASS(WebXRInterface);
-	GDREGISTER_ABSTRACT_CLASS(WebXRCompositionLayer);
-	GDREGISTER_CLASS(WebXRCompositionLayerQuad);
-	GDREGISTER_CLASS(WebXRCompositionLayerCylinder);
-	GDREGISTER_CLASS(WebXRCompositionLayerEquirect);
-
-#ifdef WEB_ENABLED
-	if (XRServer::get_singleton()) {
-		webxr.instantiate();
-		XRServer::get_singleton()->add_interface(webxr);
-	}
-#endif
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2, "quad_size", PROPERTY_HINT_NONE, ""), "set_quad_size", "get_quad_size");
 }
 
-void uninitialize_webxr_module(ModuleInitializationLevel p_level) {
-	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
-		return;
-	}
+Ref<Mesh> WebXRCompositionLayerQuad::_create_fallback_mesh() {
+	Ref<QuadMesh> mesh;
+	mesh.instantiate();
+	mesh->set_size(quad_size);
+	return mesh;
+}
 
-#ifdef WEB_ENABLED
-	if (webxr.is_valid()) {
-		// uninitialize our interface if it is initialized
-		if (webxr->is_initialized()) {
-			webxr->uninitialize();
-		}
+void WebXRCompositionLayerQuad::_fill_shape_params(float *r_params) const {
+	r_params[0] = quad_size.width;
+	r_params[1] = quad_size.height;
+}
 
-		// unregister our interface from the XR server
-		if (XRServer::get_singleton()) {
-			XRServer::get_singleton()->remove_interface(webxr);
-		}
+void WebXRCompositionLayerQuad::set_quad_size(const Size2 &p_size) {
+	quad_size = p_size;
+	update_fallback_mesh();
+}
 
-		// and release
-		webxr.unref();
-	}
-#endif
+Size2 WebXRCompositionLayerQuad::get_quad_size() const {
+	return quad_size;
 }
