@@ -159,6 +159,15 @@ const GodotWebXR = {
 				return null;
 			}
 
+			// A layer handed to updateRenderState() only joins the ACTIVE
+			// render state on the next animation frame; querying sub-images
+			// before that throws on strict implementations (Android XR),
+			// while others tolerate it. Present nothing until it is active.
+			const active_layers = GodotWebXR.session.renderState.layers;
+			if (!active_layers || active_layers.indexOf(layer) < 0) {
+				return null;
+			}
+
 			// Because we always use "texture-array" for multiview and "texture"
 			// when there is only 1 view, it should be safe to only grab the
 			// subimage for the first view.
