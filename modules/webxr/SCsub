@@ -6,6 +6,9 @@ Import("env_modules")
 
 if env["platform"] == "web":
     env.AddJSLibraries(["native/library_godot_webxr.js"])
+    # WebXR exports added by the WebGPU patch stack live in a sibling
+    # library, keeping the upstream file's diff to interleaved changes only.
+    env.AddJSLibraries(["native/library_godot_webxr_ext.js"])
     env.AddJSExterns(["native/webxr.externs.js"])
 
 env_webxr = env_modules.Clone()
