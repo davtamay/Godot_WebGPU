@@ -11,7 +11,13 @@ def configure(env):
 
 
 def get_doc_classes():
-    return ["WebXRInterface"]
+    return [
+        "WebXRCompositionLayer",
+        "WebXRCompositionLayerCylinder",
+        "WebXRCompositionLayerEquirect",
+        "WebXRCompositionLayerQuad",
+        "WebXRInterface",
+    ]
 
 
 def get_doc_path():

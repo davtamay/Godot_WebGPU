@@ -30,6 +30,10 @@
 
 #include "register_types.h"
 
+#include "webxr_composition_layer.h"
+#include "webxr_composition_layer_cylinder.h"
+#include "webxr_composition_layer_equirect.h"
+#include "webxr_composition_layer_quad.h"
 #include "webxr_interface.h"
 
 #ifdef WEB_ENABLED
@@ -48,6 +52,10 @@ void initialize_webxr_module(ModuleInitializationLevel p_level) {
 	}
 
 	GDREGISTER_ABSTRACT_CLASS(WebXRInterface);
+	GDREGISTER_ABSTRACT_CLASS(WebXRCompositionLayer);
+	GDREGISTER_CLASS(WebXRCompositionLayerQuad);
+	GDREGISTER_CLASS(WebXRCompositionLayerCylinder);
+	GDREGISTER_CLASS(WebXRCompositionLayerEquirect);
 
 #ifdef WEB_ENABLED
 	if (XRServer::get_singleton()) {
