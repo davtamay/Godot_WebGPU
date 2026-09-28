@@ -66,11 +66,14 @@ private:
 
 	Size2 render_targetsize;
 	RBMap<unsigned int, RID> texture_cache;
+	// True when the viewport is drawn once per view instead of once with
+	// multiview; the active draw pass then selects the view.
+	uint32_t current_draw_pass = 0;
+	bool _uses_per_view_passes() const;
 #ifdef WEBGPU_ENABLED
 	// Per-view slices of the wrapped layer texture, one per draw pass
 	// (freed before their owner in texture_cache).
 	RBMap<unsigned int, Vector<RID>> texture_slice_cache;
-	uint32_t current_draw_pass = 0;
 	uint32_t layer_generation = 0;
 	void _free_rd_layer_textures();
 	RID depth_sensing_texture;
