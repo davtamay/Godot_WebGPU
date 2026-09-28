@@ -68,6 +68,8 @@
 
 | 48 | [shared] webxr: Fetch all frame matrices in one thread crossing | The head transform and every view transform/projection each cost a synchronous worker-to-main crossing per call (~5 per stereo frame); process() now fetches them all in one call and the per-view getters read the cache (old calls kept as fallback for queries before the first frame). Quest-verified: tracking and eye alignment unchanged | ~27 library_godot_webxr.js, ~20 webxr_interface_js.cpp/.h, ~1 godot_webxr.h | not yet |
 
+| 49 | [shared] webxr: Query layer sub-images only once the layer is active | A layer handed to updateRenderState() joins the ACTIVE render state on the next animation frame. Android XR throws when a sub-image is queried before that, where other browsers tolerate it, so getSubImage() returns nothing until the layer is active. Originally this patch also rendered GL stereo one pass per view on browsers without WebGL multiview (Android XR); upstream godotengine/godot#120558 (GLES3 multiview emulation) and the no-Layers fallback replaced that part in September 2026 | modules/webxr | not yet |
+
 (Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
 experimental WebXR-WebGPU since April 2026. NOTE: upstream
 already compiles RenderingDevice + renderer_rd unconditionally on all
