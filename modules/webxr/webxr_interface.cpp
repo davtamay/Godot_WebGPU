@@ -57,8 +57,11 @@ void WebXRInterface::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_available_display_refresh_rates"), &WebXRInterface::get_available_display_refresh_rates);
 	ClassDB::bind_method(D_METHOD("get_fixed_foveation"), &WebXRInterface::get_fixed_foveation);
 	ClassDB::bind_method(D_METHOD("set_fixed_foveation", "level"), &WebXRInterface::set_fixed_foveation);
+	ClassDB::bind_method(D_METHOD("get_render_target_size_multiplier"), &WebXRInterface::get_render_target_size_multiplier);
+	ClassDB::bind_method(D_METHOD("set_render_target_size_multiplier", "multiplier"), &WebXRInterface::set_render_target_size_multiplier);
 
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "fixed_foveation", PROPERTY_HINT_RANGE, "0.0,1.0,0.01"), "set_fixed_foveation", "get_fixed_foveation");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "render_target_size_multiplier"), "set_render_target_size_multiplier", "get_render_target_size_multiplier");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "session_mode", PROPERTY_HINT_NONE), "set_session_mode", "get_session_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "required_features", PROPERTY_HINT_NONE), "set_required_features", "get_required_features");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "optional_features", PROPERTY_HINT_NONE), "set_optional_features", "get_optional_features");
