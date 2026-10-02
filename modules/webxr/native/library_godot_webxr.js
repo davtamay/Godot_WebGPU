@@ -62,6 +62,9 @@ const GodotWebXR = {
 		// compositor applies it when rendering the projection layer, so it
 		// costs the engine nothing; runtimes without support ignore it.
 		fixed_foveation: 0.0,
+		// Multiplier on the render size the browser recommends, read when a
+		// layer is created (1.0 = the recommended resolution).
+		render_target_size_multiplier: 1.0,
 		// A session granted through navigator.xr.offerSession(), held until
 		// the app's normal start path calls initialize() to consume it.
 		offered_session: null,
@@ -125,6 +128,15 @@ const GodotWebXR = {
 			if (layer && GodotWebXR.fixed_foveation > 0.0 && 'fixedFoveation' in layer) {
 				layer.fixedFoveation = GodotWebXR.fixed_foveation;
 			}
+		},
+
+		scaledLayerInit: (init, member) => {
+			// Name the scale only when one was requested, so sessions at the
+			// default hand the browser the dictionary they always did.
+			if (GodotWebXR.render_target_size_multiplier !== 1.0) {
+				init[member] = GodotWebXR.render_target_size_multiplier;
+			}
+			return init;
 		},
 
 		// Depth options are preferences: an unknown or renamed dictionary
@@ -210,9 +222,9 @@ const GodotWebXR = {
 				// The XRGPUBinding default layer shape is a texture array
 				// (one layer per view); passing an explicit textureType has
 				// produced broken sub-images on experimental implementations.
-				layer = GodotWebXR.gpu_binding.createProjectionLayer({
+				layer = GodotWebXR.gpu_binding.createProjectionLayer(GodotWebXR.scaledLayerInit({
 					colorFormat: GodotWebXR.gpu_color_format,
-				});
+				}, 'scaleFactor'));
 				GodotWebXR.applyFixedFoveation(layer);
 				// Composition layers (library_godot_webxr_ext.js) sort themselves
 				// around the projection layer.
@@ -221,20 +233,20 @@ const GodotWebXR = {
 				const gl = GodotWebXR.gl;
 
 				if (GodotWebXR.disable_webxr_layers) {
-					layer = new XRWebGLLayer(GodotWebXR.session, gl, {
+					layer = new XRWebGLLayer(GodotWebXR.session, gl, GodotWebXR.scaledLayerInit({
 						antialias: false,
-					});
+					}, 'framebufferScaleFactor'));
 					GodotWebXR.session.updateRenderState({ baseLayer: layer });
 				} else {
 					if (!GodotWebXR.gl_binding || !GodotWebXR.gl_binding.createProjectionLayer) {
 						return null;
 					}
 
-					layer = GodotWebXR.gl_binding.createProjectionLayer({
+					layer = GodotWebXR.gl_binding.createProjectionLayer(GodotWebXR.scaledLayerInit({
 						textureType: new_view_count > 1 ? 'texture-array' : 'texture',
 						colorFormat: gl.RGBA8,
 						depthFormat: gl.DEPTH_COMPONENT24,
-					});
+					}, 'scaleFactor'));
 					GodotWebXR.applyFixedFoveation(layer);
 					// Composition layers (library_godot_webxr_ext.js) sort themselves
 					// around the projection layer.
