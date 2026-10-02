@@ -284,6 +284,14 @@ void WebXRInterfaceJS::set_fixed_foveation(float p_level) {
 	godot_webxr_set_fixed_foveation(CLAMP(p_level, 0.0f, 1.0f));
 }
 
+float WebXRInterfaceJS::get_render_target_size_multiplier() const {
+	return godot_webxr_get_render_target_size_multiplier();
+}
+
+void WebXRInterfaceJS::set_render_target_size_multiplier(float p_multiplier) {
+	godot_webxr_set_render_target_size_multiplier(p_multiplier);
+}
+
 Array WebXRInterfaceJS::get_supported_environment_blend_modes() {
 	Array blend_modes;
 	// The blend mode can't be changed, so return the current blend mode as the only supported one.

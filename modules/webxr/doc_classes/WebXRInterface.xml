@@ -189,6 +189,10 @@
 			The reference space type (from the list of requested types set in the [member requested_reference_space_types] property), that was ultimately used by [method XRInterface.initialize] when setting up the WebXR session.
 			Possible values come from [url=https://developer.mozilla.org/en-US/docs/Web/API/XRReferenceSpaceType]WebXR's XRReferenceSpaceType[/url]. If you want to use a particular reference space type, it must be listed in either [member required_features] or [member optional_features].
 		</member>
+		<member name="render_target_size_multiplier" type="float" setter="set_render_target_size_multiplier" getter="get_render_target_size_multiplier">
+			A multiplier on the resolution the browser recommends for the session. Values below [code]1.0[/code] render fewer pixels, trading sharpness for frame time; values above [code]1.0[/code] render more, up to the device's native resolution (the browser clamps larger requests).
+			This is read when the session starts, so it doesn't have any effect on the interface when already initialized. Call [method XRInterface.get_render_target_size] after [signal session_started] to see the size in effect.
+		</member>
 		<member name="requested_reference_space_types" type="String" setter="set_requested_reference_space_types" getter="get_requested_reference_space_types">
 			A comma-seperated list of reference space types used by [method XRInterface.initialize] when setting up the WebXR session.
 			The reference space types are requested in order, and the first one supported by the user's device or browser will be used. The [member reference_space_type] property contains the reference space type that was ultimately selected.
