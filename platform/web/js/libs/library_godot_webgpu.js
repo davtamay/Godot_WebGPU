@@ -28,7 +28,7 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-/* global WebGPU, GodotWebGPUXR, _wgpuTextureRelease */ // WebGPU + _wgpuTextureRelease: emdawnwebgpu port; GodotWebGPUXR: emitted from the $-object below at link time.
+/* global WebGPU, GodotWebGPUXR, GodotWebGPULoss, _wgpuTextureRelease */ // WebGPU + _wgpuTextureRelease: emdawnwebgpu port; GodotWebGPUXR, GodotWebGPULoss: emitted from the $-objects below at link time.
 
 const GodotWebGPU = {
 	/**
@@ -92,7 +92,92 @@ const GodotWebGPU = {
 	 *
 	 * @returns {number} A WGPUDevice handle, or 0 if no device was stashed.
 	 */
-	godot_js_webgpu_device_import__deps: ['$WebGPU', '$GodotWebGPUXR'],
+	/**
+	 * Device loss, first step: every GPU object the engine holds dies with
+	 * the device and the driver has no rebuild path, so a lost device is
+	 * reported on the console and over the canvas, and the page reloads.
+	 * `?noreload` keeps the page up to read the report. A loss shortly
+	 * after a reload that followed a loss stops the chain and offers a
+	 * Reload button instead, so a GPU that fails at every start does not
+	 * reload the page forever. A `destroyed` loss is the page's own
+	 * device.destroy(), not a failure, and is ignored.
+	 */
+	$GodotWebGPULoss: {
+		RELOAD_DELAY_MS: 2000,
+		REPEAT_WINDOW_MS: 60000,
+		STORAGE_KEY: 'godot_webgpu_lost_at',
+
+		watch: function (device) {
+			const lost = device['lost'];
+			if (!lost || typeof lost.then !== 'function') {
+				return;
+			}
+			lost.then(function (info) {
+				const reason = (info && info['reason']) ? info['reason'] : 'unknown';
+				if (reason === 'destroyed') {
+					return;
+				}
+				const message = (info && info['message']) ? String(info['message']).replace(/\.\s*$/, '') : '';
+				GodotWebGPULoss.report(reason, message);
+			});
+		},
+
+		recentLoss: function () {
+			try {
+				const at = parseInt(window.sessionStorage.getItem(GodotWebGPULoss.STORAGE_KEY), 10);
+				return Number.isFinite(at) && (Date.now() - at) < GodotWebGPULoss.REPEAT_WINDOW_MS;
+			} catch (e) {
+				return false;
+			}
+		},
+
+		rememberLoss: function () {
+			try {
+				window.sessionStorage.setItem(GodotWebGPULoss.STORAGE_KEY, String(Date.now()));
+			} catch (e) {
+				// Storage blocked: no repeat guard, the page still reloads once.
+			}
+		},
+
+		report: function (reason, message) {
+			const text = 'WebGPU: the graphics device was lost (' + reason + ')' + (message ? ': ' + message : '');
+			console.error(text); // eslint-disable-line no-console
+			window['__godotWebGPULost'] = text;
+			const hold = window.location.search.indexOf('noreload') >= 0 || GodotWebGPULoss.recentLoss();
+			GodotWebGPULoss.overlay(hold ? text + '. Reload the page to continue.' : text + '. Reloading...', hold);
+			if (hold) {
+				return;
+			}
+			GodotWebGPULoss.rememberLoss();
+			window.setTimeout(function () {
+				window.location.reload();
+			}, GodotWebGPULoss.RELOAD_DELAY_MS);
+		},
+
+		overlay: function (text, withButton) {
+			if (document.getElementById('godot-webgpu-lost')) {
+				return;
+			}
+			const box = document.createElement('div');
+			box.id = 'godot-webgpu-lost';
+			box.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483647;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;background:rgba(0,0,0,0.85);color:#fff;font:16px/1.4 sans-serif;text-align:center;padding:24px;';
+			const label = document.createElement('div');
+			label.textContent = text;
+			box.appendChild(label);
+			if (withButton) {
+				const button = document.createElement('button');
+				button.textContent = 'Reload';
+				button.style.cssText = 'font:16px sans-serif;padding:8px 24px;';
+				button.onclick = function () {
+					window.location.reload();
+				};
+				box.appendChild(button);
+			}
+			document.body.appendChild(box);
+		},
+	},
+
+	godot_js_webgpu_device_import__deps: ['$WebGPU', '$GodotWebGPUXR', '$GodotWebGPULoss'],
 	godot_js_webgpu_device_import__sig: 'p',
 	godot_js_webgpu_device_import: function () {
 		const device = Module['preinitializedWebGPUDevice'];
@@ -124,6 +209,7 @@ const GodotWebGPU = {
 			};
 			context_class.prototype['__godot_null_guard'] = true;
 		}
+		GodotWebGPULoss.watch(device);
 		return WebGPU.importJsDevice(device);
 	},
 
