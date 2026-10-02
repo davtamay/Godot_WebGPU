@@ -42,7 +42,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             binary: out/tint
             asset: tint-linux-x86_64
           - os: windows-latest
@@ -50,7 +50,7 @@ jobs:
             asset: tint-windows-x86_64.exe
     steps:
       - name: Checkout Dawn (GitHub mirror)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: google/dawn
           ref: ${{ github.event.inputs.dawn_ref }}
@@ -124,7 +124,7 @@ jobs:
           echo "asset=${{ matrix.asset }}" >> "$GITHUB_OUTPUT"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset }}
           path: ${{ steps.bin.outputs.asset }}
