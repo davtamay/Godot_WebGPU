@@ -231,7 +231,21 @@ const GodotWebGPU = {
 	 */
 	godot_js_webgpu_use_bundles__sig: 'i',
 	godot_js_webgpu_use_bundles: function () {
-		return window.location.search.indexOf('nobundles') >= 0 ? 0 : 1;
+		const search = window.location.search;
+		if (search.indexOf('nobundles') >= 0) {
+			return 0;
+		}
+		// WebKit's WebGPU loses the dynamic offsets of a reused render bundle
+		// on replay (WebKit bug 325413, fixed on main 2026-09-27, not yet in
+		// a shipping Safari), which is exactly the cache this driver keeps.
+		// Bundles stay off on WebKit until the fix ships; ?bundles forces
+		// them on for checking a newer build.
+		const vendor = navigator.vendor || '';
+		if (vendor.indexOf('Apple') === 0 && search.indexOf('bundles') < 0) {
+			console.log('WebGPU: render bundles are off on WebKit (bug 325413); add ?bundles to the URL to force them on.'); // eslint-disable-line no-console
+			return 0;
+		}
+		return 1;
 	},
 
 	godot_js_webgpu_has_transient_attachments__sig: 'i',
