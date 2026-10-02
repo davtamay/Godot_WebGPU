@@ -185,6 +185,9 @@ public:
 	virtual float get_fixed_foveation() const override;
 	virtual void set_fixed_foveation(float p_level) override;
 
+	virtual float get_render_target_size_multiplier() const override;
+	virtual void set_render_target_size_multiplier(float p_multiplier) override;
+
 	virtual Array get_supported_environment_blend_modes() override;
 	virtual XRInterface::EnvironmentBlendMode get_environment_blend_mode() const override;
 	virtual bool set_environment_blend_mode(EnvironmentBlendMode p_new_environment_blend_mode) override;
