@@ -188,6 +188,21 @@ const GodotWebXRExt = {
 		return GodotWebXR.fixed_foveation;
 	},
 
+	godot_webxr_set_render_target_size_multiplier__proxy: 'sync',
+	godot_webxr_set_render_target_size_multiplier__sig: 'vf',
+	godot_webxr_set_render_target_size_multiplier: function (p_multiplier) {
+		// Read when the session's layer is created. The browser clamps the
+		// upper end to what the device supports; the floor keeps a stray
+		// zero from asking for an empty layer.
+		GodotWebXR.render_target_size_multiplier = Math.max(p_multiplier, 0.1);
+	},
+
+	godot_webxr_get_render_target_size_multiplier__proxy: 'sync',
+	godot_webxr_get_render_target_size_multiplier__sig: 'f',
+	godot_webxr_get_render_target_size_multiplier: function () {
+		return GodotWebXR.render_target_size_multiplier;
+	},
+
 	// Composition layers (the WebXR Layers module): quad, cylinder and
 	// equirect layers the compositor samples at display time, each fed by a
 	// SubViewport through WebXRCompositionLayer nodes. The state lives here

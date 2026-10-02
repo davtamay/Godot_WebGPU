@@ -80,6 +80,8 @@ public:
 	virtual Array get_available_display_refresh_rates() const = 0;
 	virtual float get_fixed_foveation() const = 0;
 	virtual void set_fixed_foveation(float p_level) = 0;
+	virtual float get_render_target_size_multiplier() const = 0;
+	virtual void set_render_target_size_multiplier(float p_multiplier) = 0;
 };
 
 VARIANT_ENUM_CAST(WebXRInterface::TargetRayMode);
