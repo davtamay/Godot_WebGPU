@@ -273,7 +273,15 @@ private:
 		// records after binding uniform sets.
 		const ShaderInfo *current_shader = nullptr;
 		UniformSetInfo *pending_bind_groups[MAX_BIND_GROUPS] = {};
-		LocalVector<uint32_t> pending_dynamic_offsets[MAX_BIND_GROUPS];
+		// Each dynamic offset remembers the (remapped) binding it belongs to:
+		// a pending set can outlive the shader it was bound for (nothing
+		// rebinds a set index the next shader's layout leaves empty), and only
+		// the offsets that layout declares may reach the encoder.
+		struct DynamicOffset {
+			uint32_t binding = 0;
+			uint32_t offset = 0;
+		};
+		LocalVector<DynamicOffset> pending_dynamic_offsets[MAX_BIND_GROUPS];
 		uint32_t push_constant_offset = 0;
 		// Per-set dirty bits plus a push-constant flag: at flush time only
 		// dirty sets (and, when the flag is up, sets whose layout carries the
@@ -380,8 +388,10 @@ private:
 		uint32_t set_index = 0;
 		HashMap<void *, WGPUBindGroup> layout_groups;
 		// Dynamic buffers in binding order; their offsets are decoded from
-		// the packed mask at bind time.
+		// the packed mask at bind time. The parallel binding list lets the
+		// flush drop offsets a different shader's layout does not declare.
 		LocalVector<BufferInfo *> dynamic_buffers;
+		LocalVector<uint32_t> dynamic_bindings;
 		// True when the group carries the push-constant ring buffer entry and
 		// therefore needs the current dynamic offset when bound.
 		bool has_push_constant_offset = false;
