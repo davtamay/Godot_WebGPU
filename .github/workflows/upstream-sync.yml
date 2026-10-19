@@ -23,9 +23,14 @@
 # build of it) on weeks when upstream touched a workflow file.
 #
 # Resilience measures:
-# - A conflicted rebase or failed verification opens/updates the tracking
-#   issue (label: upstream-sync) naming the failing patch; a fresh candidate
-#   updates the same issue with a promotion checklist.
+# - A conflicted rebase or failed verification opens/updates a FAILED issue
+#   (label: upstream-sync) naming the cause: the conflicting patch and files,
+#   or the commits whose subjects break the [wgpu NN] convention. A fresh
+#   candidate opens/updates a separate "candidate ready" issue with the
+#   promotion checklist and closes any open FAILED issue. The two never
+#   share an issue: a failure appended to good news reads as a footnote.
+# - The baseline workflow runs the subject and check-stack gates on every
+#   push, so a commit that would fail the next replay is reported at once.
 # - GH_REPO pins every gh call to this fork. Once the upstream remote exists,
 #   gh's own remote ranking prefers a remote named "upstream", so unpinned
 #   calls resolve to godotengine/godot - which is where the reporting steps
@@ -121,19 +126,33 @@ jobs:
           # head is what recovery wants.
           git tag -f "backup/auto-$STAMP" HEAD
           if ! git rebase upstream/master; then
-            echo "::error::Rebase conflicted on: $(git log -1 --format=%s REBASE_HEAD 2>/dev/null || echo '(unknown patch)')"
+            PATCH=$(git log -1 --format=%s REBASE_HEAD 2>/dev/null || echo '(unknown patch)')
+            FILES=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
+            echo "::error::Rebase conflicted on: $PATCH (files: $FILES)"
+            echo "cause=Patch '$PATCH' conflicted on: $FILES" >> "$GITHUB_OUTPUT"
             git rebase --abort || true
             exit 1
           fi
 
+      # The same two checks run on every push in the baseline workflow's
+      # check-stack job, so a commit that breaks them is reported within
+      # minutes of landing rather than at the next scheduled replay.
       - name: Verify stack integrity
         if: steps.fresh.outputs.count != '0'
+        id: verify
         run: |
           PATCHES=$(git log --oneline upstream/master..HEAD | wc -l)
-          STRAYS=$(git log --format=%s upstream/master..HEAD | grep -cv "^\[wgpu " || true)
-          echo "Patches: $PATCHES, non-[wgpu] subjects: $STRAYS"
-          test "$STRAYS" = "0"
-          bash misc/webgpu_scripts/check-stack.sh
+          STRAYS=$(git log --format=%s upstream/master..HEAD | grep -v "^\[wgpu " || true)
+          echo "Patches: $PATCHES"
+          if [ -n "$STRAYS" ]; then
+            echo "::error::commit(s) without a [wgpu NN] subject on the stack: $STRAYS"
+            echo "cause=Commit(s) without a [wgpu NN] subject on webgpu-stack (reword or fold them before the next replay): $(echo "$STRAYS" | tr '\n' ';')" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          if ! bash misc/webgpu_scripts/check-stack.sh; then
+            echo "cause=check-stack.sh failed after a clean replay - see the run log for the offending patch and file." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
 
       - name: Push candidate branch and backup tag
         id: candidate
@@ -177,24 +196,34 @@ jobs:
             L2="Rebase locally (\`git fetch upstream && git rebase upstream/master\`) and run the local gates. To restore automatic candidates, add the SYNC_PAT secret described in the workflow header."
           fi
           BODY=$(printf '%s\n\n%s\n\n%s' "$L1" "$L2" "$DRIFT")
-          N=$(gh issue list --label upstream-sync --state open --json number --jq length 2>/dev/null || echo 0)
-          if [ "$N" = "0" ]; then
+          # Each outcome has its own issue: a failure is never appended to an
+          # open "candidate ready" issue, where it reads as a footnote on
+          # good news and goes unnoticed (two failures did, in October 2026).
+          NUM=$(gh issue list --label upstream-sync --state open --json number,title --jq '[.[] | select(.title | startswith("Upstream sync: candidate ready"))] | .[0].number // empty' 2>/dev/null || echo "")
+          if [ -z "$NUM" ]; then
             gh issue create --title "Upstream sync: candidate ready" --label upstream-sync --body "$BODY" || echo "::warning::could not create the tracking issue (rebase result is unaffected)"
           else
-            NUM=$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number' 2>/dev/null || echo "")
-            [ -n "$NUM" ] && gh issue comment "$NUM" --body "$BODY" || echo "::warning::could not update the tracking issue (rebase result is unaffected)"
+            gh issue comment "$NUM" --body "$BODY" || echo "::warning::could not update the tracking issue (rebase result is unaffected)"
           fi
+          # A clean replay resolves whatever the open failure issue reported.
+          for F in $(gh issue list --label upstream-sync --state open --json number,title --jq '.[] | select(.title | startswith("Upstream sync: FAILED")) | .number' 2>/dev/null); do
+            gh issue close "$F" --comment "Resolved: the $STAMP replay is clean (see the candidate-ready issue)." || true
+          done
 
       - name: Report failure
         if: failure()
         continue-on-error: true
+        # The cause quotes commit subjects; it reaches the shell through the
+        # environment, never through an inline expression, so it is text.
+        env:
+          CAUSE: ${{ steps.rebase.outputs.cause || steps.verify.outputs.cause || 'Cause not captured - see the run log.' }}
+          DRIFT: ${{ steps.empin.outputs.drift }}
         run: |
-          L1="The scheduled upstream rebase FAILED (run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}). Either a patch conflicted with new upstream changes or stack verification failed - see the log for the offending patch. The stack itself is untouched; resolve locally (backup tag was pushed if the rebase step ran)."
-          BODY=$(printf '%s\n\n%s' "$L1" "${{ steps.empin.outputs.drift }}")
-          N=$(gh issue list --label upstream-sync --state open --json number --jq length 2>/dev/null || echo 0)
-          if [ "$N" = "0" ]; then
+          L1="The scheduled upstream rebase FAILED (run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}). The stack itself is untouched; resolve locally (backup tag was pushed if the rebase step ran)."
+          BODY=$(printf '%s\n\n**Cause:** %s\n\n%s' "$L1" "$CAUSE" "$DRIFT")
+          NUM=$(gh issue list --label upstream-sync --state open --json number,title --jq '[.[] | select(.title | startswith("Upstream sync: FAILED"))] | .[0].number // empty' 2>/dev/null || echo "")
+          if [ -z "$NUM" ]; then
             gh issue create --title "Upstream sync: FAILED - needs manual rebase" --label upstream-sync --body "$BODY" || echo "::warning::could not create the tracking issue"
           else
-            NUM=$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number' 2>/dev/null || echo "")
-            [ -n "$NUM" ] && gh issue comment "$NUM" --body "$BODY" || echo "::warning::could not update the tracking issue"
+            gh issue comment "$NUM" --body "$BODY" || echo "::warning::could not update the tracking issue"
           fi
