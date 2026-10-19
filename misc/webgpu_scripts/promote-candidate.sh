@@ -40,6 +40,14 @@ if [ "$LOCAL_SUBJECTS" != "$CAND_SUBJECTS" ]; then
 	echo "workflow (workflow_dispatch) to get a fresh candidate." >&2
 	exit 1
 fi
+# The sync's verify step refuses a stack with any other subject shape, so a
+# hotfix committed outside the convention blocks every replay after it.
+STRAYS=$(printf '%s\n' "$CAND_SUBJECTS" | grep -v '^\[wgpu ' || true)
+if [ -n "$STRAYS" ]; then
+	echo "refusing: commit(s) without a [wgpu NN] subject:" >&2
+	echo "$STRAYS" >&2
+	exit 1
+fi
 
 BACKUP="backup/stack-$(date +%Y%m%d-%H%M)"
 git branch "$BACKUP" HEAD
