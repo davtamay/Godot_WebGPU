@@ -4206,6 +4206,7 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_uniform_set_build(VectorView<BoundUn
 				entry.size = buffer->slice_size;
 				if (p_bookkeeping != nullptr) {
 					p_bookkeeping->dynamic_buffers.push_back(buffer);
+					p_bookkeeping->dynamic_bindings.push_back(remapped_binding);
 				}
 			} break;
 			case UNIFORM_TYPE_SAMPLER_WITH_TEXTURE: {
@@ -4322,14 +4323,23 @@ void RenderingDeviceDriverWebGPU::_flush_bind_groups(CommandBufferInfo *p_cb_inf
 	const ShaderInfo *shader = p_cb_info->current_shader;
 	for (uint32_t i = 0; i < shader->bind_group_layouts.size() && i < MAX_BIND_GROUPS; i++) {
 		UniformSetInfo *set = p_cb_info->pending_bind_groups[i];
-		// Skip clean sets: a moved push-constant offset only re-binds sets
-		// whose layout actually carries the ring entry.
-		const bool wants_push_constant = set != nullptr ? set->has_push_constant_offset : true;
+		// The shader's layout decides what the group needs, not the set: a set
+		// left pending by an earlier draw list may have been bound for another
+		// shader, and the engine never rebinds an index this layout leaves
+		// empty. Skip clean sets: a moved push-constant offset only re-binds
+		// sets whose layout actually carries the ring entry.
+		const bool layout_known = i < shader->layout_bindings.size();
+		const bool wants_push_constant = layout_known ? shader->layout_bindings[i].has(uint32_t(RenderingShaderContainerWebGPU::PUSH_CONSTANT_BINDING)) : (set == nullptr);
 		if ((p_cb_info->bind_group_dirty_mask & (1u << i)) == 0 && !(p_cb_info->push_constant_dirty && wants_push_constant)) {
 			continue;
 		}
 		WGPUBindGroup bind_group = nullptr;
 		if (set != nullptr) {
+			if (wants_push_constant) {
+				// A group built for this layout carries the ring entry, so the
+				// set must follow ring replacements from now on.
+				set->has_push_constant_offset = true;
+			}
 			if (unlikely(set->has_push_constant_offset && set->push_constant_epoch != push_constant_epoch)) {
 				// Built against a ring buffer that has since been replaced.
 				for (const KeyValue<void *, WGPUBindGroup> &kv : set->layout_groups) {
@@ -4366,9 +4376,14 @@ void RenderingDeviceDriverWebGPU::_flush_bind_groups(CommandBufferInfo *p_cb_inf
 		// indices packed into the caller's 32-bit mask) plus the ring entry.
 		uint32_t offsets[9];
 		uint32_t offset_count = 0;
-		for (const uint32_t offset : p_cb_info->pending_dynamic_offsets[i]) {
+		for (const CommandBufferInfo::DynamicOffset &dynamic_offset : p_cb_info->pending_dynamic_offsets[i]) {
+			if (layout_known && !shader->layout_bindings[i].has(dynamic_offset.binding)) {
+				// No entry for this buffer in the layout, so no offset either
+				// (dead-stripped by the variant, or a leftover set).
+				continue;
+			}
 			DEV_ASSERT(offset_count < 8);
-			offsets[offset_count++] = offset;
+			offsets[offset_count++] = dynamic_offset.offset;
 		}
 		if (wants_push_constant) {
 			offsets[offset_count++] = p_cb_info->push_constant_offset;
@@ -4436,10 +4451,13 @@ void RenderingDeviceDriverWebGPU::command_bind_render_uniform_sets(CommandBuffer
 		cb_info->pending_bind_groups[set_index] = uniform_set;
 		cb_info->bind_group_dirty_mask |= uint8_t(1u << set_index);
 		cb_info->pending_dynamic_offsets[set_index].clear();
-		for (const BufferInfo *dynamic_buffer : uniform_set->dynamic_buffers) {
+		for (uint32_t j = 0; j < uniform_set->dynamic_buffers.size(); j++) {
 			const uint32_t frame_idx = (p_dynamic_offsets >> shift) & 0xFu;
 			shift += 4u;
-			cb_info->pending_dynamic_offsets[set_index].push_back(uint32_t(frame_idx * dynamic_buffer->slice_stride));
+			CommandBufferInfo::DynamicOffset dynamic_offset;
+			dynamic_offset.binding = uniform_set->dynamic_bindings[j];
+			dynamic_offset.offset = uint32_t(frame_idx * uniform_set->dynamic_buffers[j]->slice_stride);
+			cb_info->pending_dynamic_offsets[set_index].push_back(dynamic_offset);
 		}
 	}
 }
