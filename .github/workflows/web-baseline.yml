@@ -25,7 +25,7 @@ env:
     dev_mode=yes
     debug_symbols=no
     use_closure_compiler=yes
-  EM_VERSION: 6.0.1
+  EM_VERSION: 6.0.12
 
 jobs:
   web-template:
@@ -156,7 +156,7 @@ jobs:
         run: |
           # Published by the tint-builder workflow, pinned BY TAG: the newer
           # tint built from Dawn v20260423 (the ref emsdk 6.0.1's emdawnwebgpu
-          # port pairs with) replaced the spirv-reader with a stricter IR
+          # port paired with) replaced the spirv-reader with a stricter IR
           # reader that still refuses ~76 of the mobile renderer's variants
           # (depth-image sampled-type mismatches, write-only SSBOs, an
           # atomic-inference crash, MS sampled images). The failure map and
