@@ -223,6 +223,10 @@ jobs:
           path: ${{ env.SCONS_CACHE }}
           key: linux-editor-${{ runner.os }}-${{ github.sha }}
 
+  # The checks the upstream-sync workflow runs after a replay, run on every
+  # push instead, so a commit that would block the next Monday replay is
+  # reported within minutes of landing (one blocked two syncs in a row in
+  # October 2026 before anyone noticed).
   check-stack:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -233,10 +237,26 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Full history, not a depth: the range upstream/master..HEAD is only the
+      # stack when the merge-base is present, and a shallow fetch stops short
+      # of it as soon as upstream is further ahead than the depth (475 commits
+      # in October 2026 against a depth of 200), which turns the range into
+      # all of Godot's history.
       - name: Fetch upstream base
         run: |
           git remote add upstream https://github.com/godotengine/godot.git
-          git fetch upstream master --depth=200
+          git fetch --no-tags upstream master
+
+      # webgpu-dev is exempt by design: it holds what the stack rules exclude.
+      - name: Every stack commit carries a [wgpu NN] subject
+        if: github.ref == 'refs/heads/webgpu-stack' || startsWith(github.ref, 'refs/heads/auto-rebase/')
+        run: |
+          STRAYS=$(git log --format=%s upstream/master..HEAD | grep -v "^\[wgpu " || true)
+          if [ -n "$STRAYS" ]; then
+            echo "::error::commit(s) without a [wgpu NN] subject - the next upstream replay will refuse the stack: $STRAYS"
+            exit 1
+          fi
+          echo "$(git rev-list --count upstream/master..HEAD) patch(es), all [wgpu NN]"
 
       - name: Check patch boundaries
         run: bash misc/webgpu_scripts/check-stack.sh
