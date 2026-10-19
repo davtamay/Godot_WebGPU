@@ -31,6 +31,9 @@
 #   share an issue: a failure appended to good news reads as a footnote.
 # - The baseline workflow runs the subject and check-stack gates on every
 #   push, so a commit that would fail the next replay is reported at once.
+# - A candidate left unpromoted for a week is called out in the next run's
+#   report, in the issue title and at the top of the comment. The human
+#   side of all of this is docs/webgpu-sync-protocol.md.
 # - GH_REPO pins every gh call to this fork. Once the upstream remote exists,
 #   gh's own remote ranking prefers a remote named "upstream", so unpinned
 #   calls resolve to godotengine/godot - which is where the reporting steps
@@ -200,6 +203,18 @@ jobs:
           # open "candidate ready" issue, where it reads as a footnote on
           # good news and goes unnoticed (two failures did, in October 2026).
           NUM=$(gh issue list --label upstream-sync --state open --json number,title --jq '[.[] | select(.title | startswith("Upstream sync: candidate ready"))] | .[0].number // empty' 2>/dev/null || echo "")
+          # A candidate is useful for one week. When the open candidate-ready
+          # issue is older than that, say so where it is read first (the title
+          # and the top of the comment), so an unpromoted candidate stops being
+          # a footnote under good news. See docs/webgpu-sync-protocol.md.
+          if [ -n "$NUM" ]; then
+            AGE=$(gh issue view "$NUM" --json createdAt --jq '((now - (.createdAt | fromdateiso8601)) / 86400) | floor' 2>/dev/null || echo 0)
+            if [ "${AGE:-0}" -ge 7 ]; then
+              STALE="**Unpromoted for $AGE days.** The previous candidate was never promoted and this one replaces it; every week of drift makes the next hand rebase larger. Promote this week."
+              BODY=$(printf '%s\n\n%s' "$STALE" "$BODY")
+              gh issue edit "$NUM" --title "Upstream sync: candidate ready (unpromoted for $AGE days)" || true
+            fi
+          fi
           if [ -z "$NUM" ]; then
             gh issue create --title "Upstream sync: candidate ready" --label upstream-sync --body "$BODY" || echo "::warning::could not create the tracking issue (rebase result is unaffected)"
           else
