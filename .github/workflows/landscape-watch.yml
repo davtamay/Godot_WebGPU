@@ -1,0 +1,59 @@
+# Fork-local workflow for the WebGPU patch stack; not intended for upstream.
+#
+# The Monday landscape routine files one 'landscape-watch' issue per week and
+# docs/webgpu-sync-protocol.md forbids it from touching any other issue, so
+# the reports accumulated: eight were open on 2026-10-22 and the week's sync
+# result was hard to find among them. This workflow keeps exactly one
+# landscape report open. When a landscape-watch issue is opened (or labeled)
+# it closes every older open issue carrying that label and leaves a pointer
+# to the newer one, so the open list reads: the current report plus the sync
+# robot's current issue, nothing else. Closed reports keep their content;
+# anything still relevant is expected to be carried forward in the new one.
+#
+# A manual dispatch runs the same sweep (the newest open report is kept),
+# which is how the backlog was cleared the first time.
+#
+# GH_REPO pins gh to this fork for the same reason the sync workflow does.
+
+name: WebGPU stack - landscape watch issues
+
+on:
+  issues:
+    types: [opened, labeled]
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+concurrency:
+  group: landscape-watch-issues
+  cancel-in-progress: false
+
+jobs:
+  supersede:
+    name: Close older landscape reports
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.issue.labels.*.name, 'landscape-watch')
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Supersede older open landscape-watch issues
+        run: |
+          set -euo pipefail
+          # The newest open report wins: on an issue event that is the issue
+          # that fired, on a manual dispatch it is the highest number.
+          OPEN=$(gh issue list --label landscape-watch --state open --limit 200 --json number --jq 'map(.number) | sort | .[]')
+          if [ -z "$OPEN" ]; then
+            echo "No open landscape-watch issue; nothing to do."
+            exit 0
+          fi
+          KEEP=$(echo "$OPEN" | tail -n 1)
+          CLOSED=0
+          for N in $OPEN; do
+            [ "$N" -lt "$KEEP" ] || continue
+            gh issue close "$N" --comment "Superseded by #$KEEP, the newer landscape report. Anything from this one that is still open is expected to be carried forward there."
+            echo "Closed #$N (superseded by #$KEEP)."
+            CLOSED=$((CLOSED + 1))
+          done
+          echo "Kept #$KEEP open; closed $CLOSED older report(s)."
