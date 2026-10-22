@@ -11,6 +11,7 @@ rules.
 |---|---|---|
 | `upstream-sync.yml` (Mondays 06:17 UTC, or dispatched by hand) | Replays the stack from `origin/webgpu-stack` onto upstream master; on a clean replay pushes `auto-rebase/<date>` and tag `backup/auto-<date>`; files or updates the `upstream-sync` issues | Touches `webgpu-stack` |
 | The landscape routine (Mondays 13:00 UTC) | Reads and reports: files one `landscape-watch` issue | Rebases, cherry-picks, pushes anything, dispatches workflows, comments on issues |
+| `landscape-watch.yml` (when a `landscape-watch` issue is opened, or dispatched by hand) | Closes every older open `landscape-watch` issue with a pointer to the newest one | Touches code, branches, or the `upstream-sync` issues |
 | A cloud session started by a person | Investigates, drafts, answers; may prepare a patch in its own checkout for the person to review | Pushes to `webgpu-stack` or to `auto-rebase/*`; creates candidate branches; numbers patches on its own |
 | The local session on the gated machine | Hand rebases, runs `misc/webgpu_scripts/run-local-gates.sh`, promotes | Pushes without green local gates and an explicit go from the owner |
 
@@ -63,6 +64,16 @@ open when the next sync runs, the robot says so in its title and report with
 the age in days and how far upstream has moved. Treat that as the first item
 of the week: every week of drift makes the next hand rebase larger (475
 upstream commits in October 2026).
+
+## Reading the week's issues
+
+At most two issues should be open at a time: the sync robot's current
+`upstream-sync` issue (candidate ready, or FAILED) and the newest
+`landscape-watch` report. `landscape-watch.yml` closes every older landscape
+report when a new one is opened, commenting with the number of the newer one;
+the closed reports stay readable, and anything still relevant is expected to
+appear in the new report rather than linger in an old one. If more than one
+landscape report is open, dispatch that workflow by hand.
 
 ## Record keeping
 
