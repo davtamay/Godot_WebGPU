@@ -108,5 +108,5 @@ public:
 
 	virtual Ref<RenderingShaderContainer> create_container() const override;
 	virtual ShaderLanguageVersion get_shader_language_version() const override;
-	virtual ShaderSpirvVersion get_shader_spirv_version() const override;
+	virtual ShaderSpirvVersion get_shader_spirv_version(ShaderStage p_stage) const override;
 };
