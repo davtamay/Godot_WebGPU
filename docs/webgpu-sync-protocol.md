@@ -12,6 +12,7 @@ rules.
 | `upstream-sync.yml` (Mondays 06:17 UTC, or dispatched by hand) | Replays the stack from `origin/webgpu-stack` onto upstream master; on a clean replay pushes `auto-rebase/<date>` and tag `backup/auto-<date>`; files or updates the `upstream-sync` issues | Touches `webgpu-stack` |
 | The landscape routine (Mondays 13:00 UTC) | Reads and reports: files one `landscape-watch` issue | Rebases, cherry-picks, pushes anything, dispatches workflows, comments on issues |
 | `landscape-watch.yml` (when a `landscape-watch` issue is opened, or dispatched by hand) | Closes every older open `landscape-watch` issue with a pointer to the newest one | Touches code, branches, or the `upstream-sync` issues |
+| `build-verdict.yml` (when a baseline run finishes, or dispatched by hand) | Reports the result for the head of `webgpu-stack` and of the newest candidate in the `upstream-sync` issues | Touches code or branches; reports on older runs |
 | A cloud session started by a person | Investigates, drafts, answers; may prepare a patch in its own checkout for the person to review | Pushes to `webgpu-stack` or to `auto-rebase/*`; creates candidate branches; numbers patches on its own |
 | The local session on the gated machine | Hand rebases, runs `misc/webgpu_scripts/run-local-gates.sh`, promotes | Pushes without green local gates and an explicit go from the owner |
 
@@ -56,6 +57,17 @@ The robot opens or updates an issue titled `Upstream sync: FAILED` naming the
 cause: the conflicting patch and files, or the subjects that break the
 naming rule. It never appends a failure to a `candidate ready` issue. Resolve
 it locally per the steps above; a clean replay closes the FAILED issue.
+
+## When a candidate does not build
+
+A clean replay proves the patches apply, not that they compile: the robot
+never builds anything, and on 2026-10-31 all 172 patches replayed cleanly over
+an upstream change to a virtual they override. `build-verdict.yml` closes the
+`candidate ready` issue and opens `Upstream sync: FAILED - candidate does not
+build`, naming the failed jobs and the first errors. Fix it as a new patch on
+`webgpu-stack` and dispatch `upstream-sync.yml` for a fresh candidate. That
+issue closes only when a build goes green, never on a clean replay alone. A red
+head of `webgpu-stack` itself gets `Baseline CI: webgpu-stack is red`.
 
 ## When a candidate goes unpromoted
 

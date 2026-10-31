@@ -31,6 +31,9 @@
 #   share an issue: a failure appended to good news reads as a footnote.
 # - The baseline workflow runs the subject and check-stack gates on every
 #   push, so a commit that would fail the next replay is reported at once.
+# - This workflow never compiles anything, so a clean replay is not a build.
+#   build-verdict.yml reports the candidate's baseline result in these same
+#   issues, and only a green build closes a "does not build" issue.
 # - A candidate left unpromoted for a week is called out in the next run's
 #   report, in the issue title and at the top of the comment. The human
 #   side of all of this is docs/webgpu-sync-protocol.md.
@@ -192,8 +195,8 @@ jobs:
           COUNT=${{ steps.fresh.outputs.count }}
           DRIFT="${{ steps.empin.outputs.drift }}"
           if [ "${{ steps.candidate.outputs.pushed }}" = "yes" ]; then
-            L1="Candidate \`auto-rebase/$STAMP\` is pushed ($COUNT new upstream commits; clean replay, check-stack OK). Baseline CI builds it automatically."
-            L2="Promote locally with \`bash misc/webgpu_scripts/promote-candidate.sh $STAMP\` and run the local gates (tint bake, strict probe, headset spot-check) before force-with-lease pushing."
+            L1="Candidate \`auto-rebase/$STAMP\` is pushed ($COUNT new upstream commits; clean replay, check-stack OK). The patches apply; nothing has compiled them yet. Baseline CI is building it and reports here when it finishes."
+            L2="Once that is green, promote locally with \`bash misc/webgpu_scripts/promote-candidate.sh $STAMP\` and run the local gates (tint bake, strict probe, headset spot-check) before force-with-lease pushing."
           else
             L1="The stack replayed cleanly onto upstream ($COUNT new upstream commits, check-stack OK), but the candidate branch could not be pushed - see the run log for the rejection. Nothing is broken: the replay is deterministic and reproduces locally."
             L2="Rebase locally (\`git fetch upstream && git rebase upstream/master\`) and run the local gates. To restore automatic candidates, add the SYNC_PAT secret described in the workflow header."
@@ -220,8 +223,9 @@ jobs:
           else
             gh issue comment "$NUM" --body "$BODY" || echo "::warning::could not update the tracking issue (rebase result is unaffected)"
           fi
-          # A clean replay resolves whatever the open failure issue reported.
-          for F in $(gh issue list --label upstream-sync --state open --json number,title --jq '.[] | select(.title | startswith("Upstream sync: FAILED")) | .number' 2>/dev/null); do
+          # A clean replay resolves a failed replay. It does not resolve a
+          # candidate that did not build: only a green build can.
+          for F in $(gh issue list --label upstream-sync --state open --json number,title --jq '.[] | select(.title | startswith("Upstream sync: FAILED - needs manual rebase")) | .number' 2>/dev/null); do
             gh issue close "$F" --comment "Resolved: the $STAMP replay is clean (see the candidate-ready issue)." || true
           done
 
@@ -236,7 +240,7 @@ jobs:
         run: |
           L1="The scheduled upstream rebase FAILED (run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}). The stack itself is untouched; resolve locally (backup tag was pushed if the rebase step ran)."
           BODY=$(printf '%s\n\n**Cause:** %s\n\n%s' "$L1" "$CAUSE" "$DRIFT")
-          NUM=$(gh issue list --label upstream-sync --state open --json number,title --jq '[.[] | select(.title | startswith("Upstream sync: FAILED"))] | .[0].number // empty' 2>/dev/null || echo "")
+          NUM=$(gh issue list --label upstream-sync --state open --json number,title --jq '[.[] | select(.title | startswith("Upstream sync: FAILED - needs manual rebase"))] | .[0].number // empty' 2>/dev/null || echo "")
           if [ -z "$NUM" ]; then
             gh issue create --title "Upstream sync: FAILED - needs manual rebase" --label upstream-sync --body "$BODY" || echo "::warning::could not create the tracking issue"
           else
