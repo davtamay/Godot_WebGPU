@@ -1728,6 +1728,6 @@ RenderingShaderContainerFormat::ShaderLanguageVersion RenderingShaderContainerFo
 	return SHADER_LANGUAGE_VULKAN_VERSION_1_0;
 }
 
-RenderingShaderContainerFormat::ShaderSpirvVersion RenderingShaderContainerFormatWebGPU::get_shader_spirv_version() const {
+RenderingShaderContainerFormat::ShaderSpirvVersion RenderingShaderContainerFormatWebGPU::get_shader_spirv_version(ShaderStage p_stage) const {
 	return SHADER_SPIRV_VERSION_1_0;
 }
