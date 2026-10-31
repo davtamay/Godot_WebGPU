@@ -13,6 +13,7 @@ from emscripten_helpers import (
     get_template_zip_path,
     run_closure_compiler,
 )
+from SCons.Script import ARGUMENTS
 from SCons.Util import WhereIs
 
 from methods import get_compiler_version, print_error, print_info, print_warning
@@ -264,6 +265,11 @@ def configure(env: "SConsEnvironment"):
     if env["webgpu"]:
         env["use_rendering_device"] = True
         env.AppendUnique(CPPDEFINES=["WEBGPU_ENABLED"])
+        # Occlusion culling needs Embree, which web builds leave out for its size
+        # (GH-70621). It adds about 250 KB to a compressed WebGPU template and does
+        # nothing until a project adds occluders.
+        if "module_raycast_enabled" not in ARGUMENTS:
+            env["module_raycast_enabled"] = True
         # The vendored remote port pins a newer emdawnwebgpu than the one
         # bundled with the Emscripten toolchain (the port is decoupled from
         # the compiler version); see the port file for the pinned release.
