@@ -34,9 +34,10 @@
 # - This workflow never compiles anything, so a clean replay is not a build.
 #   build-verdict.yml reports the candidate's baseline result in these same
 #   issues, and only a green build closes a "does not build" issue.
-# - A candidate left unpromoted for a week is called out in the next run's
-#   report, in the issue title and at the top of the comment. The human
-#   side of all of this is docs/webgpu-sync-protocol.md.
+# - A stack whose upstream base is a week old is called out in the next run's
+#   report, in the issue title and at the top of the comment, and a run that
+#   finds nothing new closes what is left open. The human side of all of this
+#   is docs/webgpu-sync-protocol.md.
 # - GH_REPO pins every gh call to this fork. Once the upstream remote exists,
 #   gh's own remote ranking prefers a remote named "upstream", so unpinned
 #   calls resolve to godotengine/godot - which is where the reporting steps
@@ -161,8 +162,10 @@ jobs:
         run: |
           BASE=$(git merge-base HEAD upstream/master)
           COUNT=$(git rev-list --count "$BASE"..upstream/master)
+          AGE=$(( ($(date +%s) - $(git log -1 --format=%ct "$BASE")) / 86400 ))
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
-          echo "Upstream is $COUNT commit(s) ahead of the stack's base."
+          echo "base_age=$AGE" >> "$GITHUB_OUTPUT"
+          echo "Upstream is $COUNT commit(s) ahead of the stack's base, which is $AGE day(s) old."
 
       - name: Check the Emscripten pin against upstream
         id: empin
@@ -265,27 +268,40 @@ jobs:
           # open "candidate ready" issue, where it reads as a footnote on
           # good news and goes unnoticed (two failures did, in October 2026).
           NUM=$(gh issue list --label upstream-sync --state open --json number,title --jq '[.[] | select(.title | startswith("Upstream sync: candidate ready"))] | .[0].number // empty' 2>/dev/null || echo "")
-          # A candidate is useful for one week. When the open candidate-ready
-          # issue is older than that, say so where it is read first (the title
-          # and the top of the comment), so an unpromoted candidate stops being
-          # a footnote under good news. See docs/webgpu-sync-protocol.md.
-          if [ -n "$NUM" ]; then
-            AGE=$(gh issue view "$NUM" --json createdAt --jq '((now - (.createdAt | fromdateiso8601)) / 86400) | floor' 2>/dev/null || echo 0)
-            if [ "${AGE:-0}" -ge 7 ]; then
-              STALE="**Unpromoted for $AGE days.** The previous candidate was never promoted and this one replaces it; every week of drift makes the next hand rebase larger. Promote this week."
-              BODY=$(printf '%s\n\n%s' "$STALE" "$BODY")
-              gh issue edit "$NUM" --title "Upstream sync: candidate ready (unpromoted for $AGE days)" || true
-            fi
+          # A candidate is useful for one week. When the stack has sat on the
+          # same upstream base for longer, say so where it is read first (the
+          # title and the top of the comment), so an unpromoted candidate stops
+          # being a footnote under good news. The age is the base's, not the
+          # issue's: an issue can outlive a promotion, and on 2026-11-02 one
+          # would have called a two-day-old stack unpromoted for two weeks.
+          # See docs/webgpu-sync-protocol.md.
+          AGE=${{ steps.fresh.outputs.base_age }}
+          TITLE="Upstream sync: candidate ready"
+          if [ "$AGE" -ge 7 ]; then
+            TITLE="Upstream sync: candidate ready (unpromoted for $AGE days)"
+            STALE="**Unpromoted for $AGE days.** That is how old the stack's upstream base is; every week of drift makes the next hand rebase larger. Promote this week."
+            BODY=$(printf '%s\n\n%s' "$STALE" "$BODY")
           fi
           if [ -z "$NUM" ]; then
-            gh issue create --title "Upstream sync: candidate ready" --label upstream-sync --body "$BODY" || echo "::warning::could not create the tracking issue (rebase result is unaffected)"
+            gh issue create --title "$TITLE" --label upstream-sync --body "$BODY" || echo "::warning::could not create the tracking issue (rebase result is unaffected)"
           else
+            gh issue edit "$NUM" --title "$TITLE" || true
             gh issue comment "$NUM" --body "$BODY" || echo "::warning::could not update the tracking issue (rebase result is unaffected)"
           fi
           # A clean replay resolves a failed replay. It does not resolve a
           # candidate that did not build: only a green build can.
           for F in $(gh issue list --label upstream-sync --state open --json number,title --jq '.[] | select(.title | startswith("Upstream sync: FAILED - needs manual rebase")) | .number' 2>/dev/null); do
             gh issue close "$F" --comment "Resolved: the $STAMP replay is clean (see the candidate-ready issue)." || true
+          done
+
+      # With nothing new upstream there is nothing to promote: whatever an open
+      # issue offered or reported is already settled by the stack's own head.
+      - name: Report stack current
+        if: success() && steps.fresh.outputs.count == '0'
+        continue-on-error: true
+        run: |
+          for F in $(gh issue list --label upstream-sync --state open --json number,title --jq '.[] | select(.title | startswith("Upstream sync: candidate ready") or startswith("Upstream sync: FAILED - needs manual rebase")) | .number' 2>/dev/null); do
+            gh issue close "$F" --comment "Resolved: webgpu-stack already sits on upstream's head, so there is nothing to promote." || true
           done
 
       - name: Report failure
