@@ -368,12 +368,13 @@ v = runpy.run_path('version.py')
 print('%s.%s.%s' % (v['major'], v['minor'], v['status']))
 " 2>/dev/null)
 	TPL_DIR="${APPDATA:-$HOME/AppData/Roaming}/Godot/export_templates/$VERSION"
-	if [ -d "$TPL_DIR" ]; then
+	# Upstream's first beta or rc build has no folder yet.
+	if mkdir -p "$TPL_DIR"; then
 		cp "$REPO/bin/godot.web.template_release.wasm32.zip" "$TPL_DIR/web_release.zip" &&
 		{ [ "$QUICK" = 1 ] || cp "$REPO/bin/godot.web.template_release.wasm32.nothreads.zip" "$TPL_DIR/web_nothreads_release.zip"; } &&
 			pass "install templates" "-> $TPL_DIR" || fail "install templates" "copy failed"
 	else
-		fail "install templates" "no such directory: $TPL_DIR"
+		fail "install templates" "cannot create: $TPL_DIR"
 	fi
 fi
 
