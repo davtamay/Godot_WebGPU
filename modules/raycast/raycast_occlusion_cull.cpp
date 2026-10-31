@@ -474,7 +474,14 @@ void RaycastOcclusionCull::Scenario::update() {
 
 	dirty = false;
 	commit_done = false;
+#ifdef THREADS_ENABLED
 	commit_thread->start(&Scenario::_commit_scene, this);
+#else
+	// Thread::start() does nothing here, so the scene would never be committed
+	// and culling would stay off without a word. Build it on this thread.
+	_commit_scene(this);
+	current_scene_idx = 1 - current_scene_idx;
+#endif
 }
 
 void RaycastOcclusionCull::Scenario::_raycast(uint32_t p_idx, const RaycastThreadData *p_raycast_data) const {
@@ -651,7 +658,11 @@ void RaycastOcclusionCull::_init_embree() {
 	_MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
 #endif
 
+#ifdef THREADS_ENABLED
 	String settings = vformat("threads=%d", MAX(1, OS::get_singleton()->get_processor_count() - 2));
+#else
+	String settings = "threads=1";
+#endif
 	ebr_device = rtcNewDevice(settings.utf8().ptr());
 }
 
