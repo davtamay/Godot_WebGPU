@@ -1,0 +1,48 @@
+# Fork-local workflow for the WebGPU patch stack; not intended for upstream.
+#
+# The sync robot pushes a candidate and says it is ready before anything has
+# compiled it, so a red build used to reach nobody but the Actions list. This
+# workflow runs when a baseline run finishes and files the result in the
+# upstream-sync issues: a red candidate or a red webgpu-stack gets an issue
+# naming the failed jobs and the first errors, a green one clears it. The logic
+# is misc/webgpu_scripts/report-build-verdict.sh, which runs by hand too.
+#
+# workflow_run always runs this file from the default branch, so the code that
+# holds the token never comes from the branch under test. The branch name
+# reaches the script through the API, never through an inline expression.
+
+name: WebGPU stack - build verdict
+
+on:
+  workflow_run:
+    workflows: ["WebGPU stack - baseline"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Baseline run to report
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+
+concurrency:
+  group: build-verdict
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: Report the baseline verdict
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+    steps:
+      - name: Checkout scripts
+        uses: actions/checkout@v6
+
+      - name: Report
+        run: bash misc/webgpu_scripts/report-build-verdict.sh "$RUN_ID"
