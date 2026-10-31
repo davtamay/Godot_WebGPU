@@ -29,6 +29,19 @@ if ! git rev-parse --verify "origin/$CANDIDATE" >/dev/null 2>&1; then
 	exit 1
 fi
 
+# A clean replay proves the patches apply; only CI proves they compile.
+# Promoting first would spend a full gate run learning the same thing.
+REPO=$(git remote get-url origin | sed -E 's#^(git@github\.com:|https://github\.com/)##; s#\.git$##')
+CANDIDATE_SHA=$(git rev-parse "origin/$CANDIDATE")
+VERDICT=$(gh run list -R "$REPO" --branch "$CANDIDATE" --workflow web-baseline.yml --limit 20 \
+	--json headSha,status,conclusion \
+	--jq "[.[] | select(.headSha == \"$CANDIDATE_SHA\")][0] | \"\\(.status) \\(.conclusion)\"" 2>/dev/null || true)
+if [ "$VERDICT" != "completed success" ]; then
+	echo "refusing: baseline CI on $CANDIDATE (${CANDIDATE_SHA:0:10}) is '${VERDICT:-unknown}', not green." >&2
+	echo "The upstream-sync issues name the cause; a red candidate needs a new patch." >&2
+	exit 1
+fi
+
 # The candidate must contain the same patch subjects as the current stack:
 # a candidate built before recent pushes would silently drop patches.
 git fetch upstream master >/dev/null 2>&1 || true
@@ -59,14 +72,11 @@ cat <<EOF
 Promoted $CANDIDATE onto webgpu-stack (backup: $BACKUP).
 Before pushing, run the LOCAL gates CI cannot cover:
 
-  1. Rebuild BOTH binaries (serially!) at this HEAD:
-       scons platform=windows target=editor accesskit=no d3d12=no
-       scons platform=web target=template_release dev_mode=yes debug_symbols=no use_closure_compiler=no threads=yes webgpu=yes
-  2. Strict probe (real GPU):
-       PROBE_REQUIRE_PIXELS=1 PROBE_CHANNEL=chrome node misc/webgpu_scripts/loader-smoke.mjs bin probe
-  3. Loader smoke:  node misc/webgpu_scripts/loader-smoke.mjs bin
-  4. Re-export + boot the demo projects (0 error lines), headset spot-check.
-  5. Push (with approval):  git push --force-with-lease origin webgpu-stack
+  1. bash misc/webgpu_scripts/run-local-gates.sh --forward-plus
+     (all three binaries at this HEAD, both probes, closure, loader smoke,
+     both bake censuses, both boots, templates installed)
+  2. Headset spot-check of anything the replay touched.
+  3. Push (with approval):  git push --force-with-lease origin webgpu-stack
 
 Recovery at any point:  git reset --hard $BACKUP
 EOF
