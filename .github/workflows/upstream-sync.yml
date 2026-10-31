@@ -46,6 +46,8 @@
 #   (a real rebase/verify failure still fails the run).
 # - The workflow re-enables itself every run (GitHub disables schedules
 #   after 60 days of repo inactivity).
+# - SYNC_PAT is checked before it is used. Three weeks before it expires, or
+#   as soon as it stops working, a dedicated issue says so and how to renew.
 # - Old candidates/backup tags are pruned (newest 3 kept).
 # - The Emscripten pin is diffed against upstream's web_builds.yml so pin
 #   drift is flagged before it becomes a mysterious build failure.
@@ -74,12 +76,49 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
+      # The token is the one thing here with an expiry date. Left unchecked, a
+      # dead one fails at checkout with an auth error that names nothing;
+      # caught first, the replay still runs on the default token and the
+      # report says what to renew.
+      - name: Check the push token
+        id: token
+        env:
+          SYNC_PAT: ${{ secrets.SYNC_PAT }}
+        run: |
+          RENEW="Create a fine-grained token for this repository with Contents and Workflows set to read and write, then update the SYNC_PAT secret under Settings, Secrets and variables, Actions."
+          STATE=dead
+          NOTE="SYNC_PAT is not set, so candidates that carry upstream workflow changes cannot be pushed, and a candidate pushed without it starts no baseline build. $RENEW"
+          if [ -n "$SYNC_PAT" ]; then
+            HEADERS=$(curl -sS -D - -o /dev/null -H "Authorization: Bearer $SYNC_PAT" "https://api.github.com/repos/$GH_REPO" | tr -d '\r' || true)
+            CODE=$(printf '%s\n' "$HEADERS" | awk 'NR==1 {print $2}')
+            NOTE="SYNC_PAT was rejected (HTTP 401): it has expired or been revoked. This run falls back to the default token, which cannot push upstream workflow changes and starts no baseline build. $RENEW"
+            # Only a 401 condemns the token. A network or API hiccup says
+            # nothing about it, and a false alarm teaches people to ignore this.
+            if [ "$CODE" != 401 ]; then
+              STATE=ok
+              NOTE=""
+              EXPIRY=$(printf '%s\n' "$HEADERS" | sed -n 's/^github-authentication-token-expiration: //Ip')
+              if [ -n "$EXPIRY" ]; then
+                DAYS=$(( ($(date -d "$EXPIRY" +%s) - $(date +%s)) / 86400 ))
+                echo "SYNC_PAT expires $EXPIRY ($DAYS days)."
+                if [ "$DAYS" -le 21 ]; then
+                  NOTE="SYNC_PAT expires on $EXPIRY, in $DAYS days. When it does, the sync cannot publish a candidate that carries upstream workflow changes, and no candidate gets a baseline build. $RENEW"
+                fi
+              else
+                echo "SYNC_PAT check answered HTTP ${CODE:-none} with no expiry date."
+              fi
+            fi
+          fi
+          echo "SYNC_PAT state: $STATE"
+          echo "state=$STATE" >> "$GITHUB_OUTPUT"
+          echo "note=$NOTE" >> "$GITHUB_OUTPUT"
+
       - name: Checkout stack
         uses: actions/checkout@v6
         with:
           ref: webgpu-stack
           fetch-depth: 0
-          token: ${{ secrets.SYNC_PAT || github.token }}
+          token: ${{ steps.token.outputs.state == 'ok' && secrets.SYNC_PAT || github.token }}
 
       - name: Keep the schedule alive
         run: |
@@ -91,6 +130,26 @@ jobs:
             --color 1d76db \
             --description "Automated upstream rebase status" \
             --force || echo "::warning::could not ensure the upstream-sync label; issue reporting may be skipped"
+
+      - name: Report the push token
+        continue-on-error: true
+        env:
+          NOTE: ${{ steps.token.outputs.note }}
+        run: |
+          TITLE="Upstream sync: SYNC_PAT needs renewing"
+          NUM=$(gh issue list --label upstream-sync --state open --json number,title --jq "[.[] | select(.title == \"$TITLE\")] | .[0].number // empty" 2>/dev/null || echo "")
+          if [ -z "$NOTE" ]; then
+            if [ -n "$NUM" ]; then
+              gh issue close "$NUM" --comment "Resolved: SYNC_PAT is valid again." || true
+            fi
+            exit 0
+          fi
+          echo "::warning::$NOTE"
+          if [ -z "$NUM" ]; then
+            gh issue create --title "$TITLE" --label upstream-sync --body "$NOTE" || echo "::warning::could not create the token issue"
+          else
+            gh issue comment "$NUM" --body "$NOTE" || echo "::warning::could not update the token issue"
+          fi
 
       - name: Fetch upstream
         run: |
