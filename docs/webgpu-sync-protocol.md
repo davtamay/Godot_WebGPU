@@ -71,11 +71,12 @@ head of `webgpu-stack` itself gets `Baseline CI: webgpu-stack is red`.
 
 ## When a candidate goes unpromoted
 
-A candidate is useful for one week. If the `candidate ready` issue is still
-open when the next sync runs, the robot says so in its title and report with
-the age in days and how far upstream has moved. Treat that as the first item
-of the week: every week of drift makes the next hand rebase larger (475
-upstream commits in October 2026).
+A candidate is useful for one week. If the stack's upstream base is at least
+that old when the next sync runs, the robot says so in the issue title and at
+the top of its report, with the age in days. Treat that as the first item of
+the week: every week of drift makes the next hand rebase larger (475 upstream
+commits in October 2026). The age is the base's, not the issue's, so promoting
+clears the alarm; a run that finds nothing new upstream closes the issue.
 
 ## Reading the week's issues
 
