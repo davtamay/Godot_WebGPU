@@ -254,6 +254,28 @@ else
 	tail -8 "$LOADER_LOG" >&2
 fi
 
+# Every other drive injects at the XR tracker level, above the JS glue, so this
+# is the one check of the glue short of a headset. GL path only: see the harness.
+phase "WebXR glue"
+IWER_PATH="$TESTBED/vendor/iwer-2.7.0/iwer.min.js"
+if [ -f "$IWER_PATH" ]; then
+	GLUE_DIR="$LOGDIR/glue"
+	GLUE_FIXTURE="$REPO/misc/webgpu_scripts/webxr_fixture"
+	GLUE_LOG="$LOGDIR/glue-smoke.log"
+	rm -rf "$GLUE_DIR" && mkdir -p "$GLUE_DIR/template"
+	unzip -q -o "$REPO/bin/godot.web.template_release.wasm32.zip" -d "$GLUE_DIR/template"
+	"$EDITOR_EXE" --headless --path "$GLUE_FIXTURE" --import > "$GLUE_DIR/pack.log" 2>&1
+	"$EDITOR_EXE" --headless --path "$GLUE_FIXTURE" --export-pack Web "$GLUE_DIR/glue.pck" >> "$GLUE_DIR/pack.log" 2>&1
+	if ( cd "$TESTBED" && IWER_JS="$(cygpath -m "$IWER_PATH")" "$NODE" "$REPO/misc/webgpu_scripts/glue-smoke.mjs" "$GLUE_DIR/template" "$GLUE_DIR/glue.pck" ) > "$GLUE_LOG" 2>&1; then
+		pass "webxr glue" "($(tail -1 "$GLUE_LOG"))"
+	else
+		fail "webxr glue" "see $GLUE_LOG"
+		tail -8 "$GLUE_LOG" >&2
+	fi
+else
+	skip "webxr glue" "no vendored IWER at $IWER_PATH - CI is then the only check"
+fi
+
 # --------------------------------------------------------- bake, export, boot --
 # The shader baker only runs under a real RenderingDevice renderer, so the
 # export must NOT be headless. The export customization cache is keyed on a
