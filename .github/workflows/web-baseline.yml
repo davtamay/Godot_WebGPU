@@ -117,6 +117,14 @@ jobs:
           name: wasm-sizes-${{ matrix.leg }}-${{ github.sha }}
           path: sizes/
 
+      - name: Upload the template for the WebXR glue smoke test
+        if: matrix.leg == 'stock'
+        uses: actions/upload-artifact@v7
+        with:
+          name: stock-template-${{ github.sha }}
+          path: bin/godot.web.template_release.wasm32.zip
+          retention-days: 1
+
   # Expensive (~1h cold). Disable this job if runner minutes matter; web-template is the required gate.
   linux-editor:
     runs-on: ubuntu-24.04
@@ -206,6 +214,22 @@ jobs:
           bash misc/webgpu_scripts/check-bake-census.sh "$RUNNER_TEMP/bake-fplus.log" \
             misc/webgpu_scripts/bake_fixture/expected-exclusions-forward-plus.txt
 
+      # No template is needed to pack, and the GL renderer means no bake.
+      - name: Pack the WebXR glue fixture
+        run: |
+          EDITOR=$(ls bin/godot.linuxbsd.editor.* | grep -v '\.console' | head -1)
+          FIXTURE=misc/webgpu_scripts/webxr_fixture
+          "$EDITOR" --headless --path "$FIXTURE" --import || true
+          "$EDITOR" --headless --path "$FIXTURE" --export-pack "Web" "$RUNNER_TEMP/glue.pck"
+          test -s "$RUNNER_TEMP/glue.pck" || { echo "::error::the glue fixture produced no pack"; exit 1; }
+
+      - name: Upload the glue fixture
+        uses: actions/upload-artifact@v7
+        with:
+          name: glue-fixture-${{ github.sha }}
+          path: ${{ runner.temp }}/glue.pck
+          retention-days: 1
+
       - name: Upload bake logs
         if: always()
         uses: actions/upload-artifact@v7
@@ -222,6 +246,41 @@ jobs:
         with:
           path: ${{ env.SCONS_CACHE }}
           key: linux-editor-${{ runner.os }}-${{ github.sha }}
+
+  # The one check of the JS glue short of a headset: a real XRSession from IWER,
+  # an emulated WebXR runtime. The robot's replay never reaches this code, and
+  # [wgpu 102] broke hands on every headset with green CI. Advisory until it has
+  # proven itself on the Closure-built template, so a flaky first run cannot
+  # file a false build failure: drop continue-on-error once it has.
+  webxr-glue-smoke:
+    needs: [web-template, linux-editor]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Fetch the template
+        uses: actions/download-artifact@v8
+        with:
+          name: stock-template-${{ github.sha }}
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Fetch the fixture
+        uses: actions/download-artifact@v8
+        with:
+          name: glue-fixture-${{ github.sha }}
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Run the fixture in an emulated session
+        run: |
+          unzip -q "$RUNNER_TEMP/artifacts/godot.web.template_release.wasm32.zip" -d "$RUNNER_TEMP/template"
+          cd platform/web
+          npm i --no-save playwright iwer@2.7.0
+          npx playwright install --with-deps chromium
+          node ../../misc/webgpu_scripts/glue-smoke.mjs "$RUNNER_TEMP/template" "$RUNNER_TEMP/artifacts/glue.pck"
 
   # The checks the upstream-sync workflow runs after a replay, run on every
   # push instead, so a commit that would block the next Monday replay is

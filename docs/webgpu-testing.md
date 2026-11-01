@@ -30,6 +30,7 @@ Prereqs: emsdk (version pinned to match upstream CI - see
 | 3.5 | Patch 10 | Probe's triangle set 0 additionally carries a 4-element texture array the WGSL never references: Dawn validates the fanned-out bind group against the fanned-out layout ("uniform set OK" marker hard-gated) |
 | 3.7 | Patch 11 | The triangle's color multiplies in a tint from the advanced slice of a dynamic uniform buffer ("dynamic buffer OK" marker hard-gated); a wrong dynamic offset selects the zeroed slice and fails the strict local pixel check |
 | 3.8 (now) | Patch 33 | Loader smoke gains the `xr` scenario: with requiresWebXR + navigator.xr present (shimmed when absent), the loader must keep the WebGL driver exactly once (until the engine renders immersive sessions through WebGPU) and expose isWebXRWebGPUAvailable |
+| 3.9 | Patch 179 | WebXR glue smoke (glue-smoke.mjs, webxr_fixture): a pack on the stock template inside IWER, an emulated runtime, so a real XRSession runs the JS glue. Hands reach the tracker and follow it, a pinch fires select, a hand survives an input-source swap, the root viewport comes back after the session, no page errors. GL path only: IWER has no XRGPUBinding. Advisory in CI until proven on the Closure-built template. GLUE_BREAK=iterator and =churn put shipped bugs back and must fail, on an unminified template |
 | 4 | Patch 11+ | Browser boots exported project; unlit-cube screenshot diff vs goldens (tolerance ~1-2%) |
 
 Software-adapter Chromium flags (stage 2, recorded when it landed; they are
