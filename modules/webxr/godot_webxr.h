@@ -112,6 +112,7 @@ extern int godot_webxr_get_supported_frame_rates(float **r_frame_rates);
 
 extern void godot_webxr_set_fixed_foveation(float p_level);
 extern float godot_webxr_get_fixed_foveation();
+extern int godot_webxr_shares_shadows();
 
 extern void godot_webxr_set_render_target_size_multiplier(float p_multiplier);
 extern float godot_webxr_get_render_target_size_multiplier();

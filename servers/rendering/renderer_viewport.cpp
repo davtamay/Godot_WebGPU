@@ -901,6 +901,11 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 					if (xr_interface->get_draw_pass_camera(pass_projections, pass_offsets)) {
 						RSG::scene->camera_set_xr_projections(vp->camera, pass_projections, pass_offsets);
 					}
+					TypedArray<Projection> shadow_projections;
+					TypedArray<Transform3D> shadow_offsets;
+					if (xr_interface->get_shared_shadow_camera(shadow_projections, shadow_offsets)) {
+						RSG::scene->camera_set_shared_shadows(vp->camera, shadow_projections, shadow_offsets, draw_pass > 0);
+					}
 				}
 				// Inform XR interface we're about to render its viewport,
 				// if this returns false we don't render.
