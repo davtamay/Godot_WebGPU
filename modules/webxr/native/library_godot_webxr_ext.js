@@ -177,6 +177,12 @@ const GodotWebXRExt = {
 		GodotWebXR.applyFixedFoveation(GodotWebXR.layer);
 	},
 
+	godot_webxr_shares_shadows__proxy: 'sync',
+	godot_webxr_shares_shadows__sig: 'i',
+	godot_webxr_shares_shadows: function () {
+		return new URLSearchParams(window.location.search).has('noshare') ? 0 : 1;
+	},
+
 	godot_webxr_get_fixed_foveation__proxy: 'sync',
 	godot_webxr_get_fixed_foveation__sig: 'f',
 	godot_webxr_get_fixed_foveation: function () {
