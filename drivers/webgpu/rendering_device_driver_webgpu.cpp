@@ -2888,6 +2888,7 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 
 	ShaderInfo *shader = memnew(ShaderInfo);
 	shader->name = p_shader_container->shader_name;
+	shader->combined_slots_read_depth = shader->name == "CubeToDpShaderRD";
 	shader->push_constant_size = reflection.push_constant_size;
 	shader->fragment_output_mask = reflection.fragment_output_mask;
 	bool set0_only_push_constant = false;
@@ -3539,12 +3540,15 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 						// depth-aspect views (all float formats stay valid).
 						entry.texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
 					}
+					if (entry.texture.sampleType == WGPUTextureSampleType_Float && shader->combined_slots_read_depth) {
+						entry.texture.sampleType = WGPUTextureSampleType_UnfilterableFloat;
+					}
 					cap_vertex_budget(entry);
 					entries.push_back(entry);
 						WGPUBindGroupLayoutEntry sampler_entry = WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT;
 					sampler_entry.binding = remapped_binding + 1;
 					sampler_entry.visibility = binding_visibility((uint32_t)set_index, remapped_binding + 1);
-					sampler_entry.sampler.type = comparison_sampler_bindings.has(((uint64_t)set_index << 32) | sampler_entry.binding) ? WGPUSamplerBindingType_Comparison : WGPUSamplerBindingType_Filtering;
+					sampler_entry.sampler.type = comparison_sampler_bindings.has(((uint64_t)set_index << 32) | sampler_entry.binding) ? WGPUSamplerBindingType_Comparison : (shader->combined_slots_read_depth ? WGPUSamplerBindingType_NonFiltering : WGPUSamplerBindingType_Filtering);
 						cap_vertex_budget(sampler_entry);
 					entries.push_back(sampler_entry);
 					combined_before++;
@@ -4230,7 +4234,7 @@ WGPUBindGroup RenderingDeviceDriverWebGPU::_uniform_set_build(VectorView<BoundUn
 				entries.push_back(entry);
 				WGPUBindGroupEntry sampler_entry = WGPU_BIND_GROUP_ENTRY_INIT;
 				sampler_entry.binding = remapped_binding + 1;
-				sampler_entry.sampler = (WGPUSampler)uniform.ids[0].id;
+				sampler_entry.sampler = shader->combined_slots_read_depth ? _get_nonfiltering_sampler() : (WGPUSampler)uniform.ids[0].id;
 				entries.push_back(sampler_entry);
 				combined_before++;
 				continue;
