@@ -367,15 +367,16 @@ private:
 		WGPUTextureView dummy_view = nullptr;
 		// Frame-sliced dynamic buffers give a static scene a small cycle of
 		// distinct command streams, and scenes alternate a few stream shapes
-		// on top of it; eight entries cover the product (four thrashed on the
-		// stress scene: ~0.5 rebuilds per frame from cycles longer than the
-		// cache).
-		BundleCacheEntry bundle_cache[8];
+		// on top of it. A framebuffer can also repeat many passes a frame: an
+		// atlas with 4 cascades per eye is 16 streams across two frame slices,
+		// and a ring smaller than the cycle evicts each one before it returns,
+		// so nothing is ever cached.
+		BundleCacheEntry bundle_cache[32];
 		uint32_t bundle_cache_evict = 0;
 		// Bundles are only built for streams seen twice: a pass whose stream
 		// changes every frame (sorted transparents under a moving camera)
 		// must not pay bundle creation for replays that never happen.
-		uint64_t recent_hashes[8] = {};
+		uint64_t recent_hashes[32] = {};
 		uint32_t recent_hash_next = 0;
 	};
 
