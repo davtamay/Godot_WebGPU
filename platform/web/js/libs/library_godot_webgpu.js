@@ -347,6 +347,13 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('nodiff') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_use_write_batching__sig: 'i',
+	godot_js_webgpu_use_write_batching: function () {
+		// ?nowritebatch uploads each staging region as its copy is recorded
+		// again (one writeBuffer per region) for A/B of the batched upload.
+		return window.location.search.indexOf('nowritebatch') >= 0 ? 0 : 1;
+	},
+
 	godot_js_webgpu_use_subgroups__sig: 'i',
 	godot_js_webgpu_use_subgroups: function () {
 		// Native wave ops are OPT-IN (?subgroups) for now: Chrome 152's D3D12
