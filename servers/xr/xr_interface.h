@@ -155,6 +155,10 @@ public:
 	   narrows them to the active pass's view here; false leaves the camera
 	   as the node set it. */
 	virtual bool get_draw_pass_camera(TypedArray<Projection> &r_projections, TypedArray<Transform3D> &r_offsets) { return false; }
+	/* Every view of the frame, whichever pass is active. When this returns
+	   true the first pass fits and renders directional shadows for all views
+	   and the later passes reuse them. Each pass still culls for its own view. */
+	virtual bool get_shared_shadow_camera(TypedArray<Projection> &r_projections, TypedArray<Transform3D> &r_offsets) { return false; }
 #ifndef DISABLE_DEPRECATED
 	virtual Transform3D get_transform_for_view(uint32_t p_view, const Transform3D &p_cam_transform) { return Transform3D(); } /* Deprecated, get each views transform */
 	virtual Projection get_projection_for_view(uint32_t p_view, double p_aspect, double p_z_near, double p_z_far) { return Projection(); } /* Deprecated, get each view projection matrix */
