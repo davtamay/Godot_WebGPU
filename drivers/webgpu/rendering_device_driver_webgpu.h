@@ -685,6 +685,7 @@ public:
 	bool use_bundle_fastpath = true;
 	bool use_indirect_params = true;
 	bool use_diff_flush = true;
+	bool use_write_batching = true;
 	bool device_has_indirect_first_instance = false;
 	uint64_t present_count = 0;
 
@@ -714,6 +715,23 @@ public:
 	}
 
 	void _flush_dynamic_slice(BufferInfo *p_buffer);
+
+	// Staging bytes a recorded copy reads, uploaded at the next submission in
+	// as few calls as possible (see _flush_pending_shadow_writes).
+	struct PendingShadowWrite {
+		BufferInfo *buffer = nullptr;
+		uint64_t begin = 0;
+		uint64_t end = 0;
+	};
+	struct PendingShadowWriteOrder {
+		_FORCE_INLINE_ bool operator()(const PendingShadowWrite &p_a, const PendingShadowWrite &p_b) const {
+			return p_a.buffer != p_b.buffer ? (uintptr_t)p_a.buffer < (uintptr_t)p_b.buffer : p_a.begin < p_b.begin;
+		}
+	};
+	LocalVector<PendingShadowWrite> pending_shadow_writes;
+	void _upload_shadow_region(BufferInfo *p_buffer, uint64_t p_offset, uint64_t p_size);
+	void _flush_pending_shadow_writes();
+
 	virtual void pipeline_free(PipelineID p_pipeline) override;
 	virtual void command_bind_push_constants(CommandBufferID p_cmd_buffer, ShaderID p_shader, uint32_t p_first_index, VectorView<uint32_t> p_data) override;
 	// The browser manages pipeline caching; declining makes the engine skip it.

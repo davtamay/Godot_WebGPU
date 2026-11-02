@@ -67,6 +67,9 @@ int godot_js_webgpu_use_indirect();
 // 0 when the page URL carries ?nodiff (benchmark A/B switch for the
 // range-diffed dynamic slice flush).
 int godot_js_webgpu_use_diff_flush();
+// 0 when the page URL carries ?nowritebatch (benchmark A/B switch for
+// uploading staging regions at submission rather than as each copy is recorded).
+int godot_js_webgpu_use_write_batching();
 // 1 when the page URL carries ?perfcounters (periodic driver counter print).
 int godot_js_webgpu_perf_counters();
 // Publishes one window of driver counters to the page (see the JS library).
@@ -114,6 +117,10 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	use_diff_flush = godot_js_webgpu_use_diff_flush() != 0;
 	if (!use_diff_flush) {
 		print_line("WebGPU: range-diffed dynamic flushes disabled (?nodiff).");
+	}
+	use_write_batching = godot_js_webgpu_use_write_batching() != 0;
+	if (!use_write_batching) {
+		print_line("WebGPU: staging uploads per copy, not batched at submission (?nowritebatch).");
 	}
 	perf_counters_enabled = godot_js_webgpu_perf_counters() != 0;
 	if (perf_counters_enabled) {
@@ -175,6 +182,7 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 			ERR_FAIL_NULL_V_MSG(cb_info->command_buffer, ERR_INVALID_PARAMETER, "Command buffer was not ended before submission.");
 			wgpu_buffers.push_back(cb_info->command_buffer);
 		}
+		_flush_pending_shadow_writes();
 		if (push_constant_used > 0) {
 			_counted_write_buffer(push_constant_buffer, 0, push_constant_shadow, push_constant_used);
 		}
@@ -1607,6 +1615,11 @@ void RenderingDeviceDriverWebGPU::buffer_free(BufferID p_buffer) {
 		if (freed->dynamic) {
 			dynamic_buffers_all.erase(freed);
 		}
+		for (uint32_t i = pending_shadow_writes.size(); i > 0; i--) {
+			if (pending_shadow_writes[i - 1].buffer == freed) {
+				pending_shadow_writes.remove_at_unordered(i - 1);
+			}
+		}
 	}
 	BufferInfo *buffer = (BufferInfo *)p_buffer.id;
 	wgpuBufferRelease(buffer->buffer);
@@ -2407,6 +2420,48 @@ void RenderingDeviceDriverWebGPU::command_clear_buffer(CommandBufferID p_cmd_buf
 	wgpuCommandEncoderClearBuffer(cb_info->encoder, ((BufferInfo *)p_buffer.id)->buffer, p_offset, p_size);
 }
 
+// The engine writes a frame's buffer updates into many small regions of a
+// staging buffer and records a copy out of each. Uploading each region as its
+// copy was recorded cost a writeBuffer per region, about 55 a frame on the gate
+// scene. They are uploaded at the next submission instead, neighbours merged:
+// every copy that reads them is in a command buffer submitted after that, and
+// the engine never reuses a staging region within a frame.
+void RenderingDeviceDriverWebGPU::_upload_shadow_region(BufferInfo *p_buffer, uint64_t p_offset, uint64_t p_size) {
+	if (p_size == 0) {
+		return;
+	}
+	if (!use_write_batching) {
+		_counted_write_buffer(p_buffer->buffer, p_offset, p_buffer->shadow + p_offset, p_size);
+		return;
+	}
+	pending_shadow_writes.push_back({ p_buffer, p_offset, p_offset + p_size });
+}
+
+void RenderingDeviceDriverWebGPU::_flush_pending_shadow_writes() {
+	if (pending_shadow_writes.is_empty()) {
+		return;
+	}
+	// Re-uploading a gap this small costs less than another call; a wider one
+	// would upload bytes nothing reads. The shadow holds every byte the GPU
+	// copy does, so a merged gap writes back what is already there.
+	const uint64_t MERGE_GAP = 1024;
+	pending_shadow_writes.sort_custom<PendingShadowWriteOrder>();
+	uint32_t i = 0;
+	while (i < pending_shadow_writes.size()) {
+		BufferInfo *buffer = pending_shadow_writes[i].buffer;
+		const uint64_t begin = pending_shadow_writes[i].begin;
+		uint64_t end = pending_shadow_writes[i].end;
+		uint32_t next = i + 1;
+		while (next < pending_shadow_writes.size() && pending_shadow_writes[next].buffer == buffer && pending_shadow_writes[next].begin <= end + MERGE_GAP) {
+			end = MAX(end, pending_shadow_writes[next].end);
+			next++;
+		}
+		_counted_write_buffer(buffer->buffer, begin, buffer->shadow + begin, end - begin);
+		i = next;
+	}
+	pending_shadow_writes.clear();
+}
+
 void RenderingDeviceDriverWebGPU::command_copy_buffer(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, BufferID p_dst_buffer, VectorView<BufferCopyRegion> p_regions) {
 		// The engine keeps staging buffers persistently mapped and never calls
 	// unmap (Vulkan memory is coherent), so the shadow's bytes have not
@@ -2436,7 +2491,7 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer(CommandBufferID p_cmd_buff
 				const BufferCopyRegion &region = p_regions[i];
 				const uint64_t sync_offset = region.src_offset & ~3ull;
 				const uint64_t sync_size = MIN((((region.src_offset + region.size + 3ull) & ~3ull) - sync_offset), src_sync->size - sync_offset) & ~3ull;
-				_counted_write_buffer(src_sync->buffer, sync_offset, src_sync->shadow + sync_offset, sync_size);
+				_upload_shadow_region(src_sync, sync_offset, sync_size);
 			}
 		} else if (src_sync->shadow != nullptr && !src_sync->dynamic) {
 			bool all_direct = true;
@@ -2453,7 +2508,7 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer(CommandBufferID p_cmd_buff
 					all_direct = false;
 					const uint64_t sync_offset = region.src_offset & ~3ull;
 					const uint64_t sync_size = MIN((((region.src_offset + region.size + 3ull) & ~3ull) - sync_offset), src_sync->size - sync_offset) & ~3ull;
-					_counted_write_buffer(src_sync->buffer, sync_offset, src_sync->shadow + sync_offset, sync_size);
+					_upload_shadow_region(src_sync, sync_offset, sync_size);
 					continue;
 				}
 				_counted_write_buffer(dst->buffer, dst_offset, src_sync->shadow + src_offset, write_size);
@@ -2631,7 +2686,7 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer_to_texture(CommandBufferID
 				const uint64_t data_size = (uint64_t)sync_bytes_per_row * (uint64_t)sync_rows * (uint64_t)region.texture_region_size.z;
 				const uint64_t write_offset = region.buffer_offset & ~3ull;
 				const uint64_t write_size = MIN((((region.buffer_offset + data_size + 3ull) & ~3ull) - write_offset), src_sync->size - write_offset);
-				_counted_write_buffer(src_sync->buffer, write_offset, src_sync->shadow + write_offset, write_size);
+				_upload_shadow_region(src_sync, write_offset, write_size);
 			}
 		}
 	}
