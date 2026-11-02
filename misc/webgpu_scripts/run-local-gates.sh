@@ -350,6 +350,22 @@ export_and_boot() {
 phase "Bake, export and boot"
 export_and_boot mobile mobile
 
+# One warm frame of the mobile export, graded by WebGPU Inspector's own rules:
+# nothing created mid-frame, no fragmented buffer writes, few submits. A copy of
+# the inspector lives outside the repo, like IWER.
+WGI_DIR="${WEBGPU_INSPECTOR_DIR:-$TESTBED/vendor/webgpu_inspector-afc6bbe}"
+if [ -f "$WGI_DIR/webgpu_inspector.js" ]; then
+	HYGIENE_LOG="$LOGDIR/frame-hygiene.log"
+	if ( cd "$TESTBED" && WGI_DIR="$(cygpath -m "$WGI_DIR")" "$NODE" "$REPO/misc/webgpu_scripts/frame-hygiene.mjs" "$OUTDIR" ) > "$HYGIENE_LOG" 2>&1; then
+		pass "frame hygiene" "($(tail -1 "$HYGIENE_LOG"))"
+	else
+		fail "frame hygiene" "see $HYGIENE_LOG"
+		tail -4 "$HYGIENE_LOG" >&2
+	fi
+else
+	skip "frame hygiene" "no WebGPU Inspector copy at $WGI_DIR"
+fi
+
 if [ "$FORWARD_PLUS" = 1 ]; then
 	# Forward+ shaders are only instantiated when the editor itself runs the
 	# clustered renderer, so the project has to be flipped for the bake. The
