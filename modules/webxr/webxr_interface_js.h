@@ -205,6 +205,7 @@ public:
 	virtual uint32_t get_draw_pass_count() override;
 	virtual void set_current_draw_pass(uint32_t p_pass) override;
 	virtual bool get_draw_pass_camera(TypedArray<Projection> &r_projections, TypedArray<Transform3D> &r_offsets) override;
+	virtual bool get_shared_shadow_camera(TypedArray<Projection> &r_projections, TypedArray<Transform3D> &r_offsets) override;
 	virtual Transform3D get_camera_transform() override;
 	virtual TypedArray<Projection> get_camera_projections(const StringName &p_tracker_name, double p_aspect, double p_z_near, double p_z_far) override;
 	virtual TypedArray<Transform3D> get_camera_offsets(const StringName &p_tracker_name) override;

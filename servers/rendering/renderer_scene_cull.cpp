@@ -120,6 +120,19 @@ void RendererSceneCull::camera_set_frustum(RID p_camera, float p_size, Vector2 p
 	camera->projections.clear();
 }
 
+void RendererSceneCull::camera_set_shared_shadows(RID p_camera, const TypedArray<Projection> &p_projections, const TypedArray<Transform3D> &p_offsets, bool p_reuse) {
+	Camera *camera = camera_owner.get_or_null(p_camera);
+	ERR_FAIL_NULL(camera);
+	ERR_FAIL_COND(p_projections.size() != p_offsets.size());
+	camera->shared_shadow_projections.resize(p_projections.size());
+	camera->shared_shadow_offsets.resize(p_offsets.size());
+	for (int i = 0; i < p_projections.size(); i++) {
+		camera->shared_shadow_projections[i] = p_projections[i];
+		camera->shared_shadow_offsets[i] = p_offsets[i];
+	}
+	camera->reuse_shared_shadows = p_reuse;
+}
+
 void RendererSceneCull::camera_set_xr_projections(RID p_camera, TypedArray<Projection> p_projections, TypedArray<Transform3D> p_offsets) {
 	ERR_FAIL_COND(p_projections.is_empty());
 	bool has_offsets = !p_offsets.is_empty();
@@ -2807,7 +2820,31 @@ void RendererSceneCull::render_camera(const Ref<RenderSceneBuffers> &p_render_bu
 	// For now just cull on the first camera
 	RendererSceneOcclusionCull::get_singleton()->buffer_update(p_viewport, camera_data.main_transform, camera_data.main_projection, camera_data.is_orthogonal);
 
+	// A draw-pass interface fits one set of directional cascades to every
+	// view, with the combined camera a multiview pass would have used. Each
+	// pass still culls geometry for its own view.
+	RendererSceneRender::CameraData shared_camera_data;
+	const bool shared_shadows = camera->shared_shadow_projections.size() == 2;
+	if (shared_shadows) {
+		shared_camera_data.set_multiview_camera(transform, camera->shared_shadow_offsets, camera->shared_shadow_projections, is_orthogonal, vaspect, camera->visible_layers);
+	}
+
+	// A later pass can only reuse what an earlier pass of this camera left
+	// behind: the first pass may have been skipped.
+	const bool reuse = shared_shadows && camera->reuse_shared_shadows && shared_shadow_owner == p_camera;
+	shared_shadow_camera = shared_shadows ? &shared_camera_data : nullptr;
+	reuse_shared_shadows = reuse;
+
 	_render_scene(&camera_data, p_render_buffers, environment, camera->attributes, compositor, camera->visible_layers, p_scenario, p_viewport, p_shadow_atlas, RID(), -1, p_screen_mesh_lod_threshold, p_window_output_max_value, true, r_render_info);
+	shared_shadow_camera = nullptr;
+	reuse_shared_shadows = false;
+
+	// Each pass asks again, so a later render of this camera outside the XR
+	// loop can never pick up stale cascades.
+	shared_shadow_owner = (shared_shadows && !reuse) ? p_camera : RID();
+	camera->shared_shadow_projections.clear();
+	camera->shared_shadow_offsets.clear();
+	camera->reuse_shared_shadows = false;
 #endif
 }
 
@@ -3326,7 +3363,8 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	Instance *render_reflection_probe = instance_owner.get_or_null(p_reflection_probe); //if null, not rendering to it
 
 	// Prepare the light - camera volume culling system.
-	light_culler->prepare_camera(p_camera_data->main_transform, p_camera_data->main_projection);
+	const RendererSceneRender::CameraData *shadow_camera = shared_shadow_camera ? shared_shadow_camera : p_camera_data;
+	light_culler->prepare_camera(shadow_camera->main_transform, shadow_camera->main_projection);
 
 	Scenario *scenario = scenario_owner.get_or_null(p_scenario);
 	Vector3 camera_position = p_camera_data->main_transform.origin;
@@ -3411,8 +3449,9 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 
 		RSG::light_storage->set_directional_shadow_count(lights_with_shadow.size());
 
-		for (int i = 0; i < lights_with_shadow.size(); i++) {
-			_light_instance_setup_directional_shadow(i, lights_with_shadow[i], p_camera_data->main_transform, p_camera_data->main_projection, p_camera_data->is_orthogonal, p_camera_data->vaspect);
+		// A later draw pass keeps the atlas and transforms the first pass left.
+		for (int i = 0; !reuse_shared_shadows && i < lights_with_shadow.size(); i++) {
+			_light_instance_setup_directional_shadow(i, lights_with_shadow[i], shadow_camera->main_transform, shadow_camera->main_projection, shadow_camera->is_orthogonal, shadow_camera->vaspect);
 		}
 	}
 

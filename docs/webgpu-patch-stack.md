@@ -212,6 +212,7 @@
 | 181 | webgpu: Bind a depth cube through an unfilterable slot | A shadowed omni light in cube mode, the engine's default, copies a depth cube through `CubeToDpShaderRD`, whose combined slot is typed float. The bind group was invalid and the frame's whole command buffer was lost on every shadow update. WGSL has no way to read a cube without sampling it, so the shader's combined slots are now unfilterable with a non-filtering sampler. Invalid command buffers 3 to 0 on a static scene, and the frame matches native Vulkan. | 0 | n/a (fork-only) |
 | 182 | webgpu: Size the bundle caches past a shadow atlas's passes | The per-eye path repeats 8 shadow passes on one framebuffer. Across two frame slices that is 16 streams through 8 slots, so each was evicted before its second sighting and no bundle was ever built. 32 slots: direct replays 960 to 0 per 120 frames, 6.04 to 5.01 ms frame CPU on desktop, no clear change at x6 throttle. | 0 | n/a (fork-only) |
 | 183 | webgpu: Upload staging regions once per submission | The engine writes a frame's buffer updates into many small regions of a staging buffer and records a copy out of each, and the driver uploaded each region as its copy was recorded: 57.6 `writeBuffer` calls a frame on the gate scene, which WebGPU Inspector's frame-issue rules flagged. Regions are now uploaded just before the next submission, merged where under 1 KiB apart; every copy that reads them is submitted after that, and a staging region is never reused within a frame. 6,915 to about 265 calls per 120 frames, same bytes; whole-frame time at x6 CPU throttle 35.4 to 34.5 ms median, 4.04 to 4.00 ms unthrottled. `?nowritebatch` restores per-copy uploads. | 0 | n/a (fork-only) |
+| 184 | [shared] xr: Share directional shadow cascades across per-view eyes | The WebGPU XR path renders one pass per eye, and each pass fitted and rendered its own directional cascades. An interface can now return every view from `get_shared_shadow_camera()`: the first pass fits the cascades to the combined camera a multiview pass would use and renders them, the second keeps the atlas and transforms. Each pass still culls and runs occlusion for its own view. Six poses, Mobile and Forward+: at most 0.002% of pixels change, eye difference identical. 4 cascades: frame CPU 4.5-5.0 to 3.4-3.5 ms, GPU queue 10.0-10.7 to 7.6-8.3 ms; no change without shadows. `?noshare` turns it off. Not run on a headset. | ~38 renderer_scene_cull.cpp (over the guideline), ~7 renderer_scene_cull.h, ~5 renderer_viewport.cpp, ~4 xr_interface.h, ~1 rendering_method.h, rest in modules/webxr | not yet |
 
 (Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
 experimental WebXR-WebGPU since April 2026. NOTE: upstream
@@ -409,7 +410,10 @@ depends on them.
   `modules/webxr/*` (added in patch 34: the WebXR implementation itself),
   `servers/xr/xr_interface.h` and
   `servers/rendering/renderer_viewport.cpp` (added in patch 35: the
-  per-view draw-pass hook and its single call site).
+  per-view draw-pass hook and its single call site),
+  `servers/rendering/renderer_scene_cull.cpp/.h` and
+  `servers/rendering/rendering_method.h` (added in patch 184: the eyes of a
+  per-view XR frame share one set of directional cascades).
 - **Never touched:** `servers/rendering/rendering_device.cpp`,
   `rendering_device_graph.*`, `shader_compiler*`, `modules/glslang`,
   existing drivers, renderer_rd scene/effects code outside the designated
