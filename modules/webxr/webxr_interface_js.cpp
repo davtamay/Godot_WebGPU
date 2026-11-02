@@ -708,6 +708,27 @@ bool WebXRInterfaceJS::get_draw_pass_camera(TypedArray<Projection> &r_projection
 	return true;
 }
 
+bool WebXRInterfaceJS::get_shared_shadow_camera(TypedArray<Projection> &r_projections, TypedArray<Transform3D> &r_offsets) {
+	// ?noshare to A/B.
+	static const int shares_shadows = godot_webxr_shares_shadows();
+	if (shares_shadows == 0 || !_uses_per_view_passes() || !initialized || get_draw_pass_count() != 2) {
+		return false;
+	}
+
+	r_projections.clear();
+	r_offsets.clear();
+	for (uint32_t v = 0; v < 2; v++) {
+		Projection projection;
+		Transform3D offset;
+		if (!_view_projection(v, pass_z_near, pass_z_far, projection) || !_view_offset(v, offset)) {
+			return false;
+		}
+		r_projections.push_back(projection);
+		r_offsets.push_back(offset);
+	}
+	return true;
+}
+
 #ifndef DISABLE_DEPRECATED
 Transform3D WebXRInterfaceJS::get_transform_for_view(uint32_t p_view, const Transform3D &p_cam_transform) {
 	XRServer *xr_server = XRServer::get_singleton();
