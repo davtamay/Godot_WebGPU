@@ -89,7 +89,16 @@ if (!metadata) {
 const objects = metadata.objects ?? {};
 const commands = metadata.commands ?? [];
 const count = (method) => commands.filter((c) => c.method === method).length;
-const graded = analyzeFrameIssues(commands, { getObject: (id) => objects[id] ?? null, getBundleCommands: (id) => objects[id]?.commands ?? [] });
+// A saved capture keeps a render bundle's commands in its descriptor. Read there,
+// or every draw inside a bundle is missing from the rules that follow state, and
+// the reads those draws make show up as results overwritten before anyone read
+// them: 59 instead of 7 on the Forward+ export.
+const bundleCommands = (id) => {
+	const object = objects[id];
+	const descriptor = typeof object?.descriptor === 'string' ? JSON.parse(object.descriptor) : object?.descriptor;
+	return object?.commands ?? descriptor?.commands ?? null;
+};
+const graded = analyzeFrameIssues(commands, { getObject: (id) => objects[id] ?? null, getBundleCommands: bundleCommands });
 const findings = Array.isArray(graded) ? graded : graded.findings ?? [];
 const failures = findings.filter((f) => FAILING.has(f.rule));
 for (const f of findings) {
