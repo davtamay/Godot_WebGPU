@@ -280,6 +280,17 @@ private:
 		// per command, each of which converted 64-bit offsets to BigInt and
 		// looked its objects up again. Mutable: record replay is const.
 		mutable LocalVector<uint32_t> js_ops;
+		// A pass whose attachments are only loaded and stored (no clear, no
+		// resolve) does nothing unless it draws, so it opens on its first
+		// encoded command instead of at begin: the engine ends draw lists that
+		// drew nothing (an empty transparent phase), and each was a full load
+		// and store of its targets. Until then render_pass_encoder holds
+		// RENDER_PASS_DEFERRED and the descriptor waits here.
+		bool render_pass_deferred = false;
+		bool render_pass_has_work = false;
+		WGPURenderPassDescriptor deferred_pass_desc = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
+		WGPURenderPassColorAttachment deferred_colors[8] = {};
+		WGPURenderPassDepthStencilAttachment deferred_depth = WGPU_RENDER_PASS_DEPTH_STENCIL_ATTACHMENT_INIT;
 		// Bind groups are deferred to draw/dispatch time: the group that
 		// carries the push-constant ring entry needs a dynamic offset that
 		// only arrives with command_bind_push_constants, which the engine
@@ -745,6 +756,8 @@ public:
 	void _pass_set_scissor_rect(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, uint32_t p_x, uint32_t p_y, uint32_t p_width, uint32_t p_height);
 	void _pass_set_blend_constant(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, const WGPUColor *p_color);
 	void _pass_flush_ops(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass);
+	// The pass encoder, opening a deferred pass first.
+	WGPURenderPassEncoder _render_pass_open(const CommandBufferInfo *p_cb_info);
 	// Bumped whenever any resource class a bundle can reference is freed;
 	// cache entries recorded under an older epoch are treated as misses.
 	uint64_t resource_epoch = 0;
@@ -758,6 +771,7 @@ public:
 	bool use_capture_gate = true;
 	bool use_js_ops = true;
 	bool use_flush_range = true;
+	bool use_pass_elide = true;
 	bool device_has_indirect_first_instance = false;
 	uint64_t present_count = 0;
 
