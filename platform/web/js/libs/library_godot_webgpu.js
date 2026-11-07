@@ -368,6 +368,99 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('alwayscapture') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_use_js_ops__sig: 'i',
+	godot_js_webgpu_use_js_ops: function () {
+		// ?nojsops encodes each render-pass command through its own binding
+		// call again, for A/B of the batched op stream.
+		return window.location.search.indexOf('nojsops') >= 0 ? 0 : 1;
+	},
+
+	$GodotWebGPUPassOps: {
+		// Dynamic offsets are copied out of the shared heap into this array:
+		// setBindGroup takes a typed array with an explicit range, which the
+		// binding reads directly. Created on first use: a library object's
+		// members are emitted as source text, and a typed array would arrive
+		// as a plain object.
+		offsets: null,
+	},
+
+	godot_js_webgpu_pass_ops__deps: ['$WebGPU', '$GodotWebGPUPassOps'],
+	godot_js_webgpu_pass_ops__sig: 'viii',
+	godot_js_webgpu_pass_ops: function (p_pass, p_ops, p_count) {
+		// Walks the op stream the driver packed for one render pass (see
+		// PassOp in rendering_device_driver_webgpu.cpp) and encodes it.
+		const pass = WebGPU.getJsObject(p_pass);
+		const u32 = HEAPU32;
+		const f32 = HEAPF32;
+		if (GodotWebGPUPassOps.offsets === null) {
+			GodotWebGPUPassOps.offsets = new Uint32Array(16);
+		}
+		const offsets = GodotWebGPUPassOps.offsets;
+		const HIGH = 4294967296;
+		let i = p_ops >>> 2;
+		const end = i + p_count;
+		while (i < end) {
+			switch (u32[i]) {
+			case 1:
+				pass.setPipeline(WebGPU.getJsObject(u32[i + 1]));
+				i += 2;
+				break;
+			case 2: {
+				const count = u32[i + 3];
+				const group = WebGPU.getJsObject(u32[i + 2]);
+				if (count === 0) {
+					pass.setBindGroup(u32[i + 1], group);
+				} else {
+					for (let k = 0; k < count; k++) {
+						offsets[k] = u32[i + 4 + k];
+					}
+					pass.setBindGroup(u32[i + 1], group, offsets, 0, count);
+				}
+				i += 4 + count;
+				break;
+			}
+			case 3:
+				pass.setVertexBuffer(u32[i + 1], WebGPU.getJsObject(u32[i + 2]), u32[i + 3] + u32[i + 4] * HIGH);
+				i += 5;
+				break;
+			case 4:
+				pass.setIndexBuffer(WebGPU.getJsObject(u32[i + 1]), u32[i + 2] === 1 ? 'uint16' : 'uint32', u32[i + 3] + u32[i + 4] * HIGH);
+				i += 5;
+				break;
+			case 5:
+				pass.draw(u32[i + 1], u32[i + 2], u32[i + 3], u32[i + 4]);
+				i += 5;
+				break;
+			case 6:
+				pass.drawIndexed(u32[i + 1], u32[i + 2], u32[i + 3], u32[i + 4] | 0, u32[i + 5]);
+				i += 6;
+				break;
+			case 7:
+				pass.drawIndirect(WebGPU.getJsObject(u32[i + 1]), u32[i + 2] + u32[i + 3] * HIGH);
+				i += 4;
+				break;
+			case 8:
+				pass.drawIndexedIndirect(WebGPU.getJsObject(u32[i + 1]), u32[i + 2] + u32[i + 3] * HIGH);
+				i += 4;
+				break;
+			case 9:
+				pass.setViewport(f32[i + 1], f32[i + 2], f32[i + 3], f32[i + 4], f32[i + 5], f32[i + 6]);
+				i += 7;
+				break;
+			case 10:
+				pass.setScissorRect(u32[i + 1], u32[i + 2], u32[i + 3], u32[i + 4]);
+				i += 5;
+				break;
+			case 11:
+				pass.setBlendConstant({ r: f32[i + 1], g: f32[i + 2], b: f32[i + 3], a: f32[i + 4] });
+				i += 5;
+				break;
+			default:
+				throw new Error(`WebGPU: unknown render-pass op ${u32[i]}.`);
+			}
+		}
+	},
+
 	godot_js_webgpu_use_subgroups__sig: 'i',
 	godot_js_webgpu_use_subgroups: function () {
 		// Native wave ops are OPT-IN (?subgroups) for now: Chrome 152's D3D12
