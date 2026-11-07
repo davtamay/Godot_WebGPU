@@ -3726,6 +3726,12 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 		shader->layout_bindings[shader->layout_bindings.size() - 1].insert(uint32_t(RenderingShaderContainerWebGPU::PUSH_CONSTANT_BINDING));
 	}
 
+	for (uint32_t i = 0; i < shader->layout_bindings.size() && i < 32; i++) {
+		if (shader->layout_bindings[i].has(uint32_t(RenderingShaderContainerWebGPU::PUSH_CONSTANT_BINDING))) {
+			shader->push_constant_set_mask |= 1u << i;
+		}
+	}
+
 	// Set 0 with nothing but the reserved binding never gets a
 	// uniform_set_create call; give the shader a ready-made bind group.
 	if (set0_only_push_constant) {
@@ -4436,7 +4442,7 @@ void RenderingDeviceDriverWebGPU::_flush_bind_groups(CommandBufferInfo *p_cb_inf
 		// empty. Skip clean sets: a moved push-constant offset only re-binds
 		// sets whose layout actually carries the ring entry.
 		const bool layout_known = i < shader->layout_bindings.size();
-		const bool wants_push_constant = layout_known ? shader->layout_bindings[i].has(uint32_t(RenderingShaderContainerWebGPU::PUSH_CONSTANT_BINDING)) : (set == nullptr);
+		const bool wants_push_constant = layout_known ? ((shader->push_constant_set_mask >> i) & 1u) != 0 : (set == nullptr);
 		if ((p_cb_info->bind_group_dirty_mask & (1u << i)) == 0 && !(p_cb_info->push_constant_dirty && wants_push_constant)) {
 			continue;
 		}
@@ -4454,14 +4460,31 @@ void RenderingDeviceDriverWebGPU::_flush_bind_groups(CommandBufferInfo *p_cb_inf
 				}
 				set->layout_groups.clear();
 				set->push_constant_epoch = push_constant_epoch;
+				set->last_layout = nullptr;
 			}
-			WGPUBindGroup *cached = set->layout_groups.getptr((void *)shader->bind_group_layouts[i]);
-			if (cached != nullptr) {
-				bind_group = *cached;
+			const void *layout = shader->bind_group_layouts[i];
+			if (set->last_layout == layout) {
+				bind_group = set->last_group;
 			} else {
-				bind_group = _uniform_set_build(VectorView<BoundUniform>(set->uniforms.ptr(), set->uniforms.size()), shader, i, nullptr);
+				WGPUBindGroup *cached = set->layout_groups.getptr((void *)layout);
+				if (cached != nullptr) {
+					bind_group = *cached;
+				} else {
+					bind_group = _uniform_set_build(VectorView<BoundUniform>(set->uniforms.ptr(), set->uniforms.size()), shader, i, nullptr);
+					if (bind_group != nullptr) {
+						set->layout_groups.insert((void *)layout, bind_group);
+					}
+				}
 				if (bind_group != nullptr) {
-					set->layout_groups.insert((void *)shader->bind_group_layouts[i], bind_group);
+					uint32_t keep_mask = 0;
+					for (uint32_t j = 0; j < set->dynamic_bindings.size() && j < 32; j++) {
+						if (!layout_known || shader->layout_bindings[i].has(set->dynamic_bindings[j])) {
+							keep_mask |= 1u << j;
+						}
+					}
+					set->last_layout = layout;
+					set->last_group = bind_group;
+					set->last_offset_keep_mask = keep_mask;
 				}
 			}
 		} else if (i == 0) {
@@ -4483,14 +4506,18 @@ void RenderingDeviceDriverWebGPU::_flush_bind_groups(CommandBufferInfo *p_cb_inf
 		// indices packed into the caller's 32-bit mask) plus the ring entry.
 		uint32_t offsets[9];
 		uint32_t offset_count = 0;
-		for (const CommandBufferInfo::DynamicOffset &dynamic_offset : p_cb_info->pending_dynamic_offsets[i]) {
-			if (layout_known && !shader->layout_bindings[i].has(dynamic_offset.binding)) {
-				// No entry for this buffer in the layout, so no offset either
-				// (dead-stripped by the variant, or a leftover set).
+		// A buffer with no entry in this layout gets no offset either
+		// (dead-stripped by the variant, or a leftover set). The pending
+		// offsets follow the set's dynamic buffers in order, so the set's
+		// cached mask answers per index.
+		const LocalVector<CommandBufferInfo::DynamicOffset> &pending_offsets = p_cb_info->pending_dynamic_offsets[i];
+		for (uint32_t j = 0; j < pending_offsets.size(); j++) {
+			const bool keep = set != nullptr ? ((set->last_offset_keep_mask >> j) & 1u) != 0 : (!layout_known || shader->layout_bindings[i].has(pending_offsets[j].binding));
+			if (!keep) {
 				continue;
 			}
 			DEV_ASSERT(offset_count < 8);
-			offsets[offset_count++] = dynamic_offset.offset;
+			offsets[offset_count++] = pending_offsets[j].offset;
 		}
 		if (wants_push_constant) {
 			offsets[offset_count++] = p_cb_info->push_constant_offset;
