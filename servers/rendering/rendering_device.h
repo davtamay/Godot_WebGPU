@@ -275,6 +275,13 @@ public:
 	uint64_t buffer_get_device_address(RID p_buffer);
 	uint8_t *buffer_persistent_map_advance(RID p_buffer);
 	void buffer_flush(RID p_buffer);
+	// Like buffer_flush, naming the only bytes written since the map.
+	void buffer_flush_range(RID p_buffer, uint64_t p_offset, uint64_t p_size) {
+		ERR_FAIL_COND_MSG(render_thread_id != Thread::get_caller_id(), "buffer_flush_range() can only be called from the render thread.");
+		Buffer *buffer = _get_buffer_from_owner(p_buffer);
+		ERR_FAIL_NULL_MSG(buffer, "Buffer argument is not a valid buffer of any type.");
+		driver->buffer_flush_range(buffer->driver_id, p_offset, p_size);
+	}
 
 private:
 	/******************/

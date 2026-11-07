@@ -79,6 +79,9 @@ int godot_js_webgpu_use_capture_gate();
 // 0 when the page URL carries ?nojsops (benchmark A/B switch for encoding
 // each render-pass command through its own binding call).
 int godot_js_webgpu_use_js_ops();
+// 0 when the page URL carries ?noflushrange (benchmark A/B switch for
+// diffing only the range a flush names instead of the whole slice).
+int godot_js_webgpu_use_flush_range();
 // Encodes a pass's packed op stream (see _pass_flush_ops) in one call.
 void godot_js_webgpu_pass_ops(void *p_pass, const uint32_t *p_ops, int p_count);
 // 1 when the page URL carries ?perfcounters (periodic driver counter print).
@@ -144,6 +147,10 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	use_js_ops = godot_js_webgpu_use_js_ops() != 0;
 	if (!use_js_ops) {
 		print_line("WebGPU: render-pass commands encoded one binding call each (?nojsops).");
+	}
+	use_flush_range = godot_js_webgpu_use_flush_range() != 0;
+	if (!use_flush_range) {
+		print_line("WebGPU: ranged flushes diff the whole slice (?noflushrange).");
 	}
 	perf_counters_enabled = godot_js_webgpu_perf_counters() != 0;
 	if (perf_counters_enabled) {
@@ -1930,7 +1937,7 @@ static uint64_t _last_difference_end(const uint8_t *p_a, const uint8_t *p_b, uin
 	return p_from;
 }
 
-void RenderingDeviceDriverWebGPU::_flush_dynamic_slice(BufferInfo *p_buffer) {
+void RenderingDeviceDriverWebGPU::_flush_dynamic_slice(BufferInfo *p_buffer, uint64_t p_offset, uint64_t p_size) {
 	// The engine writes through the persistent map, so the flush API carries
 	// no range: diff the slice against the bytes last uploaded and write only
 	// the changed span. An unchanged slice costs one vectorized scan instead
@@ -1958,13 +1965,17 @@ void RenderingDeviceDriverWebGPU::_flush_dynamic_slice(BufferInfo *p_buffer) {
 	}
 	// Trim the unchanged head and tail, then widen to 64-byte boundaries
 	// (wgpuQueueWriteBuffer needs 4-byte alignment; 64 keeps writes whole).
-	const uint64_t first = _first_difference(last, src, stride);
-	if (first >= stride) {
+	// A ranged flush names the only bytes written since the map; the rest of
+	// the slice matches what was uploaded, so the scan stays inside it.
+	const uint64_t window_begin = MIN(p_offset, stride);
+	const uint64_t window_end = p_size >= stride - window_begin ? stride : window_begin + p_size;
+	const uint64_t first = window_begin + _first_difference(last + window_begin, src + window_begin, window_end - window_begin);
+	if (first >= window_end) {
 		p_buffer->dirty = false;
 		return; // Identical - nothing to upload.
 	}
 	const uint64_t lo = first & ~uint64_t(63);
-	const uint64_t end = _last_difference_end(last, src, first, stride);
+	const uint64_t end = _last_difference_end(last, src, first, window_end);
 	const uint64_t hi = MIN(stride, (end + 63) & ~uint64_t(63));
 	_counted_write_buffer(p_buffer->buffer, offset + lo, src + lo, hi - lo);
 	memcpy(last + lo, src + lo, hi - lo);
@@ -1978,6 +1989,17 @@ void RenderingDeviceDriverWebGPU::buffer_flush(BufferID p_buffer) {
 	// Executes before any subsequently submitted command buffer, matching the
 	// staging shadow semantics in buffer_unmap().
 	_flush_dynamic_slice(buffer);
+}
+
+void RenderingDeviceDriverWebGPU::buffer_flush_range(BufferID p_buffer, uint64_t p_offset, uint64_t p_size) {
+	WEBGPU_MAIN_THREAD_GUARD(buffer_flush_range(p_buffer, p_offset, p_size));
+	BufferInfo *buffer = (BufferInfo *)p_buffer.id;
+	ERR_FAIL_COND(!buffer->dynamic);
+	if (!use_flush_range) {
+		_flush_dynamic_slice(buffer);
+		return;
+	}
+	_flush_dynamic_slice(buffer, p_offset, p_size);
 }
 
 uint64_t RenderingDeviceDriverWebGPU::buffer_get_dynamic_offsets(Span<BufferID> p_buffers) {
