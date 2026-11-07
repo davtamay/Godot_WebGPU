@@ -330,6 +330,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 	SceneShaderForwardClustered::ShaderData *shader = nullptr;
 	SceneShaderForwardClustered::ShaderData *prev_shader = nullptr;
 	SceneShaderForwardClustered::ShaderData::PipelineKey pipeline_key;
+	SceneShaderForwardClustered::ShaderData::PipelineKey prev_pipeline_key = {};
 	uint32_t pipeline_hash = 0;
 	uint32_t prev_pipeline_hash = 0;
 
@@ -526,6 +527,13 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 				pipeline_key.cull_mode = cull_mode;
 			}
 
+			// Consecutive draws usually share a pipeline; an equal key needs no
+			// hashing to know it is already bound.
+			if (shader == prev_shader && pipeline_key == prev_pipeline_key) {
+				pipeline_valid = true;
+				break;
+			}
+
 			pipeline_hash = pipeline_key.hash();
 
 			if (shader != prev_shader || pipeline_hash != prev_pipeline_hash) {
@@ -536,6 +544,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 					pipeline_valid = true;
 					prev_shader = shader;
 					prev_pipeline_hash = pipeline_hash;
+					prev_pipeline_key = pipeline_key;
 					break;
 				} else {
 					pipeline_key.ubershader++;
