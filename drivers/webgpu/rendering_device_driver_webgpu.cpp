@@ -73,6 +73,9 @@ int godot_js_webgpu_use_write_batching();
 // 0 when the page URL carries ?nostateskip (benchmark A/B switch for
 // skipping pipeline and buffer binds that repeat what is already bound).
 int godot_js_webgpu_use_state_skip();
+// 0 when the page URL carries ?alwayscapture (benchmark A/B switch for
+// encoding passes whose streams rarely repeat directly instead of capturing).
+int godot_js_webgpu_use_capture_gate();
 // 1 when the page URL carries ?perfcounters (periodic driver counter print).
 int godot_js_webgpu_perf_counters();
 // Publishes one window of driver counters to the page (see the JS library).
@@ -128,6 +131,10 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	use_state_skip = godot_js_webgpu_use_state_skip() != 0;
 	if (!use_state_skip) {
 		print_line("WebGPU: repeated pipeline and buffer binds encoded as issued (?nostateskip).");
+	}
+	use_capture_gate = godot_js_webgpu_use_capture_gate() != 0;
+	if (!use_capture_gate) {
+		print_line("WebGPU: every pass captured for bundling, repeating or not (?alwayscapture).");
 	}
 	perf_counters_enabled = godot_js_webgpu_perf_counters() != 0;
 	if (perf_counters_enabled) {
@@ -592,6 +599,21 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 	// The swap-chain pass builds its pass info outside render_pass_create;
 	// its single blit draw is not worth the bundle bookkeeping.
 	cb_info->render_bundleable = use_render_bundles && !pass->from_swap_chain;
+	if (cb_info->render_bundleable) {
+		if (framebuffer->position_frame != present_count) {
+			framebuffer->position_frame = present_count;
+			framebuffer->next_position = 0;
+		}
+		const uint32_t position = MIN(framebuffer->next_position, FramebufferInfo::CAPTURE_POSITIONS - 1);
+		framebuffer->next_position++;
+		cb_info->render_capture_position = position;
+		if (use_capture_gate && present_count < framebuffer->capture_positions[position].skip_until) {
+			// This position's streams have not been repeating: buffering,
+			// comparing and hashing them only to replay them costs more than
+			// encoding directly.
+			cb_info->render_bundleable = false;
+		}
+	}
 	cb_info->render_records.clear();
 	cb_info->render_draw_params.clear();
 	cb_info->render_pass_info = pass;
@@ -711,6 +733,7 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 		const uint64_t record_bytes = (uint64_t)cb_info->render_records.size() * sizeof(RenderCommandRecord);
 		const uint64_t param_bytes = (uint64_t)cb_info->render_draw_params.size() * sizeof(DrawParams);
 		BundleCacheEntry *hit = nullptr;
+		bool cache_hit = false;
 		uint64_t stream_hash = 0;
 		if (use_bundle_fastpath) {
 			// Identity fast path: an exact memcmp against each cached entry's
@@ -758,6 +781,7 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 			if (usable) {
 				bundle = hit->bundle;
 				hit->last_param_frame = present_count;
+				cache_hit = true;
 			}
 		} else {
 			// Build a bundle only for a stream seen before: a first sighting
@@ -851,6 +875,22 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 				} else if (params_buffer != nullptr) {
 					wgpuBufferRelease(params_buffer);
 				}
+			}
+		}
+		{
+			// A position that hits on fewer than a quarter of its captures
+			// goes direct for a few seconds, then is measured again.
+			FramebufferInfo::CapturePosition &position = framebuffer->capture_positions[cb_info->render_capture_position];
+			position.captures++;
+			if (cache_hit) {
+				position.hits++;
+			}
+			if (position.captures >= 32) {
+				if (position.hits * 4 < position.captures) {
+					position.skip_until = present_count + 240;
+				}
+				position.captures = 0;
+				position.hits = 0;
 			}
 		}
 		if (bundle != nullptr) {
