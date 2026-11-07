@@ -893,6 +893,7 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 			const uint32_t draw_pass_count = xr_interface->get_draw_pass_count();
 			for (uint32_t draw_pass = 0; draw_pass < draw_pass_count; draw_pass++) {
 				xr_interface->set_current_draw_pass(draw_pass);
+				vp->draw_pass = MIN(draw_pass, uint32_t(RendererSceneRender::MAX_RENDER_VIEWS - 1));
 				if (draw_pass_count > 1 && vp->camera.is_valid()) {
 					// The camera carries the projections its node set for the
 					// frame; each pass renders one view of it.
@@ -969,6 +970,7 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 					}
 				}
 			}
+			vp->draw_pass = 0;
 		} else
 #endif // XR_DISABLED
 		{
@@ -1294,16 +1296,17 @@ void RendererViewport::viewport_set_prev_camera_data(RID p_viewport, const Rende
 	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
 	ERR_FAIL_NULL(viewport);
 	uint64_t frame = RSG::rasterizer->get_frame_number();
-	if (viewport->prev_camera_data_frame != frame) {
-		viewport->prev_camera_data = *p_camera_data;
-		viewport->prev_camera_data_frame = frame;
+	const uint32_t pass = viewport->draw_pass;
+	if (viewport->prev_camera_data_frame[pass] != frame) {
+		viewport->prev_camera_data[pass] = *p_camera_data;
+		viewport->prev_camera_data_frame[pass] = frame;
 	}
 }
 
 const RendererSceneRender::CameraData *RendererViewport::viewport_get_prev_camera_data(RID p_viewport) {
 	const Viewport *viewport = viewport_owner.get_or_null(p_viewport);
 	ERR_FAIL_NULL_V(viewport, nullptr);
-	return &viewport->prev_camera_data;
+	return &viewport->prev_camera_data[viewport->draw_pass];
 }
 
 void RendererViewport::viewport_set_disable_2d(RID p_viewport, bool p_disable) {
