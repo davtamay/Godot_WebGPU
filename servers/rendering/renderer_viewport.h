@@ -74,8 +74,12 @@ public:
 		bool use_debanding = false;
 		bool force_motion_vectors = false;
 
-		RendererSceneRender::CameraData prev_camera_data;
-		uint64_t prev_camera_data_frame = 0;
+		// One per XR draw pass: an interface that renders each view in its own
+		// pass (XRInterface::get_draw_pass_count) needs each view's own
+		// previous camera, not the camera of the pass before it this frame.
+		RendererSceneRender::CameraData prev_camera_data[RendererSceneRender::MAX_RENDER_VIEWS];
+		uint64_t prev_camera_data_frame[RendererSceneRender::MAX_RENDER_VIEWS] = {};
+		uint32_t draw_pass = 0;
 
 		bool use_occlusion_culling = false;
 		bool occlusion_buffer_dirty = false;
