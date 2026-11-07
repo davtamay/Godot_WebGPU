@@ -271,6 +271,7 @@ private:
 		LocalVector<DrawParams> render_draw_params;
 		RenderPassInfo *render_pass_info = nullptr;
 		FramebufferInfo *render_framebuffer = nullptr;
+		uint32_t render_capture_position = 0;
 		// Bind groups are deferred to draw/dispatch time: the group that
 		// carries the push-constant ring entry needs a dynamic offset that
 		// only arrives with command_bind_push_constants, which the engine
@@ -402,6 +403,20 @@ private:
 		// must not pay bundle creation for replays that never happen.
 		uint64_t recent_hashes[32] = {};
 		uint32_t recent_hash_next = 0;
+		// Whether capturing pays, per pass position within a frame (the
+		// framebuffer's first pass this frame, its second, ...): a position
+		// whose captures rarely hit the cache stops capturing for a while and
+		// encodes directly, while the framebuffer's other positions - a static
+		// shadow cascade beside a churning one - keep their bundles.
+		static constexpr uint32_t CAPTURE_POSITIONS = 16;
+		struct CapturePosition {
+			uint32_t captures = 0;
+			uint32_t hits = 0;
+			uint64_t skip_until = 0;
+		};
+		CapturePosition capture_positions[CAPTURE_POSITIONS];
+		uint64_t position_frame = UINT64_MAX;
+		uint32_t next_position = 0;
 	};
 
 	struct VertexFormatInfo {
@@ -711,6 +726,7 @@ public:
 	bool use_diff_flush = true;
 	bool use_write_batching = true;
 	bool use_state_skip = true;
+	bool use_capture_gate = true;
 	bool device_has_indirect_first_instance = false;
 	uint64_t present_count = 0;
 
