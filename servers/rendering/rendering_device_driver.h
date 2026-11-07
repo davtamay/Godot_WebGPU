@@ -202,6 +202,10 @@ public:
 	virtual uint8_t *buffer_persistent_map_advance(BufferID p_buffer, uint64_t p_frames_drawn) = 0;
 	virtual uint64_t buffer_get_dynamic_offsets(Span<BufferID> p_buffers) = 0;
 	virtual void buffer_flush(BufferID p_buffer) {}
+	// Like buffer_flush, but only [p_offset, p_offset + p_size) of the mapped
+	// range was written since the map. Drivers that gain nothing from the
+	// range keep the whole flush.
+	virtual void buffer_flush_range(BufferID p_buffer, uint64_t p_offset, uint64_t p_size) { buffer_flush(p_buffer); }
 	// Only for a buffer with BUFFER_USAGE_DEVICE_ADDRESS_BIT.
 	virtual uint64_t buffer_get_device_address(BufferID p_buffer) = 0;
 
