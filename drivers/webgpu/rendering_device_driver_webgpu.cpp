@@ -983,6 +983,9 @@ void RenderingDeviceDriverWebGPU::_replay_render_records(const CommandBufferInfo
 	}
 }
 
+// Defined with the dynamic-slice upload below.
+static uint64_t _first_difference(const uint8_t *p_a, const uint8_t *p_b, uint64_t p_size);
+
 void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_buffer) {
 	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
@@ -1008,15 +1011,15 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 		bool cache_hit = false;
 		uint64_t stream_hash = 0;
 		if (use_bundle_fastpath) {
-			// Identity fast path: an exact memcmp against each cached entry's
-			// record stream. Vectorized compares beat the byte-serial FNV this
-			// replaces, mismatches exit at the first differing byte (usually a
-			// dynamic offset in the first bind-group record), and a match
-			// needs no hashing at all.
+			// Identity fast path: an exact compare against each cached entry's
+			// record stream (_first_difference, as memcmp is a byte loop in
+			// this build). Mismatches exit at the first differing block
+			// (usually a dynamic offset in the first bind-group record), and a
+			// match needs no hashing at all.
 			for (BundleCacheEntry &entry : framebuffer->bundle_cache) {
 				if (entry.bundle != nullptr && entry.epoch == resource_epoch &&
 						entry.records.size() == cb_info->render_records.size() &&
-						memcmp(entry.records.ptr(), cb_info->render_records.ptr(), record_bytes) == 0) {
+						_first_difference((const uint8_t *)entry.records.ptr(), (const uint8_t *)cb_info->render_records.ptr(), record_bytes) >= record_bytes) {
 					hit = &entry;
 					perf.bundle_fastpath_hits++;
 					break;
@@ -1038,7 +1041,7 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 			// Records match; reconcile the draw parameters (excluded from both
 			// the identity compare and the hash by construction).
 			bool usable = hit->params.size() == cb_info->render_draw_params.size();
-			if (usable && param_bytes > 0 && memcmp(hit->params.ptr(), cb_info->render_draw_params.ptr(), param_bytes) != 0) {
+			if (usable && param_bytes > 0 && _first_difference((const uint8_t *)hit->params.ptr(), (const uint8_t *)cb_info->render_draw_params.ptr(), param_bytes) < param_bytes) {
 				if (hit->params_baked || hit->last_param_frame == present_count) {
 					// Literal-draw bundle, or this entry already executed this
 					// frame with other parameters (queue writes land before the
@@ -1299,6 +1302,10 @@ void RenderingDeviceDriverWebGPU::swap_chain_free(SwapChainID p_swap_chain) {
 #include <emscripten/threading.h>
 
 #include <type_traits>
+
+#ifdef __wasm_simd128__
+#include <wasm_simd128.h>
+#endif
 
 
 static bool memmem_compat(const char *p_haystack, size_t p_len, const char *p_needle, size_t p_needle_len) {
@@ -1968,11 +1975,35 @@ uint8_t *RenderingDeviceDriverWebGPU::buffer_persistent_map_advance(BufferID p_b
 	return buffer->shadow + buffer->frame_idx * buffer->slice_stride;
 }
 
-// First and last differing 8-byte words of two equally sized ranges, compared
-// with plain 64-bit loads. memcmp here is a byte loop, so a slice compared in
-// 64-byte memcmp calls cost a byte compare per byte even when nothing changed.
+// True when the 64 bytes at p_a and p_b differ anywhere.
+static inline bool _block64_differs(const uint8_t *p_a, const uint8_t *p_b) {
+#ifdef __wasm_simd128__
+	const v128_t d0 = wasm_v128_xor(wasm_v128_load(p_a), wasm_v128_load(p_b));
+	const v128_t d1 = wasm_v128_xor(wasm_v128_load(p_a + 16), wasm_v128_load(p_b + 16));
+	const v128_t d2 = wasm_v128_xor(wasm_v128_load(p_a + 32), wasm_v128_load(p_b + 32));
+	const v128_t d3 = wasm_v128_xor(wasm_v128_load(p_a + 48), wasm_v128_load(p_b + 48));
+	return wasm_v128_any_true(wasm_v128_or(wasm_v128_or(d0, d1), wasm_v128_or(d2, d3)));
+#else
+	uint64_t acc = 0;
+	for (uint32_t i = 0; i < 64; i += 8) {
+		uint64_t a, b;
+		memcpy(&a, p_a + i, 8);
+		memcpy(&b, p_b + i, 8);
+		acc |= a ^ b;
+	}
+	return acc != 0;
+#endif
+}
+
+// First and last differing 8-byte words of two equally sized ranges. memcmp
+// here is a byte loop; whole 64-byte blocks are compared first (four 16-byte
+// SIMD compares, since an unchanged slice is the common case), then 8-byte
+// words locate the difference inside the first block that has one.
 static uint64_t _first_difference(const uint8_t *p_a, const uint8_t *p_b, uint64_t p_size) {
 	uint64_t i = 0;
+	while (i + 64 <= p_size && !_block64_differs(p_a + i, p_b + i)) {
+		i += 64;
+	}
 	for (; i + 8 <= p_size; i += 8) {
 		uint64_t a, b;
 		memcpy(&a, p_a + i, 8);
@@ -1996,6 +2027,9 @@ static uint64_t _last_difference_end(const uint8_t *p_a, const uint8_t *p_b, uin
 			return end;
 		}
 		end--;
+	}
+	while (end >= p_from + 64 && !_block64_differs(p_a + end - 64, p_b + end - 64)) {
+		end -= 64;
 	}
 	while (end >= p_from + 8) {
 		uint64_t a, b;
