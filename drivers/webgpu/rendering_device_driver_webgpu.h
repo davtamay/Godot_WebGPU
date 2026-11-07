@@ -292,6 +292,30 @@ private:
 		// push-constant ring entry) are re-bound instead of all of them.
 		uint8_t bind_group_dirty_mask = 0;
 		bool push_constant_dirty = false;
+		// What the open pass already has bound. WebGPU keeps the pipeline and
+		// the vertex and index buffers across draws and pipeline changes, so
+		// setting the same one again is a wasted call (and, inside a bundle,
+		// a wasted record). Cleared whenever a pass begins.
+		static constexpr uint32_t TRACKED_VERTEX_SLOTS = 16;
+		struct BoundVertexBuffer {
+			WGPUBuffer buffer = nullptr;
+			uint64_t offset = 0;
+		};
+		const void *bound_pipeline = nullptr;
+		BoundVertexBuffer bound_vertex_buffers[TRACKED_VERTEX_SLOTS];
+		WGPUBuffer bound_index_buffer = nullptr;
+		WGPUIndexFormat bound_index_format = WGPUIndexFormat_Undefined;
+		uint64_t bound_index_offset = 0;
+
+		void reset_bound_state() {
+			bound_pipeline = nullptr;
+			for (BoundVertexBuffer &slot : bound_vertex_buffers) {
+				slot = BoundVertexBuffer();
+			}
+			bound_index_buffer = nullptr;
+			bound_index_format = WGPUIndexFormat_Undefined;
+			bound_index_offset = 0;
+		}
 	};
 
 	struct CommandPoolInfo {
@@ -686,6 +710,7 @@ public:
 	bool use_indirect_params = true;
 	bool use_diff_flush = true;
 	bool use_write_batching = true;
+	bool use_state_skip = true;
 	bool device_has_indirect_first_instance = false;
 	uint64_t present_count = 0;
 
