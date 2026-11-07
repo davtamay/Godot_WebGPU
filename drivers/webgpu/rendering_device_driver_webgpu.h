@@ -624,6 +624,12 @@ private:
 	uint8_t *push_constant_shadow = nullptr;
 	uint32_t push_constant_capacity = 0;
 	uint32_t push_constant_used = 0;
+	// The ring is reused from slot 0 every frame and the shadow keeps the
+	// bytes the GPU copy already holds, so a slot whose values match last
+	// frame's needs no upload. Changed slots are kept as [begin, end) byte
+	// spans, in order, merged when close.
+	LocalVector<uint32_t> push_constant_dirty_spans;
+	void _push_constant_mark_dirty(uint32_t p_offset, uint32_t p_size);
 	bool push_constant_overflow_reported = false;
 	// One-shot: a transient attachment asked to be stored by a pass that
 	// does not resolve it (see command_begin_render_pass).
@@ -772,6 +778,7 @@ public:
 	bool use_js_ops = true;
 	bool use_flush_range = true;
 	bool use_pass_elide = true;
+	bool use_push_constant_diff = true;
 	bool device_has_indirect_first_instance = false;
 	uint64_t present_count = 0;
 

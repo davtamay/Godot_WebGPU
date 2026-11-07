@@ -389,6 +389,13 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('nopasselide') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_use_push_constant_diff__sig: 'i',
+	godot_js_webgpu_use_push_constant_diff: function () {
+		// ?nopcdiff uploads every push-constant slot each frame again, for
+		// A/B of skipping the slots whose values did not change.
+		return window.location.search.indexOf('nopcdiff') >= 0 ? 0 : 1;
+	},
+
 	$GodotWebGPUPassOps: {
 		// Dynamic offsets are copied out of the shared heap into this array:
 		// setBindGroup takes a typed array with an explicit range, which the
