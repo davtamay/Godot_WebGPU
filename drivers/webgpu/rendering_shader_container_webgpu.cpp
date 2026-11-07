@@ -789,6 +789,47 @@ static void _spirv_convert_memory_barriers(LocalVector<uint32_t> &p_module) {
 // stage's WGSL declares). Remove unused UniformConstant, Uniform and
 // StorageBuffer variables, then garbage-collect the handle-related types
 // they orphan (Tint also rejects the bare array TYPE).
+// True when word p_word of an instruction is a literal rather than an id.
+// Counting a literal as a use would keep alive whatever id happens to share
+// its value: a constant 1024 kept an orphaned array type %1024 and its
+// element struct, which Tint then emitted with an @internal attribute
+// browsers refuse to parse. Covers the operands that carry literals in the
+// modules Godot produces; one missed elsewhere only keeps a type alive.
+static bool _spirv_is_literal_word(uint32_t p_opcode, uint32_t p_word) {
+	switch (p_opcode) {
+		case 12: // OpExtInst: set id, then the instruction number.
+			return p_word == 4;
+		case 21: // OpTypeInt: width, signedness.
+		case 22: // OpTypeFloat: width.
+			return p_word >= 2;
+		case 23: // OpTypeVector: component type, then count.
+		case 24: // OpTypeMatrix: column type, then count.
+			return p_word == 3;
+		case 25: // OpTypeImage: sampled type, then dimension and flags.
+			return p_word >= 3;
+		case 32: // OpTypePointer: storage class.
+			return p_word == 2;
+		case 43: // OpConstant: value words.
+		case 50: // OpSpecConstant.
+			return p_word >= 3;
+		case 59: // OpVariable: storage class.
+			return p_word == 3;
+		case 79: // OpVectorShuffle: component selectors.
+		case 82: // OpCompositeInsert: indices.
+			return p_word >= 5;
+		case 81: // OpCompositeExtract: indices.
+			return p_word >= 4;
+		case 246: // OpLoopMerge: loop control.
+			return p_word >= 3;
+		case 247: // OpSelectionMerge: selection control.
+			return p_word == 2;
+		case 251: // OpSwitch: selector, default, then (literal, label) pairs.
+			return p_word >= 3 && (p_word - 3) % 2 == 0;
+		default:
+			return false;
+	}
+}
+
 static void _spirv_remove_unused_resource_bindings(LocalVector<uint32_t> &p_module) {
 	while (true) {
 		HashSet<uint32_t> used;
@@ -805,7 +846,7 @@ static void _spirv_remove_unused_resource_bindings(LocalVector<uint32_t> &p_modu
 					skip_result = opcode == SPIRV_OP_VARIABLE ? 2 : 1;
 				}
 				for (uint32_t w = 1; w < count; w++) {
-					if (w != skip_result) {
+					if (w != skip_result && !_spirv_is_literal_word(opcode, w)) {
 						used.insert(p_module[i + w]);
 					}
 				}
