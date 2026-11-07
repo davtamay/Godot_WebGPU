@@ -382,6 +382,13 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('noflushrange') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_use_pass_elide__sig: 'i',
+	godot_js_webgpu_use_pass_elide: function () {
+		// ?nopasselide opens load-only render passes at begin again, drawing
+		// or not, for A/B of eliding the empty ones.
+		return window.location.search.indexOf('nopasselide') >= 0 ? 0 : 1;
+	},
+
 	$GodotWebGPUPassOps: {
 		// Dynamic offsets are copied out of the shared heap into this array:
 		// setBindGroup takes a typed array with an explicit range, which the
