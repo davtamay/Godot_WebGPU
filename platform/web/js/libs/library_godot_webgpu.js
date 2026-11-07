@@ -375,6 +375,13 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('nojsops') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_use_flush_range__sig: 'i',
+	godot_js_webgpu_use_flush_range: function () {
+		// ?noflushrange diffs the whole dynamic slice on a ranged flush again,
+		// for A/B of trusting the range the engine names.
+		return window.location.search.indexOf('noflushrange') >= 0 ? 0 : 1;
+	},
+
 	$GodotWebGPUPassOps: {
 		// Dynamic offsets are copied out of the shared heap into this array:
 		// setBindGroup takes a typed array with an explicit range, which the
