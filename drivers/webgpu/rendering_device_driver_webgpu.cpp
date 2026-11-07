@@ -76,6 +76,11 @@ int godot_js_webgpu_use_state_skip();
 // 0 when the page URL carries ?alwayscapture (benchmark A/B switch for
 // encoding passes whose streams rarely repeat directly instead of capturing).
 int godot_js_webgpu_use_capture_gate();
+// 0 when the page URL carries ?nojsops (benchmark A/B switch for encoding
+// each render-pass command through its own binding call).
+int godot_js_webgpu_use_js_ops();
+// Encodes a pass's packed op stream (see _pass_flush_ops) in one call.
+void godot_js_webgpu_pass_ops(void *p_pass, const uint32_t *p_ops, int p_count);
 // 1 when the page URL carries ?perfcounters (periodic driver counter print).
 int godot_js_webgpu_perf_counters();
 // Publishes one window of driver counters to the page (see the JS library).
@@ -135,6 +140,10 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	use_capture_gate = godot_js_webgpu_use_capture_gate() != 0;
 	if (!use_capture_gate) {
 		print_line("WebGPU: every pass captured for bundling, repeating or not (?alwayscapture).");
+	}
+	use_js_ops = godot_js_webgpu_use_js_ops() != 0;
+	if (!use_js_ops) {
+		print_line("WebGPU: render-pass commands encoded one binding call each (?nojsops).");
 	}
 	perf_counters_enabled = godot_js_webgpu_perf_counters() != 0;
 	if (perf_counters_enabled) {
@@ -590,6 +599,7 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 	cb_info->render_pass_encoder = wgpuCommandEncoderBeginRenderPass(cb_info->encoder, &pass_desc);
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
 	cb_info->reset_bound_state();
+	cb_info->js_ops.clear();
 	cb_info->current_shader = nullptr;
 	cb_info->bind_group_dirty_mask = 0;
 	for (uint32_t i = 0; i < MAX_BIND_GROUPS; i++) {
@@ -644,6 +654,184 @@ void RenderingDeviceDriverWebGPU::_render_pass_flush_records(CommandBufferInfo *
 	p_cb_info->render_bundleable = false;
 }
 
+// Ops of the render-pass stream, one u32 opcode followed by its words.
+// Handles are wasm32 pointers; 64-bit offsets travel as low and high words.
+enum PassOp : uint32_t {
+	PASS_OP_SET_PIPELINE = 1, // pipeline
+	PASS_OP_SET_BIND_GROUP = 2, // index, group, count, offsets[count]
+	PASS_OP_SET_VERTEX_BUFFER = 3, // slot, buffer, offset lo, offset hi
+	PASS_OP_SET_INDEX_BUFFER = 4, // buffer, format, offset lo, offset hi
+	PASS_OP_DRAW = 5, // vertex count, instance count, first vertex, first instance
+	PASS_OP_DRAW_INDEXED = 6, // index count, instance count, first index, base vertex, first instance
+	PASS_OP_DRAW_INDIRECT = 7, // buffer, offset lo, offset hi
+	PASS_OP_DRAW_INDEXED_INDIRECT = 8, // buffer, offset lo, offset hi
+	PASS_OP_SET_VIEWPORT = 9, // x, y, width, height, min depth, max depth (f32 bits)
+	PASS_OP_SET_SCISSOR_RECT = 10, // x, y, width, height
+	PASS_OP_SET_BLEND_CONSTANT = 11, // r, g, b, a (f32 bits)
+};
+
+static _FORCE_INLINE_ uint32_t _pass_handle(const void *p_handle) {
+	return uint32_t(uintptr_t(p_handle));
+}
+
+static _FORCE_INLINE_ uint32_t _pass_float(float p_value) {
+	uint32_t bits;
+	memcpy(&bits, &p_value, sizeof(bits));
+	return bits;
+}
+
+void RenderingDeviceDriverWebGPU::_pass_set_pipeline(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, WGPURenderPipeline p_pipeline) {
+	if (!use_js_ops) {
+		wgpuRenderPassEncoderSetPipeline(p_pass, p_pipeline);
+		return;
+	}
+	p_cb_info->js_ops.push_back(PASS_OP_SET_PIPELINE);
+	p_cb_info->js_ops.push_back(_pass_handle(p_pipeline));
+}
+
+void RenderingDeviceDriverWebGPU::_pass_set_bind_group(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, uint32_t p_index, WGPUBindGroup p_group, size_t p_offset_count, const uint32_t *p_offsets) {
+	if (!use_js_ops) {
+		wgpuRenderPassEncoderSetBindGroup(p_pass, p_index, p_group, p_offset_count, p_offsets);
+		return;
+	}
+	LocalVector<uint32_t> &ops = p_cb_info->js_ops;
+	ops.push_back(PASS_OP_SET_BIND_GROUP);
+	ops.push_back(p_index);
+	ops.push_back(_pass_handle(p_group));
+	ops.push_back(uint32_t(p_offset_count));
+	for (size_t i = 0; i < p_offset_count; i++) {
+		ops.push_back(p_offsets[i]);
+	}
+}
+
+void RenderingDeviceDriverWebGPU::_pass_set_vertex_buffer(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, uint32_t p_slot, WGPUBuffer p_buffer, uint64_t p_offset, uint64_t p_size) {
+	if (!use_js_ops || p_size != WGPU_WHOLE_SIZE) {
+		_pass_flush_ops(p_cb_info, p_pass);
+		wgpuRenderPassEncoderSetVertexBuffer(p_pass, p_slot, p_buffer, p_offset, p_size);
+		return;
+	}
+	LocalVector<uint32_t> &ops = p_cb_info->js_ops;
+	ops.push_back(PASS_OP_SET_VERTEX_BUFFER);
+	ops.push_back(p_slot);
+	ops.push_back(_pass_handle(p_buffer));
+	ops.push_back(uint32_t(p_offset));
+	ops.push_back(uint32_t(p_offset >> 32));
+}
+
+void RenderingDeviceDriverWebGPU::_pass_set_index_buffer(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, WGPUBuffer p_buffer, WGPUIndexFormat p_format, uint64_t p_offset, uint64_t p_size) {
+	if (!use_js_ops || p_size != WGPU_WHOLE_SIZE) {
+		_pass_flush_ops(p_cb_info, p_pass);
+		wgpuRenderPassEncoderSetIndexBuffer(p_pass, p_buffer, p_format, p_offset, p_size);
+		return;
+	}
+	LocalVector<uint32_t> &ops = p_cb_info->js_ops;
+	ops.push_back(PASS_OP_SET_INDEX_BUFFER);
+	ops.push_back(_pass_handle(p_buffer));
+	ops.push_back(uint32_t(p_format));
+	ops.push_back(uint32_t(p_offset));
+	ops.push_back(uint32_t(p_offset >> 32));
+}
+
+void RenderingDeviceDriverWebGPU::_pass_draw(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, uint32_t p_vertex_count, uint32_t p_instance_count, uint32_t p_first_vertex, uint32_t p_first_instance) {
+	if (!use_js_ops) {
+		wgpuRenderPassEncoderDraw(p_pass, p_vertex_count, p_instance_count, p_first_vertex, p_first_instance);
+		return;
+	}
+	LocalVector<uint32_t> &ops = p_cb_info->js_ops;
+	ops.push_back(PASS_OP_DRAW);
+	ops.push_back(p_vertex_count);
+	ops.push_back(p_instance_count);
+	ops.push_back(p_first_vertex);
+	ops.push_back(p_first_instance);
+}
+
+void RenderingDeviceDriverWebGPU::_pass_draw_indexed(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, uint32_t p_index_count, uint32_t p_instance_count, uint32_t p_first_index, int32_t p_base_vertex, uint32_t p_first_instance) {
+	if (!use_js_ops) {
+		wgpuRenderPassEncoderDrawIndexed(p_pass, p_index_count, p_instance_count, p_first_index, p_base_vertex, p_first_instance);
+		return;
+	}
+	LocalVector<uint32_t> &ops = p_cb_info->js_ops;
+	ops.push_back(PASS_OP_DRAW_INDEXED);
+	ops.push_back(p_index_count);
+	ops.push_back(p_instance_count);
+	ops.push_back(p_first_index);
+	ops.push_back(uint32_t(p_base_vertex));
+	ops.push_back(p_first_instance);
+}
+
+void RenderingDeviceDriverWebGPU::_pass_draw_indirect(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, WGPUBuffer p_buffer, uint64_t p_offset) {
+	if (!use_js_ops) {
+		wgpuRenderPassEncoderDrawIndirect(p_pass, p_buffer, p_offset);
+		return;
+	}
+	LocalVector<uint32_t> &ops = p_cb_info->js_ops;
+	ops.push_back(PASS_OP_DRAW_INDIRECT);
+	ops.push_back(_pass_handle(p_buffer));
+	ops.push_back(uint32_t(p_offset));
+	ops.push_back(uint32_t(p_offset >> 32));
+}
+
+void RenderingDeviceDriverWebGPU::_pass_draw_indexed_indirect(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, WGPUBuffer p_buffer, uint64_t p_offset) {
+	if (!use_js_ops) {
+		wgpuRenderPassEncoderDrawIndexedIndirect(p_pass, p_buffer, p_offset);
+		return;
+	}
+	LocalVector<uint32_t> &ops = p_cb_info->js_ops;
+	ops.push_back(PASS_OP_DRAW_INDEXED_INDIRECT);
+	ops.push_back(_pass_handle(p_buffer));
+	ops.push_back(uint32_t(p_offset));
+	ops.push_back(uint32_t(p_offset >> 32));
+}
+
+void RenderingDeviceDriverWebGPU::_pass_set_viewport(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, float p_x, float p_y, float p_width, float p_height, float p_min_depth, float p_max_depth) {
+	if (!use_js_ops) {
+		wgpuRenderPassEncoderSetViewport(p_pass, p_x, p_y, p_width, p_height, p_min_depth, p_max_depth);
+		return;
+	}
+	LocalVector<uint32_t> &ops = p_cb_info->js_ops;
+	ops.push_back(PASS_OP_SET_VIEWPORT);
+	ops.push_back(_pass_float(p_x));
+	ops.push_back(_pass_float(p_y));
+	ops.push_back(_pass_float(p_width));
+	ops.push_back(_pass_float(p_height));
+	ops.push_back(_pass_float(p_min_depth));
+	ops.push_back(_pass_float(p_max_depth));
+}
+
+void RenderingDeviceDriverWebGPU::_pass_set_scissor_rect(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, uint32_t p_x, uint32_t p_y, uint32_t p_width, uint32_t p_height) {
+	if (!use_js_ops) {
+		wgpuRenderPassEncoderSetScissorRect(p_pass, p_x, p_y, p_width, p_height);
+		return;
+	}
+	LocalVector<uint32_t> &ops = p_cb_info->js_ops;
+	ops.push_back(PASS_OP_SET_SCISSOR_RECT);
+	ops.push_back(p_x);
+	ops.push_back(p_y);
+	ops.push_back(p_width);
+	ops.push_back(p_height);
+}
+
+void RenderingDeviceDriverWebGPU::_pass_set_blend_constant(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, const WGPUColor *p_color) {
+	if (!use_js_ops) {
+		wgpuRenderPassEncoderSetBlendConstant(p_pass, p_color);
+		return;
+	}
+	LocalVector<uint32_t> &ops = p_cb_info->js_ops;
+	ops.push_back(PASS_OP_SET_BLEND_CONSTANT);
+	ops.push_back(_pass_float(float(p_color->r)));
+	ops.push_back(_pass_float(float(p_color->g)));
+	ops.push_back(_pass_float(float(p_color->b)));
+	ops.push_back(_pass_float(float(p_color->a)));
+}
+
+void RenderingDeviceDriverWebGPU::_pass_flush_ops(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass) {
+	if (p_cb_info->js_ops.is_empty()) {
+		return;
+	}
+	godot_js_webgpu_pass_ops(p_pass, p_cb_info->js_ops.ptr(), int(p_cb_info->js_ops.size()));
+	p_cb_info->js_ops.clear();
+}
+
 void RenderingDeviceDriverWebGPU::_replay_render_records(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass_encoder, WGPURenderBundleEncoder p_bundle_encoder, WGPUBuffer p_indirect_params) {
 	// With p_indirect_params (bundle recording only), draws read their
 	// parameters from that buffer at 20-byte slots in draw order instead of
@@ -656,7 +844,7 @@ void RenderingDeviceDriverWebGPU::_replay_render_records(const CommandBufferInfo
 				if (p_bundle_encoder != nullptr) {
 					wgpuRenderBundleEncoderSetPipeline(p_bundle_encoder, rec.set_pipeline.pipeline);
 				} else {
-					wgpuRenderPassEncoderSetPipeline(p_pass_encoder, rec.set_pipeline.pipeline);
+					_pass_set_pipeline(p_cb_info, p_pass_encoder, rec.set_pipeline.pipeline);
 				}
 			} break;
 			case RenderCommandRecord::TYPE_SET_BIND_GROUP: {
@@ -664,21 +852,21 @@ void RenderingDeviceDriverWebGPU::_replay_render_records(const CommandBufferInfo
 				if (p_bundle_encoder != nullptr) {
 					wgpuRenderBundleEncoderSetBindGroup(p_bundle_encoder, rec.set_bind_group.index, rec.set_bind_group.group, rec.set_bind_group.offset_count, offsets);
 				} else {
-					wgpuRenderPassEncoderSetBindGroup(p_pass_encoder, rec.set_bind_group.index, rec.set_bind_group.group, rec.set_bind_group.offset_count, offsets);
+					_pass_set_bind_group(p_cb_info, p_pass_encoder, rec.set_bind_group.index, rec.set_bind_group.group, rec.set_bind_group.offset_count, offsets);
 				}
 			} break;
 			case RenderCommandRecord::TYPE_SET_VERTEX_BUFFER: {
 				if (p_bundle_encoder != nullptr) {
 					wgpuRenderBundleEncoderSetVertexBuffer(p_bundle_encoder, rec.set_vertex_buffer.slot, rec.set_vertex_buffer.buffer, rec.set_vertex_buffer.offset, WGPU_WHOLE_SIZE);
 				} else {
-					wgpuRenderPassEncoderSetVertexBuffer(p_pass_encoder, rec.set_vertex_buffer.slot, rec.set_vertex_buffer.buffer, rec.set_vertex_buffer.offset, WGPU_WHOLE_SIZE);
+					_pass_set_vertex_buffer(p_cb_info, p_pass_encoder, rec.set_vertex_buffer.slot, rec.set_vertex_buffer.buffer, rec.set_vertex_buffer.offset, WGPU_WHOLE_SIZE);
 				}
 			} break;
 			case RenderCommandRecord::TYPE_SET_INDEX_BUFFER: {
 				if (p_bundle_encoder != nullptr) {
 					wgpuRenderBundleEncoderSetIndexBuffer(p_bundle_encoder, rec.set_index_buffer.buffer, rec.set_index_buffer.format, rec.set_index_buffer.offset, WGPU_WHOLE_SIZE);
 				} else {
-					wgpuRenderPassEncoderSetIndexBuffer(p_pass_encoder, rec.set_index_buffer.buffer, rec.set_index_buffer.format, rec.set_index_buffer.offset, WGPU_WHOLE_SIZE);
+					_pass_set_index_buffer(p_cb_info, p_pass_encoder, rec.set_index_buffer.buffer, rec.set_index_buffer.format, rec.set_index_buffer.offset, WGPU_WHOLE_SIZE);
 				}
 			} break;
 			case RenderCommandRecord::TYPE_DRAW: {
@@ -690,7 +878,7 @@ void RenderingDeviceDriverWebGPU::_replay_render_records(const CommandBufferInfo
 						wgpuRenderBundleEncoderDraw(p_bundle_encoder, params.args[0], params.args[1], params.args[2], params.args[3]);
 					}
 				} else {
-					wgpuRenderPassEncoderDraw(p_pass_encoder, params.args[0], params.args[1], params.args[2], params.args[3]);
+					_pass_draw(p_cb_info, p_pass_encoder, params.args[0], params.args[1], params.args[2], params.args[3]);
 				}
 				draw_slot++;
 			} break;
@@ -703,7 +891,7 @@ void RenderingDeviceDriverWebGPU::_replay_render_records(const CommandBufferInfo
 						wgpuRenderBundleEncoderDrawIndexed(p_bundle_encoder, params.args[0], params.args[1], params.args[2], (int32_t)params.args[3], params.args[4]);
 					}
 				} else {
-					wgpuRenderPassEncoderDrawIndexed(p_pass_encoder, params.args[0], params.args[1], params.args[2], (int32_t)params.args[3], params.args[4]);
+					_pass_draw_indexed(p_cb_info, p_pass_encoder, params.args[0], params.args[1], params.args[2], (int32_t)params.args[3], params.args[4]);
 				}
 				draw_slot++;
 			} break;
@@ -711,14 +899,14 @@ void RenderingDeviceDriverWebGPU::_replay_render_records(const CommandBufferInfo
 				if (p_bundle_encoder != nullptr) {
 					wgpuRenderBundleEncoderDrawIndirect(p_bundle_encoder, rec.draw_indirect.buffer, rec.draw_indirect.offset);
 				} else {
-					wgpuRenderPassEncoderDrawIndirect(p_pass_encoder, rec.draw_indirect.buffer, rec.draw_indirect.offset);
+					_pass_draw_indirect(p_cb_info, p_pass_encoder, rec.draw_indirect.buffer, rec.draw_indirect.offset);
 				}
 			} break;
 			case RenderCommandRecord::TYPE_DRAW_INDEXED_INDIRECT: {
 				if (p_bundle_encoder != nullptr) {
 					wgpuRenderBundleEncoderDrawIndexedIndirect(p_bundle_encoder, rec.draw_indirect.buffer, rec.draw_indirect.offset);
 				} else {
-					wgpuRenderPassEncoderDrawIndexedIndirect(p_pass_encoder, rec.draw_indirect.buffer, rec.draw_indirect.offset);
+					_pass_draw_indexed_indirect(p_cb_info, p_pass_encoder, rec.draw_indirect.buffer, rec.draw_indirect.offset);
 				}
 			} break;
 		}
@@ -894,6 +1082,7 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 			}
 		}
 		if (bundle != nullptr) {
+			_pass_flush_ops(cb_info, cb_info->render_pass_encoder);
 			wgpuRenderPassEncoderExecuteBundles(cb_info->render_pass_encoder, 1, &bundle);
 		} else {
 			// First sighting of this stream (or bundle creation failed, or an
@@ -903,6 +1092,7 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 			_replay_render_records(cb_info, cb_info->render_pass_encoder, nullptr);
 		}
 	}
+	_pass_flush_ops(cb_info, cb_info->render_pass_encoder);
 	wgpuRenderPassEncoderEnd(cb_info->render_pass_encoder);
 	wgpuRenderPassEncoderRelease(cb_info->render_pass_encoder);
 	cb_info->render_pass_encoder = nullptr;
@@ -4535,7 +4725,7 @@ void RenderingDeviceDriverWebGPU::_flush_bind_groups(CommandBufferInfo *p_cb_inf
 				}
 				_record_render_command(p_cb_info, rec);
 			} else {
-				wgpuRenderPassEncoderSetBindGroup(p_cb_info->render_pass_encoder, i, bind_group, offset_count, offset_count == 0 ? nullptr : offsets);
+				_pass_set_bind_group(p_cb_info, p_cb_info->render_pass_encoder, i, bind_group, offset_count, offset_count == 0 ? nullptr : offsets);
 			}
 		} else if (p_cb_info->compute_pass_encoder != nullptr) {
 			wgpuComputePassEncoderSetBindGroup(p_cb_info->compute_pass_encoder, i, bind_group, offset_count, offset_count == 0 ? nullptr : offsets);
@@ -4575,7 +4765,7 @@ void RenderingDeviceDriverWebGPU::command_bind_render_pipeline(CommandBufferID p
 		rec.set_pipeline.pipeline = pipeline->render_pipeline;
 		_record_render_command(cb_info, rec);
 	} else {
-		wgpuRenderPassEncoderSetPipeline(cb_info->render_pass_encoder, pipeline->render_pipeline);
+		_pass_set_pipeline(cb_info, cb_info->render_pass_encoder, pipeline->render_pipeline);
 	}
 	cb_info->current_shader = pipeline->shader;
 	cb_info->bind_group_dirty_mask = (1u << MAX_BIND_GROUPS) - 1;
@@ -4620,7 +4810,7 @@ void RenderingDeviceDriverWebGPU::command_render_draw(CommandBufferID p_cmd_buff
 		_record_render_command(cb_info, rec);
 		return;
 	}
-	wgpuRenderPassEncoderDraw(cb_info->render_pass_encoder, p_vertex_count, p_instance_count, p_base_vertex, p_first_instance);
+	_pass_draw(cb_info, cb_info->render_pass_encoder, p_vertex_count, p_instance_count, p_base_vertex, p_first_instance);
 }
 
 void RenderingDeviceDriverWebGPU::command_render_draw_indexed(CommandBufferID p_cmd_buffer, uint32_t p_index_count, uint32_t p_instance_count, uint32_t p_first_index, int32_t p_vertex_offset, uint32_t p_first_instance) {
@@ -4642,7 +4832,7 @@ void RenderingDeviceDriverWebGPU::command_render_draw_indexed(CommandBufferID p_
 		_record_render_command(cb_info, rec);
 		return;
 	}
-	wgpuRenderPassEncoderDrawIndexed(cb_info->render_pass_encoder, p_index_count, p_instance_count, p_first_index, p_vertex_offset, p_first_instance);
+	_pass_draw_indexed(cb_info, cb_info->render_pass_encoder, p_index_count, p_instance_count, p_first_index, p_vertex_offset, p_first_instance);
 }
 
 void RenderingDeviceDriverWebGPU::command_render_draw_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
@@ -4658,7 +4848,7 @@ void RenderingDeviceDriverWebGPU::command_render_draw_indirect(CommandBufferID p
 			rec.draw_indirect.offset = p_offset + i * p_stride;
 			_record_render_command(cb_info, rec);
 		} else {
-			wgpuRenderPassEncoderDrawIndirect(cb_info->render_pass_encoder, ((BufferInfo *)p_indirect_buffer.id)->buffer, p_offset + i * p_stride);
+			_pass_draw_indirect(cb_info, cb_info->render_pass_encoder, ((BufferInfo *)p_indirect_buffer.id)->buffer, p_offset + i * p_stride);
 		}
 	}
 }
@@ -4693,7 +4883,7 @@ void RenderingDeviceDriverWebGPU::command_render_bind_vertex_buffers(CommandBuff
 			rec.set_vertex_buffer.offset = offset;
 			_record_render_command(cb_info, rec);
 		} else {
-			wgpuRenderPassEncoderSetVertexBuffer(cb_info->render_pass_encoder, i, buffer->buffer, offset, WGPU_WHOLE_SIZE);
+			_pass_set_vertex_buffer(cb_info, cb_info->render_pass_encoder, i, buffer->buffer, offset, WGPU_WHOLE_SIZE);
 		}
 	}
 }
@@ -4719,7 +4909,7 @@ void RenderingDeviceDriverWebGPU::command_render_bind_index_buffer(CommandBuffer
 		_record_render_command(cb_info, rec);
 		return;
 	}
-	wgpuRenderPassEncoderSetIndexBuffer(cb_info->render_pass_encoder, ((BufferInfo *)p_buffer.id)->buffer, format, p_offset, WGPU_WHOLE_SIZE);
+	_pass_set_index_buffer(cb_info, cb_info->render_pass_encoder, ((BufferInfo *)p_buffer.id)->buffer, format, p_offset, WGPU_WHOLE_SIZE);
 }
 
 void RenderingDeviceDriverWebGPU::command_render_set_viewport(CommandBufferID p_cmd_buffer, VectorView<Rect2i> p_viewports) {
@@ -4731,7 +4921,7 @@ void RenderingDeviceDriverWebGPU::command_render_set_viewport(CommandBufferID p_
 		_render_pass_flush_records(cb_info);
 	}
 	const Rect2i &viewport = p_viewports[0];
-	wgpuRenderPassEncoderSetViewport(cb_info->render_pass_encoder, viewport.position.x, viewport.position.y, viewport.size.width, viewport.size.height, 0.0f, 1.0f);
+	_pass_set_viewport(cb_info, cb_info->render_pass_encoder, viewport.position.x, viewport.position.y, viewport.size.width, viewport.size.height, 0.0f, 1.0f);
 }
 
 void RenderingDeviceDriverWebGPU::command_render_set_scissor(CommandBufferID p_cmd_buffer, VectorView<Rect2i> p_scissors) {
@@ -4743,7 +4933,7 @@ void RenderingDeviceDriverWebGPU::command_render_set_scissor(CommandBufferID p_c
 		_render_pass_flush_records(cb_info);
 	}
 	const Rect2i &scissor = p_scissors[0];
-	wgpuRenderPassEncoderSetScissorRect(cb_info->render_pass_encoder, scissor.position.x, scissor.position.y, scissor.size.width, scissor.size.height);
+	_pass_set_scissor_rect(cb_info, cb_info->render_pass_encoder, scissor.position.x, scissor.position.y, scissor.size.width, scissor.size.height);
 }
 
 void RenderingDeviceDriverWebGPU::command_render_set_blend_constants(CommandBufferID p_cmd_buffer, const Color &p_constants) {
@@ -4754,7 +4944,7 @@ void RenderingDeviceDriverWebGPU::command_render_set_blend_constants(CommandBuff
 		_render_pass_flush_records(cb_info);
 	}
 	WGPUColor color = { p_constants.r, p_constants.g, p_constants.b, p_constants.a };
-	wgpuRenderPassEncoderSetBlendConstant(cb_info->render_pass_encoder, &color);
+	_pass_set_blend_constant(cb_info, cb_info->render_pass_encoder, &color);
 }
 
 // Specialization constants become override values keyed by @id. Only ids
