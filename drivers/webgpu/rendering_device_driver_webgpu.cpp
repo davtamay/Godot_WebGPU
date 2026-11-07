@@ -1883,6 +1883,53 @@ uint8_t *RenderingDeviceDriverWebGPU::buffer_persistent_map_advance(BufferID p_b
 	return buffer->shadow + buffer->frame_idx * buffer->slice_stride;
 }
 
+// First and last differing 8-byte words of two equally sized ranges, compared
+// with plain 64-bit loads. memcmp here is a byte loop, so a slice compared in
+// 64-byte memcmp calls cost a byte compare per byte even when nothing changed.
+static uint64_t _first_difference(const uint8_t *p_a, const uint8_t *p_b, uint64_t p_size) {
+	uint64_t i = 0;
+	for (; i + 8 <= p_size; i += 8) {
+		uint64_t a, b;
+		memcpy(&a, p_a + i, 8);
+		memcpy(&b, p_b + i, 8);
+		if (a != b) {
+			return i;
+		}
+	}
+	for (; i < p_size; i++) {
+		if (p_a[i] != p_b[i]) {
+			return i;
+		}
+	}
+	return p_size;
+}
+
+static uint64_t _last_difference_end(const uint8_t *p_a, const uint8_t *p_b, uint64_t p_from, uint64_t p_size) {
+	uint64_t end = p_size;
+	while (end > p_from && (end & 7u) != 0) {
+		if (p_a[end - 1] != p_b[end - 1]) {
+			return end;
+		}
+		end--;
+	}
+	while (end >= p_from + 8) {
+		uint64_t a, b;
+		memcpy(&a, p_a + end - 8, 8);
+		memcpy(&b, p_b + end - 8, 8);
+		if (a != b) {
+			return end;
+		}
+		end -= 8;
+	}
+	while (end > p_from) {
+		if (p_a[end - 1] != p_b[end - 1]) {
+			return end;
+		}
+		end--;
+	}
+	return p_from;
+}
+
 void RenderingDeviceDriverWebGPU::_flush_dynamic_slice(BufferInfo *p_buffer) {
 	// The engine writes through the persistent map, so the flush API carries
 	// no range: diff the slice against the bytes last uploaded and write only
@@ -1909,28 +1956,16 @@ void RenderingDeviceDriverWebGPU::_flush_dynamic_slice(BufferInfo *p_buffer) {
 		p_buffer->dirty = false;
 		return;
 	}
-	// Trim from both ends at 64-byte granularity (wgpuQueueWriteBuffer needs
-	// 4-byte alignment; 64 keeps the scan in memcmp's vectorized fast path).
-	uint64_t lo = 0;
-	while (lo < stride) {
-		const uint64_t step = MIN(64ull, stride - lo);
-		if (memcmp(last + lo, src + lo, step) != 0) {
-			break;
-		}
-		lo += step;
-	}
-	if (lo >= stride) {
+	// Trim the unchanged head and tail, then widen to 64-byte boundaries
+	// (wgpuQueueWriteBuffer needs 4-byte alignment; 64 keeps writes whole).
+	const uint64_t first = _first_difference(last, src, stride);
+	if (first >= stride) {
 		p_buffer->dirty = false;
 		return; // Identical - nothing to upload.
 	}
-	uint64_t hi = stride;
-	while (hi > lo + 64) {
-		const uint64_t step = 64;
-		if (memcmp(last + hi - step, src + hi - step, step) != 0) {
-			break;
-		}
-		hi -= step;
-	}
+	const uint64_t lo = first & ~uint64_t(63);
+	const uint64_t end = _last_difference_end(last, src, first, stride);
+	const uint64_t hi = MIN(stride, (end + 63) & ~uint64_t(63));
 	_counted_write_buffer(p_buffer->buffer, offset + lo, src + lo, hi - lo);
 	memcpy(last + lo, src + lo, hi - lo);
 	p_buffer->dirty = false;
