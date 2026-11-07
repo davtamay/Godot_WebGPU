@@ -70,6 +70,9 @@ int godot_js_webgpu_use_diff_flush();
 // 0 when the page URL carries ?nowritebatch (benchmark A/B switch for
 // uploading staging regions at submission rather than as each copy is recorded).
 int godot_js_webgpu_use_write_batching();
+// 0 when the page URL carries ?nostateskip (benchmark A/B switch for
+// skipping pipeline and buffer binds that repeat what is already bound).
+int godot_js_webgpu_use_state_skip();
 // 1 when the page URL carries ?perfcounters (periodic driver counter print).
 int godot_js_webgpu_perf_counters();
 // Publishes one window of driver counters to the page (see the JS library).
@@ -121,6 +124,10 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	use_write_batching = godot_js_webgpu_use_write_batching() != 0;
 	if (!use_write_batching) {
 		print_line("WebGPU: staging uploads per copy, not batched at submission (?nowritebatch).");
+	}
+	use_state_skip = godot_js_webgpu_use_state_skip() != 0;
+	if (!use_state_skip) {
+		print_line("WebGPU: repeated pipeline and buffer binds encoded as issued (?nostateskip).");
 	}
 	perf_counters_enabled = godot_js_webgpu_perf_counters() != 0;
 	if (perf_counters_enabled) {
@@ -575,6 +582,7 @@ void RenderingDeviceDriverWebGPU::command_begin_render_pass(CommandBufferID p_cm
 
 	cb_info->render_pass_encoder = wgpuCommandEncoderBeginRenderPass(cb_info->encoder, &pass_desc);
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
+	cb_info->reset_bound_state();
 	cb_info->current_shader = nullptr;
 	cb_info->bind_group_dirty_mask = 0;
 	for (uint32_t i = 0; i < MAX_BIND_GROUPS; i++) {
@@ -4487,6 +4495,12 @@ void RenderingDeviceDriverWebGPU::command_bind_render_pipeline(CommandBufferID p
 		return;
 	}
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
+	if (use_state_skip && cb_info->bound_pipeline == (const void *)pipeline->render_pipeline) {
+		// Same pipeline, same layout: the bound groups all still apply, so
+		// only sets the engine has changed since need binding again.
+		return;
+	}
+	cb_info->bound_pipeline = pipeline->render_pipeline;
 	if (cb_info->render_bundleable) {
 		RenderCommandRecord rec;
 		memset(&rec, 0, sizeof(rec));
@@ -4595,6 +4609,14 @@ void RenderingDeviceDriverWebGPU::command_render_bind_vertex_buffers(CommandBuff
 			shift += 2u;
 			offset += frame_idx * buffer->slice_stride;
 		}
+		if (i < CommandBufferInfo::TRACKED_VERTEX_SLOTS) {
+			CommandBufferInfo::BoundVertexBuffer &bound = cb_info->bound_vertex_buffers[i];
+			if (use_state_skip && bound.buffer == buffer->buffer && bound.offset == offset) {
+				continue;
+			}
+			bound.buffer = buffer->buffer;
+			bound.offset = offset;
+		}
 		if (cb_info->render_bundleable) {
 			RenderCommandRecord rec;
 			memset(&rec, 0, sizeof(rec));
@@ -4613,6 +4635,13 @@ void RenderingDeviceDriverWebGPU::command_render_bind_index_buffer(CommandBuffer
 	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
 	const WGPUIndexFormat format = p_format == INDEX_BUFFER_FORMAT_UINT16 ? WGPUIndexFormat_Uint16 : WGPUIndexFormat_Uint32;
+	const WGPUBuffer index_buffer = ((BufferInfo *)p_buffer.id)->buffer;
+	if (use_state_skip && cb_info->bound_index_buffer == index_buffer && cb_info->bound_index_format == format && cb_info->bound_index_offset == p_offset) {
+		return;
+	}
+	cb_info->bound_index_buffer = index_buffer;
+	cb_info->bound_index_format = format;
+	cb_info->bound_index_offset = p_offset;
 	if (cb_info->render_bundleable) {
 		RenderCommandRecord rec;
 		memset(&rec, 0, sizeof(rec));
@@ -5134,10 +5163,17 @@ void RenderingDeviceDriverWebGPU::command_bind_compute_pipeline(CommandBufferID 
 		// it before any encoder-level command (copies, render passes, end).
 		cb_info->compute_pass_encoder = wgpuCommandEncoderBeginComputePass(cb_info->encoder, nullptr);
 		ERR_FAIL_NULL(cb_info->compute_pass_encoder);
+		cb_info->reset_bound_state();
 	}
 	if (!_ensure_compute_pipeline(pipeline)) {
 		return;
 	}
+	if (use_state_skip && cb_info->bound_pipeline == (const void *)pipeline->compute_pipeline) {
+		// The engine rebinds a pipeline between dispatches of one effect; the
+		// groups bound for it still apply.
+		return;
+	}
+	cb_info->bound_pipeline = pipeline->compute_pipeline;
 	wgpuComputePassEncoderSetPipeline(cb_info->compute_pass_encoder, pipeline->compute_pipeline);
 	cb_info->current_shader = pipeline->shader;
 	cb_info->bind_group_dirty_mask = (1u << MAX_BIND_GROUPS) - 1;

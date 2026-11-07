@@ -354,6 +354,13 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('nowritebatch') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_use_state_skip__sig: 'i',
+	godot_js_webgpu_use_state_skip: function () {
+		// ?nostateskip encodes every pipeline and buffer bind the engine
+		// issues, repeats included, for A/B of skipping what is already bound.
+		return window.location.search.indexOf('nostateskip') >= 0 ? 0 : 1;
+	},
+
 	godot_js_webgpu_use_subgroups__sig: 'i',
 	godot_js_webgpu_use_subgroups: function () {
 		// Native wave ops are OPT-IN (?subgroups) for now: Chrome 152's D3D12
