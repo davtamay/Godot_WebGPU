@@ -275,6 +275,11 @@ private:
 		RenderPassInfo *render_pass_info = nullptr;
 		FramebufferInfo *render_framebuffer = nullptr;
 		uint32_t render_capture_position = 0;
+		// Render-pass commands bound for the encoder, packed as u32 ops (see
+		// _pass_flush_ops): one call into JavaScript per pass instead of one
+		// per command, each of which converted 64-bit offsets to BigInt and
+		// looked its objects up again. Mutable: record replay is const.
+		mutable LocalVector<uint32_t> js_ops;
 		// Bind groups are deferred to draw/dispatch time: the group that
 		// carries the push-constant ring entry needs a dynamic offset that
 		// only arrives with command_bind_push_constants, which the engine
@@ -725,6 +730,20 @@ public:
 	void _record_render_command(CommandBufferInfo *p_cb_info, const RenderCommandRecord &p_record);
 	void _render_pass_flush_records(CommandBufferInfo *p_cb_info);
 	void _replay_render_records(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass_encoder, WGPURenderBundleEncoder p_bundle_encoder, WGPUBuffer p_indirect_params = nullptr);
+	// Render-pass encoder commands: appended to the command buffer's op
+	// stream, or encoded at once under ?nojsops.
+	void _pass_set_pipeline(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, WGPURenderPipeline p_pipeline);
+	void _pass_set_bind_group(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, uint32_t p_index, WGPUBindGroup p_group, size_t p_offset_count, const uint32_t *p_offsets);
+	void _pass_set_vertex_buffer(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, uint32_t p_slot, WGPUBuffer p_buffer, uint64_t p_offset, uint64_t p_size);
+	void _pass_set_index_buffer(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, WGPUBuffer p_buffer, WGPUIndexFormat p_format, uint64_t p_offset, uint64_t p_size);
+	void _pass_draw(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, uint32_t p_vertex_count, uint32_t p_instance_count, uint32_t p_first_vertex, uint32_t p_first_instance);
+	void _pass_draw_indexed(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, uint32_t p_index_count, uint32_t p_instance_count, uint32_t p_first_index, int32_t p_base_vertex, uint32_t p_first_instance);
+	void _pass_draw_indirect(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, WGPUBuffer p_buffer, uint64_t p_offset);
+	void _pass_draw_indexed_indirect(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, WGPUBuffer p_buffer, uint64_t p_offset);
+	void _pass_set_viewport(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, float p_x, float p_y, float p_width, float p_height, float p_min_depth, float p_max_depth);
+	void _pass_set_scissor_rect(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, uint32_t p_x, uint32_t p_y, uint32_t p_width, uint32_t p_height);
+	void _pass_set_blend_constant(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass, const WGPUColor *p_color);
+	void _pass_flush_ops(const CommandBufferInfo *p_cb_info, WGPURenderPassEncoder p_pass);
 	// Bumped whenever any resource class a bundle can reference is freed;
 	// cache entries recorded under an older epoch are treated as misses.
 	uint64_t resource_epoch = 0;
@@ -736,6 +755,7 @@ public:
 	bool use_write_batching = true;
 	bool use_state_skip = true;
 	bool use_capture_gate = true;
+	bool use_js_ops = true;
 	bool device_has_indirect_first_instance = false;
 	uint64_t present_count = 0;
 
