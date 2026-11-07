@@ -85,6 +85,9 @@ int godot_js_webgpu_use_flush_range();
 // 0 when the page URL carries ?nopasselide (benchmark A/B switch for opening
 // load-only render passes at begin even when they draw nothing).
 int godot_js_webgpu_use_pass_elide();
+// 0 when the page URL carries ?nopcdiff (benchmark A/B switch for uploading
+// every push-constant slot each frame instead of only the changed ones).
+int godot_js_webgpu_use_push_constant_diff();
 // Encodes a pass's packed op stream (see _pass_flush_ops) in one call.
 void godot_js_webgpu_pass_ops(void *p_pass, const uint32_t *p_ops, int p_count);
 // 1 when the page URL carries ?perfcounters (periodic driver counter print).
@@ -163,6 +166,10 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	if (!use_pass_elide) {
 		print_line("WebGPU: load-only render passes open at begin, drawing or not (?nopasselide).");
 	}
+	use_push_constant_diff = godot_js_webgpu_use_push_constant_diff() != 0;
+	if (!use_push_constant_diff) {
+		print_line("WebGPU: every push-constant slot is uploaded each frame (?nopcdiff).");
+	}
 	perf_counters_enabled = godot_js_webgpu_perf_counters() != 0;
 	if (perf_counters_enabled) {
 		print_line("WebGPU: driver perf counters enabled (?perfcounters).");
@@ -224,9 +231,11 @@ Error RenderingDeviceDriverWebGPU::command_queue_execute_and_present(CommandQueu
 			wgpu_buffers.push_back(cb_info->command_buffer);
 		}
 		_flush_pending_shadow_writes();
-		if (push_constant_used > 0) {
-			_counted_write_buffer(push_constant_buffer, 0, push_constant_shadow, push_constant_used);
+		for (uint32_t i = 0; i < push_constant_dirty_spans.size(); i += 2) {
+			const uint32_t begin = push_constant_dirty_spans[i];
+			_counted_write_buffer(push_constant_buffer, begin, push_constant_shadow + begin, push_constant_dirty_spans[i + 1] - begin);
 		}
+		push_constant_dirty_spans.clear();
 		// Persistent-map writes have no flush on coherent-memory platforms;
 		// push dirty slices before their commands execute.
 		for (BufferInfo *dynamic_buffer : dynamic_buffers_all) {
@@ -4739,10 +4748,32 @@ void RenderingDeviceDriverWebGPU::command_bind_push_constants(CommandBufferID p_
 		}
 		return;
 	}
-	memcpy(push_constant_shadow + push_constant_used, p_data.ptr(), data_size);
+	uint32_t *slot = (uint32_t *)(push_constant_shadow + push_constant_used);
+	bool changed = !use_push_constant_diff;
+	for (uint32_t i = 0; i < p_data.size() && !changed; i++) {
+		changed = slot[i] != p_data[i];
+	}
+	if (changed) {
+		memcpy(slot, p_data.ptr(), data_size);
+		_push_constant_mark_dirty(push_constant_used, data_size);
+	}
 	cb_info->push_constant_offset = push_constant_used;
 	push_constant_used += PUSH_CONSTANT_SLOT_SIZE;
 	cb_info->push_constant_dirty = true;
+}
+
+void RenderingDeviceDriverWebGPU::_push_constant_mark_dirty(uint32_t p_offset, uint32_t p_size) {
+	// Slots are taken in increasing order within a frame, so only the last
+	// span can absorb this one. A gap of a few slots is cheaper to upload
+	// than another writeBuffer call.
+	const uint32_t end = p_offset + p_size;
+	const uint32_t count = push_constant_dirty_spans.size();
+	if (count > 0 && p_offset <= push_constant_dirty_spans[count - 1] + 4 * PUSH_CONSTANT_SLOT_SIZE) {
+		push_constant_dirty_spans[count - 1] = MAX(push_constant_dirty_spans[count - 1], end);
+		return;
+	}
+	push_constant_dirty_spans.push_back(p_offset);
+	push_constant_dirty_spans.push_back(end);
 }
 
 void RenderingDeviceDriverWebGPU::_flush_bind_groups(CommandBufferInfo *p_cb_info) {
@@ -5643,6 +5674,10 @@ bool RenderingDeviceDriverWebGPU::_push_constant_ring_allocate(uint32_t p_capaci
 	}
 	push_constant_buffer = buffer;
 	push_constant_shadow = (uint8_t *)memrealloc(push_constant_shadow, p_capacity);
+	// A new buffer starts zeroed; the shadow must match it for slots to be
+	// compared against what the GPU holds.
+	memset(push_constant_shadow, 0, p_capacity);
+	push_constant_dirty_spans.clear();
 	push_constant_capacity = p_capacity;
 	return true;
 }
