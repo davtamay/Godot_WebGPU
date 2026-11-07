@@ -361,6 +361,13 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('nostateskip') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_use_capture_gate__sig: 'i',
+	godot_js_webgpu_use_capture_gate: function () {
+		// ?alwayscapture buffers every pass for bundling again, including
+		// positions whose streams rarely repeat, for A/B of the capture gate.
+		return window.location.search.indexOf('alwayscapture') >= 0 ? 0 : 1;
+	},
+
 	godot_js_webgpu_use_subgroups__sig: 'i',
 	godot_js_webgpu_use_subgroups: function () {
 		// Native wave ops are OPT-IN (?subgroups) for now: Chrome 152's D3D12
