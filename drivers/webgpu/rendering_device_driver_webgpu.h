@@ -168,6 +168,9 @@ private:
 		// Bindings present in each set's layout (variants can reflect fewer
 		// bindings than the engine binds; extras must be skipped at build).
 		LocalVector<HashSet<uint32_t>> layout_bindings;
+		// Bit per set whose layout carries the push-constant ring entry, so
+		// the per-draw flush need not search layout_bindings for it.
+		uint32_t push_constant_set_mask = 0;
 		// Color targets without a matching fragment output must have an empty
 		// write mask (Vulkan tolerates the mismatch, WebGPU validates it).
 		uint32_t fragment_output_mask = 0;
@@ -442,6 +445,12 @@ private:
 		// Ring generation the cached groups were built against; a grown ring
 		// is a new buffer, so stale groups are dropped and rebuilt lazily.
 		uint32_t push_constant_epoch = 0;
+		// The layout this set was last flushed for, its group, and which of
+		// its dynamic offsets that layout declares (bit per dynamic buffer):
+		// consecutive draws with one shader skip the hash lookups entirely.
+		const void *last_layout = nullptr;
+		WGPUBindGroup last_group = nullptr;
+		uint32_t last_offset_keep_mask = 0;
 	};
 
 	struct PipelineInfo;
