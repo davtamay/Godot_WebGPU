@@ -646,6 +646,7 @@ public:
 	virtual void buffer_unmap(BufferID p_buffer) override;
 	virtual uint8_t *buffer_persistent_map_advance(BufferID p_buffer, uint64_t p_frames_drawn) override;
 	virtual void buffer_flush(BufferID p_buffer) override;
+	virtual void buffer_flush_range(BufferID p_buffer, uint64_t p_offset, uint64_t p_size) override;
 	virtual uint64_t buffer_get_dynamic_offsets(Span<BufferID> p_buffers) override;
 	virtual uint64_t buffer_get_device_address(BufferID p_buffer) override { ERR_FAIL_V_MSG(0, UNIMPLEMENTED); }
 	static void _apply_srgb_view_usage(WGPUTextureViewDescriptor &r_view_desc, const TextureInfo *p_original);
@@ -756,6 +757,7 @@ public:
 	bool use_state_skip = true;
 	bool use_capture_gate = true;
 	bool use_js_ops = true;
+	bool use_flush_range = true;
 	bool device_has_indirect_first_instance = false;
 	uint64_t present_count = 0;
 
@@ -784,7 +786,7 @@ public:
 		wgpuQueueWriteBuffer(queue, p_buffer, p_offset, p_data, p_size);
 	}
 
-	void _flush_dynamic_slice(BufferInfo *p_buffer);
+	void _flush_dynamic_slice(BufferInfo *p_buffer, uint64_t p_offset = 0, uint64_t p_size = UINT64_MAX);
 
 	// Staging bytes a recorded copy reads, uploaded at the next submission in
 	// as few calls as possible (see _flush_pending_shadow_writes).

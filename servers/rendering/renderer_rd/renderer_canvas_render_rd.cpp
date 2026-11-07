@@ -923,9 +923,10 @@ void RendererCanvasRenderRD::canvas_render_items(RID p_to_render_target, Item *p
 
 	state.instance_data = nullptr;
 	if (state.instance_data_index > 0) {
-		// If there was any remaining instance data, it must be flushed.
+		// If there was any remaining instance data, it must be flushed. Writes
+		// began at the start of the buffer or continued it this frame.
 		RID buf = state.instance_buffers._get(0);
-		RD::get_singleton()->buffer_flush(buf);
+		RD::get_singleton()->buffer_flush_range(buf, 0, state.instance_data_index * sizeof(InstanceData));
 		state.instance_data_index = 0;
 	}
 }
