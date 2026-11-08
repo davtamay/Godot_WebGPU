@@ -48,7 +48,8 @@ private:
 
 	struct BufferInfo {
 		WGPUBuffer buffer = nullptr;
-		uint64_t size = 0;
+		uint64_t size = 0; // Allocated size, rounded up to 4 bytes.
+		uint64_t requested_size = 0; // Size the engine asked for.
 		// Dynamic (persistently mapped) buffers hold one slice per frame in
 		// flight; binds select the slice with a dynamic offset of
 		// frame_idx * slice_stride (stride is alignment-padded, the binding
@@ -642,6 +643,8 @@ private:
 	WGPUBindGroup _shader_build_push_constant_bind_group(const ShaderInfo *p_shader);
 
 	void _flush_bind_groups(CommandBufferInfo *p_cb_info);
+	void _encode_buffer_copy(WGPUCommandEncoder p_encoder, const BufferInfo *p_src, uint64_t p_src_offset, const BufferInfo *p_dst, uint64_t p_dst_offset, uint64_t p_size);
+	bool unaligned_copy_reported = false;
 	void _end_compute_pass(CommandBufferInfo *p_cb_info);
 
 	MultiviewCapabilities multiview_capabilities;
