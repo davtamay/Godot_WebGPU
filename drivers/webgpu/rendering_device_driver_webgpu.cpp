@@ -986,6 +986,11 @@ void RenderingDeviceDriverWebGPU::_replay_render_records(const CommandBufferInfo
 // Defined with the dynamic-slice upload below.
 static uint64_t _first_difference(const uint8_t *p_a, const uint8_t *p_b, uint64_t p_size);
 
+// WebGPU supports 1 and 4 samples per texture only.
+static uint32_t _wgpu_sample_count(RenderingDeviceCommons::TextureSamples p_samples) {
+	return p_samples == RenderingDeviceCommons::TEXTURE_SAMPLES_1 ? 1u : 4u;
+}
+
 void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_buffer) {
 	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
@@ -2354,7 +2359,6 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 		wgpu_format = WGPUTextureFormat_RG8Uint;
 	}
 	ERR_FAIL_COND_V_MSG(wgpu_format == WGPUTextureFormat_Undefined, TextureID(), vformat("Unsupported texture format %d on the WebGPU driver.", p_format.format));
-	ERR_FAIL_COND_V_MSG(p_format.samples != TEXTURE_SAMPLES_1 && p_format.samples != TEXTURE_SAMPLES_4, TextureID(), "WebGPU only supports 1 or 4 samples per texture.");
 
 	WGPUTextureUsage usage = WGPUTextureUsage_None;
 	if (p_format.usage_bits & (TEXTURE_USAGE_SAMPLING_BIT | TEXTURE_USAGE_INPUT_ATTACHMENT_BIT)) {
@@ -2445,7 +2449,9 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create(con
 		texture_desc.viewFormats = &srgb_sibling;
 	}
 	texture_desc.mipLevelCount = p_format.mipmaps;
-	texture_desc.sampleCount = p_format.samples == TEXTURE_SAMPLES_4 ? 4 : 1;
+	// WebGPU has only 1 and 4 samples; 2x, 8x and above use 4x (on tiled GPUs
+	// 2x costs the same as 4x). Attachments and pipelines map the same way.
+	texture_desc.sampleCount = _wgpu_sample_count(p_format.samples);
 	switch (p_format.texture_type) {
 		case TEXTURE_TYPE_1D:
 			texture_desc.dimension = WGPUTextureDimension_1D;
@@ -4392,7 +4398,7 @@ RenderingDeviceDriver::RenderPassID RenderingDeviceDriverWebGPU::render_pass_cre
 			pass_attachment.format = WGPUTextureFormat_RG8Uint;
 		}
 		pass_attachment.is_depth_stencil = _is_depth_stencil_format(attachment.format);
-		pass_attachment.texture_samples = 1u << attachment.samples;
+		pass_attachment.texture_samples = _wgpu_sample_count(attachment.samples);
 		pass_attachment.load_op = attachment.load_op == ATTACHMENT_LOAD_OP_LOAD ? WGPULoadOp_Load : WGPULoadOp_Clear;
 		pass_attachment.store_op = attachment.store_op == ATTACHMENT_STORE_OP_STORE ? WGPUStoreOp_Store : WGPUStoreOp_Discard;
 		pass_attachment.stencil_load_op = attachment.stencil_load_op == ATTACHMENT_LOAD_OP_LOAD ? WGPULoadOp_Load : WGPULoadOp_Clear;
@@ -5332,7 +5338,7 @@ WGPURenderPipeline RenderingDeviceDriverWebGPU::_build_render_pipeline(const Sha
 	// elements go unrecorded in the clusters that plane crosses and their
 	// contribution ends at a straight line on screen.
 	pipeline_desc.primitive.unclippedDepth = p_rasterization_state.enable_depth_clamp && device_has_depth_clip_control;
-	pipeline_desc.multisample.count = p_multisample_state.sample_count == TEXTURE_SAMPLES_4 ? 4 : 1;
+	pipeline_desc.multisample.count = _wgpu_sample_count(p_multisample_state.sample_count);
 	pipeline_desc.multisample.mask = p_multisample_state.sample_mask.is_empty() ? 0xFFFFFFFF : p_multisample_state.sample_mask[0];
 	pipeline_desc.multisample.alphaToCoverageEnabled = p_multisample_state.enable_alpha_to_coverage;
 	pipeline_desc.depthStencil = depth_stencil_ptr;
