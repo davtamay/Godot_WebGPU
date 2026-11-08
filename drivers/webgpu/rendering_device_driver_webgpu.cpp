@@ -1918,6 +1918,7 @@ RenderingDeviceDriver::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint6
 	BufferInfo *buffer = memnew(BufferInfo);
 	buffer->buffer = wgpu_buffer;
 	buffer->size = alloc_size;
+	buffer->requested_size = p_size;
 	buffer->creation_epoch = xr_import_epoch;
 	if (dynamic) {
 		buffer->dynamic = true;
@@ -2932,7 +2933,7 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer(CommandBufferID p_cmd_buff
 				const uint64_t dst_offset = region.dst_offset & ~3ull;
 				const uint64_t write_size = (region.size + (region.dst_offset - dst_offset) + 3ull) & ~3ull;
 				if (dst_offset + write_size > dst->size) {
-					wgpuCommandEncoderCopyBufferToBuffer(cb_fallback->encoder, src_sync->buffer, region.src_offset, dst->buffer, region.dst_offset, region.size);
+					_encode_buffer_copy(cb_fallback->encoder, src_sync, region.src_offset, dst, region.dst_offset, region.size);
 				}
 			}
 			return;
@@ -2943,8 +2944,37 @@ void RenderingDeviceDriverWebGPU::command_copy_buffer(CommandBufferID p_cmd_buff
 	ERR_FAIL_NULL(cb_info->encoder);
 	for (uint32_t i = 0; i < p_regions.size(); i++) {
 		const BufferCopyRegion &region = p_regions[i];
-		wgpuCommandEncoderCopyBufferToBuffer(cb_info->encoder, ((BufferInfo *)p_src_buffer.id)->buffer, region.src_offset, ((BufferInfo *)p_dst_buffer.id)->buffer, region.dst_offset, region.size);
+		_encode_buffer_copy(cb_info->encoder, (BufferInfo *)p_src_buffer.id, region.src_offset, (BufferInfo *)p_dst_buffer.id, region.dst_offset, region.size);
 	}
+}
+
+void RenderingDeviceDriverWebGPU::_encode_buffer_copy(WGPUCommandEncoder p_encoder, const BufferInfo *p_src, uint64_t p_src_offset, const BufferInfo *p_dst, uint64_t p_dst_offset, uint64_t p_size) {
+	// WebGPU requires buffer copy offsets and sizes in multiples of 4, and one
+	// invalid copy invalidates the command buffer and every other upload in
+	// it. A 16-bit index buffer with an odd index count has an odd byte size.
+	// When the copy runs to the end of the destination's requested size, the
+	// size is rounded up into the allocation padding (allocations are rounded
+	// to 4 bytes, so the extra bytes exist on both sides and hold nothing).
+	uint64_t size = p_size;
+	if ((size & 3u) != 0) {
+		const uint64_t padded = (size + 3u) & ~3ull;
+		if (p_dst_offset + size >= p_dst->requested_size && p_src_offset + padded <= p_src->size && p_dst_offset + padded <= p_dst->size) {
+			size = padded;
+		} else {
+			// Rounding would overwrite live bytes after the range: copy the
+			// aligned part and lose the tail, which beats losing the frame.
+			size &= ~3ull;
+		}
+	}
+	const bool offsets_aligned = ((p_src_offset | p_dst_offset) & 3u) == 0;
+	if ((!offsets_aligned || size < p_size) && !unaligned_copy_reported) {
+		unaligned_copy_reported = true;
+		ERR_PRINT(vformat("WebGPU: a buffer copy (src offset %d, dst offset %d, size %d) is not 4-byte aligned; the unaligned part is dropped.", p_src_offset, p_dst_offset, p_size));
+	}
+	if (!offsets_aligned || size == 0) {
+		return;
+	}
+	wgpuCommandEncoderCopyBufferToBuffer(p_encoder, p_src->buffer, p_src_offset, p_dst->buffer, p_dst_offset, size);
 }
 
 static WGPUTexelCopyTextureInfo _texel_copy_texture_info(WGPUTexture p_texture, uint32_t p_mipmap, const Vector3i &p_offset, uint32_t p_layer) {
