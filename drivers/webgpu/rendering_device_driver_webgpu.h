@@ -50,6 +50,8 @@ private:
 		WGPUBuffer buffer = nullptr;
 		uint64_t size = 0; // Allocated size, rounded up to 4 bytes.
 		uint64_t requested_size = 0; // Size the engine asked for.
+		// Only copies read it on the GPU (a staging buffer): no binding usage.
+		bool copy_only = false;
 		// Dynamic (persistently mapped) buffers hold one slice per frame in
 		// flight; binds select the slice with a dynamic offset of
 		// frame_idx * slice_stride (stride is alignment-padded, the binding
@@ -782,6 +784,7 @@ public:
 	bool use_flush_range = true;
 	bool use_pass_elide = true;
 	bool use_push_constant_diff = true;
+	bool use_lazy_unmap = true;
 	bool device_has_indirect_first_instance = false;
 	uint64_t present_count = 0;
 
