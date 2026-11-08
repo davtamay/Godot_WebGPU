@@ -1246,6 +1246,27 @@ bool RenderingShaderContainerWebGPU::_transform_spirv(Vector<uint8_t> &r_spirv) 
 	return true;
 }
 
+// Runs the Tint binary. Shaders bake on many worker threads at once, and a
+// process occasionally fails to spawn under that load ("Could not create
+// child process"). That is not a translation failure: retry it, and say so
+// loudly if it keeps failing, since the variant is otherwise excluded with
+// an empty error and only shows up at runtime as a missing baked shader.
+static Error _execute_tint(const String &p_path, const List<String> &p_args, String *r_output, int *r_exit_code) {
+	Error err = ERR_CANT_FORK;
+	for (int attempt = 0; attempt < 4; attempt++) {
+		if (attempt > 0) {
+			OS::get_singleton()->delay_usec(50000 * attempt);
+		}
+		r_output->clear();
+		err = OS::get_singleton()->execute(p_path, p_args, r_output, r_exit_code, true);
+		if (err == OK) {
+			return OK;
+		}
+	}
+	ERR_PRINT(vformat("WebGPU bake: could not start the Tint translator (%s) after 4 attempts; this shader variant will be missing from the export.", p_path));
+	return err;
+}
+
 uint32_t RenderingShaderContainerWebGPU::_format() const {
 	return 0x4C534757; // "WGSL"
 }
@@ -1513,7 +1534,7 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 		args.push_back(wgsl_path);
 		String output;
 		int exit_code = -1;
-		Error err = OS::get_singleton()->execute(tint_path, args, &output, &exit_code, true);
+		Error err = _execute_tint(tint_path, args, &output, &exit_code);
 		if (err != OK || exit_code != 0) {
 			// Retry once with specialization-constant EXPRESSIONS frozen to
 			// their default values: Tint reads plain OpSpecConstant (WGSL
@@ -1527,7 +1548,7 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 				spirv_file->store_buffer(frozen.ptr(), frozen.size());
 			}
 			output = String();
-			err = OS::get_singleton()->execute(tint_path, args, &output, &exit_code, true);
+			err = _execute_tint(tint_path, args, &output, &exit_code);
 			if (err == OK && exit_code == 0) {
 				print_verbose(vformat("WebGPU bake: shader '%s' stage #%d translated with frozen specialization constants.", String::utf8(shader_name.get_data()), i));
 			}
@@ -1576,7 +1597,7 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 				revalidate_args.push_back("-o");
 				revalidate_args.push_back(wgsl_path);
 				output = String();
-				err = OS::get_singleton()->execute(tint_path, revalidate_args, &output, &exit_code, true);
+				err = _execute_tint(tint_path, revalidate_args, &output, &exit_code);
 				DirAccess::remove_absolute(fixed_path);
 				if (err == OK && exit_code == 0) {
 					print_verbose(vformat("WebGPU bake: shader '%s' stage #%d recovered from Tint's atomic-load taint.", String::utf8(shader_name.get_data()), i));
