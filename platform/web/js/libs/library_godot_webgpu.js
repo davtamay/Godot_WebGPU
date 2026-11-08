@@ -389,6 +389,13 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('nopasselide') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_use_lazy_unmap__sig: 'i',
+	godot_js_webgpu_use_lazy_unmap: function () {
+		// ?nolazyunmap uploads a whole staging buffer at every unmap again,
+		// for A/B of leaving the upload to the copies that read it.
+		return window.location.search.indexOf('nolazyunmap') >= 0 ? 0 : 1;
+	},
+
 	godot_js_webgpu_use_push_constant_diff__sig: 'i',
 	godot_js_webgpu_use_push_constant_diff: function () {
 		// ?nopcdiff uploads every push-constant slot each frame again, for

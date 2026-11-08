@@ -88,6 +88,9 @@ int godot_js_webgpu_use_pass_elide();
 // 0 when the page URL carries ?nopcdiff (benchmark A/B switch for uploading
 // every push-constant slot each frame instead of only the changed ones).
 int godot_js_webgpu_use_push_constant_diff();
+// 0 when the page URL carries ?nolazyunmap (benchmark A/B switch for
+// uploading a whole staging buffer at every unmap).
+int godot_js_webgpu_use_lazy_unmap();
 // Encodes a pass's packed op stream (see _pass_flush_ops) in one call.
 void godot_js_webgpu_pass_ops(void *p_pass, const uint32_t *p_ops, int p_count);
 // 1 when the page URL carries ?perfcounters (periodic driver counter print).
@@ -169,6 +172,10 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	use_push_constant_diff = godot_js_webgpu_use_push_constant_diff() != 0;
 	if (!use_push_constant_diff) {
 		print_line("WebGPU: every push-constant slot is uploaded each frame (?nopcdiff).");
+	}
+	use_lazy_unmap = godot_js_webgpu_use_lazy_unmap() != 0;
+	if (!use_lazy_unmap) {
+		print_line("WebGPU: unmapping a staging buffer uploads all of it (?nolazyunmap).");
 	}
 	perf_counters_enabled = godot_js_webgpu_perf_counters() != 0;
 	if (perf_counters_enabled) {
@@ -1924,6 +1931,7 @@ RenderingDeviceDriver::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint6
 	buffer->buffer = wgpu_buffer;
 	buffer->size = alloc_size;
 	buffer->requested_size = p_size;
+	buffer->copy_only = (usage & ~(WGPUBufferUsage_CopySrc | WGPUBufferUsage_CopyDst)) == 0;
 	buffer->creation_epoch = xr_import_epoch;
 	if (dynamic) {
 		buffer->dynamic = true;
@@ -2161,6 +2169,17 @@ void RenderingDeviceDriverWebGPU::buffer_unmap(BufferID p_buffer) {
 	WEBGPU_MAIN_THREAD_GUARD(buffer_unmap(p_buffer));
 	BufferInfo *buffer = (BufferInfo *)p_buffer.id;
 	ERR_FAIL_NULL(buffer->shadow);
+	if (use_lazy_unmap && buffer->copy_only) {
+		// A staging buffer is only read on the GPU by buffer and texture
+		// copies, and each of those uploads exactly the bytes it reads from
+		// the shadow first (command_copy_buffer,
+		// command_copy_buffer_to_texture). Uploading the whole buffer here
+		// duplicated that for every map: the canvas renderer maps the
+		// staging block for each shape it builds, so an every-frame HUD of
+		// circles uploaded the block hundreds of times a frame. A CPU buffer
+		// with a binding usage can be read directly and is still uploaded.
+		return;
+	}
 	_counted_write_buffer(buffer->buffer, 0, buffer->shadow, buffer->size);
 }
 
