@@ -52,6 +52,11 @@ private:
 		uint64_t requested_size = 0; // Size the engine asked for.
 		// Only copies read it on the GPU (a staging buffer): no binding usage.
 		bool copy_only = false;
+		// CPU copy of a vertex or index buffer's contents, kept as copies and
+		// clears write it, so a download can be answered without a
+		// synchronous map (WebGPU only maps asynchronously). See
+		// _mirror_buffer_copy.
+		uint8_t *mirror = nullptr;
 		// Dynamic (persistently mapped) buffers hold one slice per frame in
 		// flight; binds select the slice with a dynamic offset of
 		// frame_idx * slice_stride (stride is alignment-padded, the binding
@@ -785,6 +790,9 @@ public:
 	bool use_pass_elide = true;
 	bool use_push_constant_diff = true;
 	bool use_lazy_unmap = true;
+	bool use_readback_mirror = true;
+	bool readback_unsupported_reported = false;
+	void _mirror_buffer_copy(const BufferInfo *p_src, BufferInfo *p_dst, VectorView<BufferCopyRegion> p_regions);
 	bool device_has_indirect_first_instance = false;
 	uint64_t present_count = 0;
 
