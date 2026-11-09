@@ -104,6 +104,7 @@ const GodotWebGPU = {
 	 */
 	$GodotWebGPULoss: {
 		RELOAD_DELAY_MS: 2000,
+		SAVE_TIMEOUT_MS: 5000,
 		REPEAT_WINDOW_MS: 60000,
 		STORAGE_KEY: 'godot_webgpu_lost_at',
 
@@ -143,15 +144,40 @@ const GodotWebGPU = {
 			const text = 'WebGPU: the graphics device was lost (' + reason + ')' + (message ? ': ' + message : '');
 			console.error(text); // eslint-disable-line no-console
 			window['__godotWebGPULost'] = text;
+			// Game code keeps running on the CPU after the device is gone, so a
+			// game can save before the reload: it listens for this event (for
+			// example through JavaScriptBridge) and may push a promise into
+			// detail.pending; the reload waits for those, up to
+			// SAVE_TIMEOUT_MS.
+			const detail = { 'reason': reason, 'message': message, 'pending': [] };
+			window.dispatchEvent(new CustomEvent('godot-webgpu-device-lost', { 'detail': detail }));
 			const hold = window.location.search.indexOf('noreload') >= 0 || GodotWebGPULoss.recentLoss();
 			GodotWebGPULoss.overlay(hold ? text + '. Reload the page to continue.' : text + '. Reloading...', hold);
 			if (hold) {
 				return;
 			}
 			GodotWebGPULoss.rememberLoss();
-			window.setTimeout(function () {
-				window.location.reload();
-			}, GodotWebGPULoss.RELOAD_DELAY_MS);
+			const delay = function (ms) {
+				return new Promise(function (resolve) {
+					window.setTimeout(resolve, ms);
+				});
+			};
+			const saved = Promise.race([Promise.all(detail['pending']).catch(function () {}), delay(GodotWebGPULoss.SAVE_TIMEOUT_MS)]);
+			Promise.all([saved, delay(GodotWebGPULoss.RELOAD_DELAY_MS)]).then(function () {
+				// A phone drops the device of a backgrounded tab; reloading
+				// a hidden page only spends the user's data and battery, so
+				// wait until they come back to it.
+				if (!document.hidden) {
+					window.location.reload();
+					return;
+				}
+				document.addEventListener('visibilitychange', function onVisible() {
+					if (!document.hidden) {
+						document.removeEventListener('visibilitychange', onVisible);
+						window.location.reload();
+					}
+				});
+			});
 		},
 
 		overlay: function (text, withButton) {
