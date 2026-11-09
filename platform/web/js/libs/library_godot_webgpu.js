@@ -389,6 +389,13 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('nopasselide') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_use_readback_mirror__sig: 'i',
+	godot_js_webgpu_use_readback_mirror: function () {
+		// ?noreadbackmirror keeps no CPU copy of vertex and index buffers,
+		// for A/B of answering readbacks from it.
+		return window.location.search.indexOf('noreadbackmirror') >= 0 ? 0 : 1;
+	},
+
 	godot_js_webgpu_use_lazy_unmap__sig: 'i',
 	godot_js_webgpu_use_lazy_unmap: function () {
 		// ?nolazyunmap uploads a whole staging buffer at every unmap again,
