@@ -91,6 +91,10 @@ int godot_js_webgpu_use_push_constant_diff();
 // 0 when the page URL carries ?nolazyunmap (benchmark A/B switch for
 // uploading a whole staging buffer at every unmap).
 int godot_js_webgpu_use_lazy_unmap();
+// 0 when the page URL carries ?noreadbackmirror (A/B switch for keeping no
+// CPU copy of vertex and index buffers; readbacks of them then return the
+// download buffer's unfilled contents, as before).
+int godot_js_webgpu_use_readback_mirror();
 // Encodes a pass's packed op stream (see _pass_flush_ops) in one call.
 void godot_js_webgpu_pass_ops(void *p_pass, const uint32_t *p_ops, int p_count);
 // 1 when the page URL carries ?perfcounters (periodic driver counter print).
@@ -172,6 +176,10 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	use_push_constant_diff = godot_js_webgpu_use_push_constant_diff() != 0;
 	if (!use_push_constant_diff) {
 		print_line("WebGPU: every push-constant slot is uploaded each frame (?nopcdiff).");
+	}
+	use_readback_mirror = godot_js_webgpu_use_readback_mirror() != 0;
+	if (!use_readback_mirror) {
+		print_line("WebGPU: vertex and index buffers keep no CPU copy; reading them back returns garbage (?noreadbackmirror).");
 	}
 	use_lazy_unmap = godot_js_webgpu_use_lazy_unmap() != 0;
 	if (!use_lazy_unmap) {
@@ -1947,6 +1955,12 @@ RenderingDeviceDriver::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint6
 		// Padded like the GPU buffer so aligned tail writes read valid bytes.
 		buffer->shadow = (uint8_t *)memalloc(alloc_size);
 		memset(buffer->shadow + p_size, 0, alloc_size - p_size);
+	} else if (use_readback_mirror && (usage & (WGPUBufferUsage_Vertex | WGPUBufferUsage_Index))) {
+		// Mesh data is read back by Mesh.surface_get_arrays() and
+		// PrimitiveMesh.get_mesh_arrays(); a new buffer starts zeroed, as
+		// the GPU one does.
+		buffer->mirror = (uint8_t *)memalloc(alloc_size);
+		memset(buffer->mirror, 0, alloc_size);
 	}
 	return BufferID(buffer);
 }
@@ -1972,6 +1986,9 @@ void RenderingDeviceDriverWebGPU::buffer_free(BufferID p_buffer) {
 	}
 	if (buffer->last_upload != nullptr) {
 		memfree(buffer->last_upload);
+	}
+	if (buffer->mirror != nullptr) {
+		memfree(buffer->mirror);
 	}
 	memdelete(buffer);
 }
@@ -2850,7 +2867,11 @@ void RenderingDeviceDriverWebGPU::command_clear_buffer(CommandBufferID p_cmd_buf
 	CommandBufferInfo *cb_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	_end_compute_pass(cb_info);
 	ERR_FAIL_NULL(cb_info->encoder);
-	wgpuCommandEncoderClearBuffer(cb_info->encoder, ((BufferInfo *)p_buffer.id)->buffer, p_offset, p_size);
+	BufferInfo *buffer = (BufferInfo *)p_buffer.id;
+	if (buffer->mirror != nullptr && p_offset < buffer->size) {
+		memset(buffer->mirror + p_offset, 0, MIN(p_size, buffer->size - p_offset));
+	}
+	wgpuCommandEncoderClearBuffer(cb_info->encoder, buffer->buffer, p_offset, p_size);
 }
 
 // The engine writes a frame's buffer updates into many small regions of a
@@ -2895,7 +2916,38 @@ void RenderingDeviceDriverWebGPU::_flush_pending_shadow_writes() {
 	pending_shadow_writes.clear();
 }
 
+void RenderingDeviceDriverWebGPU::_mirror_buffer_copy(const BufferInfo *p_src, BufferInfo *p_dst, VectorView<BufferCopyRegion> p_regions) {
+	// Mirrors are updated when the copy is encoded. The render graph keeps
+	// a write and a later read of one buffer in order, so a download encoded
+	// after the copies that filled a buffer sees their bytes.
+	const uint8_t *src_bytes = p_src->mirror != nullptr ? p_src->mirror : (p_src->dynamic ? nullptr : p_src->shadow);
+	uint8_t *dst_bytes = p_dst->mirror;
+	if (dst_bytes == nullptr && p_dst->shadow != nullptr && !p_dst->dynamic) {
+		// A download into a CPU buffer, read after the engine waits for it.
+		dst_bytes = p_dst->shadow;
+		if (src_bytes == nullptr) {
+			if (!readback_unsupported_reported) {
+				readback_unsupported_reported = true;
+				ERR_PRINT("WebGPU: reading back a buffer the GPU writes (storage or dynamic) is not supported; the data returned is not the buffer's contents. Vertex and index buffers can be read back.");
+			}
+			return;
+		}
+	}
+	if (src_bytes == nullptr || dst_bytes == nullptr) {
+		return;
+	}
+	for (uint32_t i = 0; i < p_regions.size(); i++) {
+		const BufferCopyRegion &region = p_regions[i];
+		if (region.src_offset >= p_src->size || region.dst_offset >= p_dst->size) {
+			continue;
+		}
+		const uint64_t size = MIN(region.size, MIN(p_src->size - region.src_offset, p_dst->size - region.dst_offset));
+		memmove(dst_bytes + region.dst_offset, src_bytes + region.src_offset, size);
+	}
+}
+
 void RenderingDeviceDriverWebGPU::command_copy_buffer(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, BufferID p_dst_buffer, VectorView<BufferCopyRegion> p_regions) {
+	_mirror_buffer_copy((const BufferInfo *)p_src_buffer.id, (BufferInfo *)p_dst_buffer.id, p_regions);
 		// The engine keeps staging buffers persistently mapped and never calls
 	// unmap (Vulkan memory is coherent), so the shadow's bytes have not
 	// reached the GPU buffer. Queue writes execute before this command
