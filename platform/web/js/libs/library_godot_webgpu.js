@@ -70,6 +70,10 @@ const GodotWebGPU = {
 			return handle;
 		},
 
+		// Owned depth snapshots have a separate lifetime from projection-layer imports.
+		importOwnedTexture: function (texture) { return WebGPU.importJsTexture(texture); },
+		releaseOwnedTexture: function (handle) { _wgpuTextureRelease(handle); },
+
 		size: function () {
 			return GodotWebGPUXR.imported_textures ? GodotWebGPUXR.imported_textures.size : 0;
 		},

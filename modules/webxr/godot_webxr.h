@@ -78,7 +78,7 @@ extern int godot_webxr_get_view_count();
 extern bool godot_webxr_get_render_target_size(int *r_size);
 extern bool godot_webxr_get_transform_for_view(int p_view, float *r_transform);
 extern bool godot_webxr_get_projection_for_view(int p_view, float *r_transform);
-extern unsigned int godot_webxr_get_depth_sensing_info(int p_view, float *r_params);
+extern char *godot_webxr_get_depth_sensing_info();
 extern int godot_webxr_get_pass_info(unsigned int *r_info);
 extern int godot_webxr_get_frame_matrices(float *r_data);
 extern char *godot_webxr_get_color_format();

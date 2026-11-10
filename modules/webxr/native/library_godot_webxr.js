@@ -190,21 +190,11 @@ const GodotWebXR = {
 				// accompanies it; without it browsers silently drop the feature
 				// (Android XR grants depth to WebGL sessions too).
 				session_init['depthSensing'] = {
-					// Browsers honor the preference order. WebGL sessions prefer
-					// CPU depth: the GL render path does not consume the GPU
-					// texture, while cpu-optimized enables
-					// XRFrame.getDepthInformation() for script-side consumers.
-					// cpu-optimized comes first on WebGPU sessions too: no
-					// browser serves XRGPUBinding.getDepthInformation() yet, so
-					// a gpu-first request on a browser that honors preferences
-					// only starves the script-side consumers that do work.
-					usagePreference: ['cpu-optimized', 'gpu-optimized'],
-					// luminance-alpha FIRST: it is the spec's guaranteed format
-					// (16-bit value packed L+A, storing millimeters) with a
-					// DOCUMENTED decode - raw = L + A*256, meters = raw *
-					// rawValueToMeters. unsigned-short's GPU encoding is
-					// undocumented and resisted every linearization we tried.
-					dataFormatPreference: ['luminance-alpha', 'float32', 'unsigned-short'],
+					// Prefer GPU depth only when this browser exposes the binding API.
+					// WebGPU depth never uses luminance-alpha (Depth Sensing draft).
+					usagePreference: use_webgpu_binding && typeof globalThis.XRGPUBinding !== 'undefined' && typeof globalThis.XRGPUBinding.prototype.getDepthInformation === 'function' ? ['gpu-optimized', 'cpu-optimized'] : ['cpu-optimized', 'gpu-optimized'],
+					dataFormatPreference: use_webgpu_binding ? ['float32', 'unsigned-short'] : ['luminance-alpha', 'float32', 'unsigned-short'],
+					matchDepthView: true,
 					// Prefer RAW depth: consumers use depth live (occlusion,
 					// per-frame view), where temporal 'smooth' fusion blends
 					// moving objects (a hand) into the background and erases
@@ -937,7 +927,9 @@ const GodotWebXR = {
 
 	godot_webxr_uninitialize__proxy: 'sync',
 	godot_webxr_uninitialize__sig: 'v',
+	godot_webxr_uninitialize__deps: ['$GodotWebXRDepth'],
 	godot_webxr_uninitialize: function () {
+		GodotWebXRDepth.reset();
 		if (GodotWebXR.session) {
 			GodotWebXR.session.end()
 				// Prevent exception when session has already ended.
