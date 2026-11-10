@@ -49,8 +49,14 @@ const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.wasm': 'applic
 
 const server = http.createServer((req, res) => {
 	const name = new URL(req.url, 'http://x').pathname;
-	res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
-	res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+	if (name === '/favicon.ico') {
+		res.writeHead(204).end();
+		return;
+	}
+	if (process.env.GLUE_NO_ISOLATION !== '1') {
+		res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+		res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+	}
 	if (name === '/') {
 		res.setHeader('Content-Type', 'text/html');
 		res.end(PAGE);
@@ -69,6 +75,7 @@ await new Promise((resolve) => { server.listen(0, '127.0.0.1', resolve); });
 const url = `http://127.0.0.1:${server.address().port}/`;
 
 const browser = await chromium.launch({
+	channel: process.env.PLAYWRIGHT_CHANNEL || undefined,
 	args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'],
 });
 const page = await (await browser.newContext({ viewport: { width: 800, height: 450 } })).newPage();
@@ -91,6 +98,10 @@ page.on('pageerror', (error) => {
 });
 
 await page.addInitScript({ path: iwerPath });
+await page.addInitScript(() => {
+	window.__xrDiagnostics = [];
+	window.addEventListener('godot-xr-diagnostic', (event) => window.__xrDiagnostics.push(event.detail));
+});
 await page.addInitScript(`
 	(() => {
 		const device = new IWER.XRDevice(IWER.metaQuest3);
@@ -162,6 +173,9 @@ const check = (label, ok) => {
 };
 
 await page.goto(url, { waitUntil: 'load', timeout: 120000 });
+if (process.env.GLUE_NO_ISOLATION === '1') {
+	check('single-threaded XR needs neither isolation nor SharedArrayBuffer', await page.evaluate(() => !crossOriginIsolated && typeof SharedArrayBuffer === 'undefined'));
+}
 check('session started', await until(/GLUE session_started immersive-vr/, 'the session'));
 
 if (saw(/session_started/)) {
@@ -199,6 +213,11 @@ if (saw(/session_started/)) {
 }
 
 check('no page or console errors', errors.length === 0);
+
+const diagnostics = await page.evaluate(() => window.__xrDiagnostics);
+check('compiled diagnostic session start', diagnostics.some((event) => event.type === 'started' && event.binding === 'webgl'));
+check('compiled diagnostic stereo frame', diagnostics.some((event) => event.type === 'frame' && event.views === 2));
+check('compiled diagnostic session end', diagnostics.some((event) => event.type === 'ended'));
 
 await browser.close();
 server.close();
