@@ -228,6 +228,7 @@ public:
 	void composition_layer_unregister(WebXRCompositionLayer *p_layer);
 	void composition_layer_update(WebXRCompositionLayer *p_layer, bool p_active, const float *p_params, RID p_viewport, const Size2i &p_size);
 	bool composition_layers_supported() const;
+	bool composition_layer_is_supported(const WebXRCompositionLayer *p_layer) const;
 	void _on_session_state_changed();
 
 	void _on_input_event(int p_event_type, int p_input_source_id);

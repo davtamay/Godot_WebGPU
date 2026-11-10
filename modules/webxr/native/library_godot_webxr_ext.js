@@ -369,8 +369,19 @@ const GodotWebXRExt = {
 				params: null,
 				generation: 0,
 			};
-			GodotWebXRLayers.applyParams(GodotWebXRLayers.layers[id], params);
-			GodotWebXRLayers.apply();
+			try {
+				GodotWebXRLayers.applyParams(GodotWebXRLayers.layers[id], params);
+				GodotWebXRLayers.apply();
+			} catch (e) {
+				// Creation can succeed while a property or render-state update
+				// is rejected. Do not leak the layer or escape into the frame loop.
+				GodotWebXRLayers.destroy(id);
+				if (!GodotWebXRLayers.warned[type]) {
+					GodotWebXRLayers.warned[type] = true;
+					GodotRuntime.error(`WebXR: composition layer setup failed: ${e}; falling back to a mesh.`);
+				}
+				return 0;
+			}
 			return id;
 		},
 
@@ -393,6 +404,7 @@ const GodotWebXRExt = {
 				GodotWebXRLayers.destroy(id);
 			});
 			GodotWebXRLayers.dirty = false;
+			GodotWebXRLayers.warned = {};
 		},
 	},
 
