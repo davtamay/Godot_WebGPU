@@ -130,7 +130,7 @@ struct Params { uv: mat4x4<f32>, scale: f32, valid: u32, padding: vec2<u32> };
 			if (state && (state.session !== xr.session || state.device !== device)) { GodotWebXRDepth.reset(); state = null; }
 			if (!state) {
 				state = { session: xr.session, device, pipelines: {}, uniforms: [], 'sample': null, 'readback': null, 'sampleHandle': 0, 'readbackHandle': 0, frame: null };
-				state.dummy = device.createTexture({ size: [1, 1], 'format': 'r32float', usage: GPUTextureUsage['TEXTURE_BINDING'] | GPUTextureUsage['COPY_DST'] });
+				state.dummy = device.createTexture({ size: [1, 1], 'format': 'r32float', usage: globalThis['GPUTextureUsage']['TEXTURE_BINDING'] | globalThis['GPUTextureUsage']['COPY_DST'] });
 				device.queue.writeTexture({ texture: state.dummy }, new Float32Array([0]), { bytesPerRow: 4 }, [1, 1]);
 				GodotWebXRDepth.state = state;
 			}
@@ -148,7 +148,7 @@ struct Params { uv: mat4x4<f32>, scale: f32, valid: u32, padding: vec2<u32> };
 					if (!depth) { record['reason'] = 'no_depth_data'; records.push(record); continue; }
 					const texture = depth.texture;
 					if (!texture || !['r16uint', 'r32float'].includes(texture['format'])) throw new Error('unsupported_format');
-					if (!(texture.usage & GPUTextureUsage['TEXTURE_BINDING']) || texture.dimension !== '2d' || texture.mipLevelCount !== 1 || texture.sampleCount !== 1) throw new Error('invalid_texture');
+					if (!(texture.usage & globalThis['GPUTextureUsage']['TEXTURE_BINDING']) || texture.dimension !== '2d' || texture.mipLevelCount !== 1 || texture.sampleCount !== 1) throw new Error('invalid_texture');
 					if (depth['width'] !== texture['width'] || depth['height'] !== texture['height'] || !depth['width'] || !depth['height']) throw new Error('invalid_size');
 					const matrix = Array.from(depth.normDepthBufferFromNormView.matrix);
 					if (matrix.length !== 16 || !matrix.every(Number.isFinite) || !Number.isFinite(depth.rawValueToMeters) || depth.rawValueToMeters <= 0) throw new Error('invalid_transform_or_scale');
@@ -178,7 +178,7 @@ struct Params { uv: mat4x4<f32>, scale: f32, valid: u32, padding: vec2<u32> };
 			const outputLayers = Math.max(2, views.length);
 			if (!state['sample'] || state['sample']['width'] !== width || state['sample']['height'] !== height || state['sample'].depthOrArrayLayers !== outputLayers) {
 				GodotWebXRDepth.disposeOutput(state);
-				const usage = GPUTextureUsage['STORAGE_BINDING'] | GPUTextureUsage['TEXTURE_BINDING'] | GPUTextureUsage['COPY_SRC'];
+				const usage = globalThis['GPUTextureUsage']['STORAGE_BINDING'] | globalThis['GPUTextureUsage']['TEXTURE_BINDING'] | globalThis['GPUTextureUsage']['COPY_SRC'];
 				state['sample'] = device.createTexture({ label: 'Godot normalized XR depth (filterable)', size: [width, height, outputLayers], 'format': 'rgba16float', usage });
 				state['readback'] = device.createTexture({ label: 'Godot normalized XR depth (precise)', size: [width, height, outputLayers], 'format': 'r32float', usage });
 				state['sampleHandle'] = Module['GodotWebGPUXR'].importOwnedTexture(state['sample']);
