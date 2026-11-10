@@ -1314,3 +1314,16 @@ XRGPUDepthInformation.prototype.normDepthBufferFromNormView;
 XRGPUDepthInformation.prototype.getViewDescriptor = function () {};
 /** @param {XRView} view @return {?XRGPUDepthInformation} */
 XRGPUBinding.prototype.getDepthInformation = function (view) {};
+
+// WebGPU constants used by GPU depth normalization. Keep these browser-owned
+// names intact when the entire Emscripten runtime is Closure-optimized.
+/** @const */
+var GPUShaderStage = {};
+/** @const {number} */
+GPUShaderStage.COMPUTE;
+/** @const */
+var GPUBufferUsage = {};
+/** @const {number} */
+GPUBufferUsage.UNIFORM;
+/** @const {number} */
+GPUBufferUsage.COPY_DST;
