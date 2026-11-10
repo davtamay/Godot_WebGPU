@@ -1,4 +1,6 @@
 #!/usr/bin/env python
+import shlex
+
 from misc.utility.scons_hints import *
 
 from methods import print_error
@@ -73,7 +75,7 @@ for js in sys_env["JS_POST"]:
 # Add JS externs to Closure.
 sys_env["ENV"]["EMCC_CLOSURE_ARGS"] = sys_env["ENV"].get("EMCC_CLOSURE_ARGS", "")
 for ext in sys_env["JS_EXTERNS"]:
-    sys_env["ENV"]["EMCC_CLOSURE_ARGS"] += " --externs " + ext.abspath
+    sys_env["ENV"]["EMCC_CLOSURE_ARGS"] += " --externs " + shlex.quote(ext.abspath.replace("\\", "/"))
 sys_env["ENV"]["EMCC_CLOSURE_ARGS"] = sys_env["ENV"]["EMCC_CLOSURE_ARGS"].strip()
 
 if len(env["EXPORTED_FUNCTIONS"]):
