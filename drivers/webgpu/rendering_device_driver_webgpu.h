@@ -155,9 +155,9 @@ private:
 		// e.g. the GI pass texelFetches the raw depth buffer through a plain
 		// texture2D, which tint types texture_2d<f32>.
 		HashSet<uint64_t> load_only_float_bindings;
-		// Combined slots that always receive a depth texture through a plain
-		// float sampler. WGSL cannot read a cube without sampling it, so these
-		// are unfilterable and take a non-filtering sampler.
+		// Combined float slots that can receive a depth texture (cube shadow
+		// conversion and screen-space depth downsampling). These need an
+		// unfilterable texture binding and a non-filtering sampler.
 		bool combined_slots_read_depth = false;
 		// Every sampled-texture layout entry's declared sample type and view
 		// dimension (set << 32 | binding). A bound texture of another class
