@@ -54,6 +54,8 @@ public:
 	// host's capabilities, not the target's; a target without a runtime
 	// shader compiler needs every variant it might select in the cache.
 	virtual bool bakes_disabled_groups() const { return false; }
+	// Target-only source adapters; other platforms preserve the host sources.
+	virtual void prepare_stage_sources(Vector<String> &r_sources) const {}
 	virtual ~ShaderBakerExportPluginPlatform() {}
 };
 

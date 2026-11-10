@@ -1553,6 +1553,21 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 				print_verbose(vformat("WebGPU bake: shader '%s' stage #%d translated with frozen specialization constants.", String::utf8(shader_name.get_data()), i));
 			}
 		}
+		if ((err != OK || exit_code != 0) && !tint_fallback_path.is_empty()) {
+			Ref<FileAccess> file = FileAccess::open(spirv_path, FileAccess::WRITE);
+			ERR_FAIL_COND_V(file.is_null(), false);
+			file->store_buffer(spirv.ptr(), spirv.size());
+			file.unref();
+			String fallback_output;
+			int fallback_exit = -1;
+			Error fallback_error = _execute_tint(tint_fallback_path, args, &fallback_output, &fallback_exit);
+			if (fallback_error == OK && fallback_exit == 0) {
+				err = OK;
+				exit_code = 0;
+				output = fallback_output;
+				print_verbose(vformat("WebGPU bake: shader '%s' stage #%d translated with extended Tint.", String::utf8(shader_name.get_data()), i));
+			}
+		}
 		if ((err != OK || exit_code != 0) && output.find("no matching call to 'atomicLoad") != -1) {
 			// Recover from the reader's atomic-load taint (see
 			// _unwrap_reader_atomic_taint): Tint still emits the WGSL text to
@@ -1774,6 +1789,10 @@ void RenderingShaderContainerFormatWebGPU::set_tint_path(const String &p_tint_pa
 	tint_path = p_tint_path;
 }
 
+void RenderingShaderContainerFormatWebGPU::set_tint_fallback_path(const String &p_tint_path) {
+	tint_fallback_path = p_tint_path;
+}
+
 void RenderingShaderContainerFormatWebGPU::set_tint_subgroups_path(const String &p_tint_path) {
 	tint_subgroups_path = p_tint_path;
 }
@@ -1782,6 +1801,7 @@ Ref<RenderingShaderContainer> RenderingShaderContainerFormatWebGPU::create_conta
 	Ref<RenderingShaderContainerWebGPU> container;
 	container.instantiate();
 	container->tint_path = tint_path;
+	container->tint_fallback_path = tint_fallback_path;
 	container->tint_subgroups_path = tint_subgroups_path;
 	return container;
 }
