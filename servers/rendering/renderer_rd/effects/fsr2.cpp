@@ -30,6 +30,8 @@
 
 #include "fsr2.h"
 
+#include "thirdparty/amd-fsr2/shaders/ffx_fsr2_resources.h"
+
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 
@@ -39,6 +41,12 @@ using namespace RendererRD;
 #include <cwchar>
 #define wcscpy_s wcscpy
 #endif
+
+// WebGPU has buffer atomics, not storage-image atomics. The WebGPU baker
+// adapts these FSR2 resources; native backends retain the SDK textures.
+static bool fsr2_uses_storage_buffer(uint32_t p_id) {
+	return (p_id == FFX_FSR2_RESOURCE_IDENTIFIER_RECONSTRUCTED_PREVIOUS_NEAREST_DEPTH || p_id == FFX_FSR2_RESOURCE_IDENTIFIER_SPD_ATOMIC_COUNT || p_id == FFX_FSR2_RESOURCE_IDENTIFIER_AUTO_EXPOSURE) && RD::get_singleton()->get_device_api_name() == "WebGPU";
+}
 
 static RD::TextureType ffx_resource_type_to_rd_texture_type(FfxResourceType p_type) {
 	switch (p_type) {
@@ -227,6 +235,20 @@ static FfxErrorCode create_resource_rd(FfxFsr2Interface *p_backend_interface, co
 		initial_data.push_back(byte_array);
 	}
 
+	// WebGPU core has no R16Snorm sampled texture. Preserve the signed LUT
+	// values in filterable R16Float instead; the shader still samples floats.
+	if (rd->get_device_api_name() == "WebGPU" && res_desc.format == FFX_SURFACE_FORMAT_R16_SNORM) {
+		ERR_FAIL_COND_V(initial_data.size() != 1 || initial_data[0].size() % 2 != 0, FFX_ERROR_INVALID_ARGUMENT);
+		uint8_t *bytes = initial_data.write[0].ptrw();
+		for (int64_t offset = 0; offset < initial_data[0].size(); offset += 2) {
+			int16_t value;
+			memcpy(&value, bytes + offset, sizeof(value));
+			const uint16_t half = Math::make_half_float(MAX(-1.0f, float(value) / 32767.0f));
+			memcpy(bytes + offset, &half, sizeof(half));
+		}
+		res_desc.format = FFX_SURFACE_FORMAT_R16_FLOAT;
+	}
+
 	RD::TextureFormat texture_format;
 	texture_format.texture_type = ffx_resource_type_to_rd_texture_type(res_desc.type);
 	texture_format.format = ffx_surface_format_to_rd_format(res_desc.format);
@@ -237,7 +259,16 @@ static FfxErrorCode create_resource_rd(FfxFsr2Interface *p_backend_interface, co
 	texture_format.mipmaps = res_desc.mipCount;
 	texture_format.is_discardable = true;
 
-	RID texture = rd->texture_create(texture_format, RD::TextureView(), initial_data);
+	RID texture;
+	if (fsr2_uses_storage_buffer(p_create_resource_description->id)) {
+		const bool exposure = p_create_resource_description->id == FFX_FSR2_RESOURCE_IDENTIFIER_AUTO_EXPOSURE;
+		ERR_FAIL_COND_V(res_desc.format != (exposure ? FFX_SURFACE_FORMAT_R32G32_FLOAT : FFX_SURFACE_FORMAT_R32_UINT) || res_desc.mipCount != 1, FFX_ERROR_INVALID_ARGUMENT);
+		const uint64_t size = uint64_t(res_desc.width) * res_desc.height * res_desc.depth * sizeof(uint32_t) * (exposure ? 2 : 1);
+		ERR_FAIL_COND_V(size > UINT32_MAX, FFX_ERROR_OUT_OF_RANGE);
+		texture = rd->storage_buffer_create(uint32_t(size), initial_data.is_empty() ? Vector<uint8_t>() : initial_data[0]);
+	} else {
+		texture = rd->texture_create(texture_format, RD::TextureView(), initial_data);
+	}
 	ERR_FAIL_COND_V(texture.is_null(), FFX_ERROR_BACKEND_API_ERROR);
 
 	rd->set_resource_name(texture, String(p_create_resource_description->name));
@@ -362,6 +393,17 @@ static FfxErrorCode execute_gpu_job_clear_float_rd(FSR2Context::Scratch &p_scrat
 
 	ERR_FAIL_COND_V(desc.type == FFX_RESOURCE_TYPE_BUFFER, FFX_ERROR_INVALID_ARGUMENT);
 
+	if (fsr2_uses_storage_buffer(p_scratch.resources.ids[p_job.target.internalIndex])) {
+		if (p_scratch.resources.ids[p_job.target.internalIndex] == FFX_FSR2_RESOURCE_IDENTIFIER_AUTO_EXPOSURE) {
+			ERR_FAIL_COND_V(desc.width != 1 || desc.height != 1 || desc.depth != 1, FFX_ERROR_INVALID_ARGUMENT);
+			RD::get_singleton()->buffer_update(resource, 0, 2 * sizeof(float), p_job.color);
+			return FFX_OK;
+		}
+		// Inverted-depth FSR2 and its SPD counter both clear to zero.
+		ERR_FAIL_COND_V(p_job.color[0] != 0.0f, FFX_ERROR_INVALID_ARGUMENT);
+		RD::get_singleton()->buffer_clear(resource, 0, uint64_t(desc.width) * desc.height * desc.depth * sizeof(uint32_t));
+		return FFX_OK;
+	}
 	Color color(p_job.color[0], p_job.color[1], p_job.color[2], p_job.color[3]);
 	RD::get_singleton()->texture_clear(resource, color, 0, desc.mipCount, 0, 1);
 
@@ -377,6 +419,13 @@ static FfxErrorCode execute_gpu_job_copy_rd(FSR2Context::Scratch &p_scratch, con
 	ERR_FAIL_COND_V(src_desc.type == FFX_RESOURCE_TYPE_BUFFER, FFX_ERROR_INVALID_ARGUMENT);
 	ERR_FAIL_COND_V(dst_desc.type == FFX_RESOURCE_TYPE_BUFFER, FFX_ERROR_INVALID_ARGUMENT);
 
+	if (fsr2_uses_storage_buffer(p_scratch.resources.ids[p_job.src.internalIndex]) || fsr2_uses_storage_buffer(p_scratch.resources.ids[p_job.dst.internalIndex])) {
+		ERR_FAIL_COND_V(!fsr2_uses_storage_buffer(p_scratch.resources.ids[p_job.src.internalIndex]) || !fsr2_uses_storage_buffer(p_scratch.resources.ids[p_job.dst.internalIndex]), FFX_ERROR_INVALID_ARGUMENT);
+		ERR_FAIL_COND_V(src_desc.format != dst_desc.format || src_desc.width != dst_desc.width || src_desc.height != dst_desc.height || src_desc.depth != dst_desc.depth, FFX_ERROR_INVALID_ARGUMENT);
+		const uint32_t components = src_desc.format == FFX_SURFACE_FORMAT_R32G32_FLOAT ? 2 : 1;
+		RD::get_singleton()->buffer_copy(src, dst, 0, 0, uint64_t(src_desc.width) * src_desc.height * src_desc.depth * sizeof(uint32_t) * components);
+		return FFX_OK;
+	}
 	for (uint32_t mip_level = 0; mip_level < src_desc.mipCount; mip_level++) {
 		RD::get_singleton()->texture_copy(src, dst, Vector3(0, 0, 0), Vector3(0, 0, 0), Vector3(src_desc.width, src_desc.height, src_desc.depth), mip_level, mip_level, 0, 0);
 	}
@@ -399,16 +448,17 @@ static FfxErrorCode execute_gpu_job_compute_rd(FSR2Context::Scratch &p_scratch, 
 
 	for (uint32_t i = 0; i < p_job.pipeline.srvCount; i++) {
 		RID texture_rid = p_scratch.resources.rids[p_job.srvs[i].internalIndex];
-		RD::Uniform texture_uniform(RD::UNIFORM_TYPE_TEXTURE, p_job.pipeline.srvResourceBindings[i].slotIndex, texture_rid);
+		RD::Uniform texture_uniform(fsr2_uses_storage_buffer(p_scratch.resources.ids[p_job.srvs[i].internalIndex]) ? RD::UNIFORM_TYPE_STORAGE_BUFFER : RD::UNIFORM_TYPE_TEXTURE, p_job.pipeline.srvResourceBindings[i].slotIndex, texture_rid);
 		compute_uniforms.push_back(texture_uniform);
 	}
 
 	for (uint32_t i = 0; i < p_job.pipeline.uavCount; i++) {
 		RID image_rid = p_scratch.resources.rids[p_job.uavs[i].internalIndex];
 		RD::Uniform storage_uniform;
-		storage_uniform.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+		storage_uniform.uniform_type = fsr2_uses_storage_buffer(p_scratch.resources.ids[p_job.uavs[i].internalIndex]) ? RD::UNIFORM_TYPE_STORAGE_BUFFER : RD::UNIFORM_TYPE_IMAGE;
 		storage_uniform.binding = p_job.pipeline.uavResourceBindings[i].slotIndex;
 
+		ERR_FAIL_COND_V(storage_uniform.uniform_type == RD::UNIFORM_TYPE_STORAGE_BUFFER && p_job.uavMip[i] != 0, FFX_ERROR_INVALID_ARGUMENT);
 		if (p_job.uavMip[i] > 0) {
 			LocalVector<RID> &mip_slice_rids = p_scratch.resources.mip_slice_rids[p_job.uavs[i].internalIndex];
 			if (mip_slice_rids.is_empty()) {
@@ -452,6 +502,17 @@ static FfxErrorCode execute_gpu_job_compute_rd(FSR2Context::Scratch &p_scratch, 
 	RD::get_singleton()->compute_list_dispatch(compute_list, p_job.dimensions[0], p_job.dimensions[1], p_job.dimensions[2]);
 	RD::get_singleton()->compute_list_end();
 
+	// SPD needs device-wide visibility between its local and global reductions.
+	// WebGPU has no device-scope shader barrier: split into two ordered dispatches.
+	if (RD::get_singleton()->get_device_api_name() == "WebGPU" && root_signature.shader_rid == device.passes[FFX_FSR2_PASS_COMPUTE_LUMINANCE_PYRAMID].root_signature.shader_rid) {
+		ERR_FAIL_COND_V(p_job.pipeline.constCount != 2 || p_job.cbs[1].uint32Size < 2, FFX_ERROR_INVALID_ARGUMENT);
+		if (p_job.cbs[1].data[0] > 6 && p_job.cbs[1].data[1] != 0) {
+			FfxComputeJobDescription tail = p_job;
+			tail.cbs[1].data[1] = 0; // numWorkGroups == 0 selects the tail reduction.
+			tail.dimensions[0] = tail.dimensions[1] = tail.dimensions[2] = 1;
+			return execute_gpu_job_compute_rd(p_scratch, tail);
+		}
+	}
 	return FFX_OK;
 }
 
