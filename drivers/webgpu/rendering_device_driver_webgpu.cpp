@@ -1907,8 +1907,8 @@ RenderingDeviceDriver::BufferID RenderingDeviceDriverWebGPU::buffer_create(uint6
 		usage |= WGPUBufferUsage_Indirect;
 	}
 	if (p_allocation_type == MEMORY_ALLOCATION_TYPE_CPU) {
-		// The shadow flush in buffer_unmap() uses wgpuQueueWriteBuffer.
-		usage |= WGPUBufferUsage_CopyDst;
+		// CPU staging buffers also serve as sources for owned async snapshots.
+		usage |= WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc;
 	}
 
 	const bool dynamic = p_usage.has_flag(BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT);
@@ -2180,6 +2180,92 @@ uint8_t *RenderingDeviceDriverWebGPU::buffer_map(BufferID p_buffer) {
 	BufferInfo *buffer = (BufferInfo *)p_buffer.id;
 	ERR_FAIL_NULL_V_MSG(buffer->shadow, nullptr, "Only CPU (upload) buffers can be mapped by the WebGPU driver; downloads are not supported yet.");
 	return buffer->shadow;
+}
+
+void RenderingDeviceDriverWebGPU::buffer_readback_async(VectorView<BufferReadbackRegion> p_regions, uint64_t p_size, const Callable &p_callback) {
+	WEBGPU_MAIN_THREAD_GUARD(buffer_readback_async(p_regions, p_size, p_callback));
+
+	// No driver, RenderingDevice, source buffer or frame pointers survive this
+	// call. Submission order snapshots the data before staging can be reused.
+	struct Readback {
+		struct Region {
+			uint64_t source_offset;
+			uint64_t destination_offset;
+			uint64_t size;
+		};
+		WGPUBuffer buffer = nullptr;
+		LocalVector<Region> regions;
+		PackedByteArray data;
+		Callable callback;
+		uint64_t mapped_size = 0;
+	};
+	Readback *readback = memnew(Readback);
+	readback->callback = p_callback;
+	readback->data.resize(p_size);
+	uint64_t snapshot_size = 0;
+	for (uint32_t i = 0; i < p_regions.size(); i++) {
+		const BufferReadbackRegion &region = p_regions[i];
+		const BufferInfo *source = (const BufferInfo *)region.buffer.id;
+		if (!source || region.offset > source->requested_size || region.size > source->requested_size - region.offset || region.destination_offset > p_size || region.size > p_size - region.destination_offset) {
+			p_callback.call_deferred(PackedByteArray());
+			memdelete(readback);
+			ERR_FAIL_MSG("Invalid asynchronous readback region.");
+		}
+		uint64_t prefix = region.offset & 3;
+		readback->regions.push_back({ snapshot_size + prefix, region.destination_offset, region.size });
+		snapshot_size += (prefix + region.size + 3) & ~uint64_t(3);
+	}
+	if (snapshot_size == 0) {
+		p_callback.call_deferred(readback->data);
+		memdelete(readback);
+		return;
+	}
+	if (snapshot_size > device_limits.maxBufferSize - 7) {
+		p_callback.call_deferred(PackedByteArray());
+		memdelete(readback);
+		ERR_FAIL_MSG("Asynchronous readback snapshot exceeds the device buffer limit.");
+	}
+	WGPUBufferDescriptor desc = WGPU_BUFFER_DESCRIPTOR_INIT;
+	desc.label = { "Godot async readback", WGPU_STRLEN };
+	desc.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
+	desc.size = (snapshot_size + 7) & ~uint64_t(7);
+	readback->mapped_size = desc.size;
+	readback->buffer = wgpuDeviceCreateBuffer(device, &desc);
+	WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, nullptr);
+	uint64_t offset = 0;
+	for (uint32_t i = 0; i < p_regions.size(); i++) {
+		const BufferReadbackRegion &region = p_regions[i];
+		uint64_t size = ((region.offset & 3) + region.size + 3) & ~uint64_t(3);
+		wgpuCommandEncoderCopyBufferToBuffer(encoder, ((BufferInfo *)region.buffer.id)->buffer, region.offset & ~uint64_t(3), readback->buffer, offset, size);
+		offset += size;
+	}
+	WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, nullptr);
+	wgpuQueueSubmit(queue, 1, &commands);
+	wgpuCommandBufferRelease(commands);
+	wgpuCommandEncoderRelease(encoder);
+	WGPUBufferMapCallbackInfo callback = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
+	callback.mode = WGPUCallbackMode_AllowSpontaneous;
+	callback.userdata1 = readback;
+	callback.callback = [](WGPUMapAsyncStatus p_status, WGPUStringView, void *p_user, void *) {
+		Readback *pending = (Readback *)p_user;
+		const uint8_t *data = p_status == WGPUMapAsyncStatus_Success ? (const uint8_t *)wgpuBufferGetConstMappedRange(pending->buffer, 0, pending->mapped_size) : nullptr;
+		if (data) {
+			for (const Readback::Region &region : pending->regions) {
+				memcpy(pending->data.ptrw() + region.destination_offset, data + region.source_offset, region.size);
+			}
+		} else {
+			pending->data.clear();
+			ERR_PRINT("WebGPU asynchronous GPU readback failed.");
+		}
+		if (p_status == WGPUMapAsyncStatus_Success) {
+			wgpuBufferUnmap(pending->buffer);
+		}
+		wgpuBufferDestroy(pending->buffer);
+		wgpuBufferRelease(pending->buffer);
+		pending->callback.call_deferred(pending->data);
+		memdelete(pending);
+	};
+	wgpuBufferMapAsync(readback->buffer, WGPUMapMode_Read, 0, readback->mapped_size, callback);
 }
 
 void RenderingDeviceDriverWebGPU::buffer_unmap(BufferID p_buffer) {
@@ -2925,13 +3011,8 @@ void RenderingDeviceDriverWebGPU::_mirror_buffer_copy(const BufferInfo *p_src, B
 	if (dst_bytes == nullptr && p_dst->shadow != nullptr && !p_dst->dynamic) {
 		// A download into a CPU buffer, read after the engine waits for it.
 		dst_bytes = p_dst->shadow;
-		if (src_bytes == nullptr) {
-			if (!readback_unsupported_reported) {
-				readback_unsupported_reported = true;
-				ERR_PRINT("WebGPU: reading back a buffer the GPU writes (storage or dynamic) is not supported; the data returned is not the buffer's contents. Vertex and index buffers can be read back.");
-			}
-			return;
-		}
+		// Async downloads use GPU snapshots, not this optional synchronous
+		// mirror. GPU-written storage buffers intentionally have no mirror.
 	}
 	if (src_bytes == nullptr || dst_bytes == nullptr) {
 		return;
