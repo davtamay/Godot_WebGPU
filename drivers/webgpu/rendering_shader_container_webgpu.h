@@ -68,6 +68,7 @@ public:
 
 	// Bake-time only; when empty (runtime), only from_bytes() works.
 	String tint_path;
+	String tint_fallback_path;
 	// Optional second translator that understands subgroup operations (a
 	// newer Tint with --allow-non-uniform-subgroup-operations). When set,
 	// stages using subgroup ops also get a native translation.
@@ -100,10 +101,12 @@ private:
 
 class RenderingShaderContainerFormatWebGPU : public RenderingShaderContainerFormat {
 	String tint_path;
+	String tint_fallback_path;
 	String tint_subgroups_path;
 
 public:
 	void set_tint_path(const String &p_tint_path);
+	void set_tint_fallback_path(const String &p_tint_path);
 	void set_tint_subgroups_path(const String &p_tint_path);
 
 	virtual Ref<RenderingShaderContainer> create_container() const override;
