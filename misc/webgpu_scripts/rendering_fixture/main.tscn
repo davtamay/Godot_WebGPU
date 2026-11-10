@@ -1,0 +1,115 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://main.gd" id="1_ig7tw"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_0xm2m"]
+
+[sub_resource type="Sky" id="Sky_h2yge"]
+sky_material = SubResource("ProceduralSkyMaterial_0xm2m")
+
+[sub_resource type="Environment" id="Environment_1bvp3"]
+background_mode = 2
+sky = SubResource("Sky_h2yge")
+ambient_light_source = 3
+glow_enabled = true
+volumetric_fog_density = 0.06
+volumetric_fog_albedo = Color(0.5, 0.7, 1, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_lquwl"]
+albedo_color = Color(0.8, 0.16, 0.16, 1)
+metallic = 0.5
+roughness = 0.2
+
+[sub_resource type="SphereMesh" id="SphereMesh_7mycd"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_272bh"]
+albedo_color = Color(0.8, 0.7744, 0.16, 1)
+metallic = 0.5
+roughness = 0.2
+
+[sub_resource type="BoxMesh" id="BoxMesh_5vw27"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_kek77"]
+albedo_color = Color(0.2112, 0.8, 0.16, 1)
+metallic = 0.5
+roughness = 0.2
+
+[sub_resource type="SphereMesh" id="SphereMesh_4c57u"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_efxa6"]
+albedo_color = Color(0.16, 0.8, 0.72319996, 1)
+metallic = 0.5
+roughness = 0.2
+
+[sub_resource type="BoxMesh" id="BoxMesh_dg77c"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ycdy4"]
+albedo_color = Color(0.16, 0.26240006, 0.8, 1)
+metallic = 0.5
+roughness = 0.2
+
+[sub_resource type="SphereMesh" id="SphereMesh_w48qg"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_vivmo"]
+albedo_color = Color(0.25, 0.25, 0.25, 1)
+metallic = 0.8
+roughness = 0.15
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_2cqfq"]
+size = Vector2(16, 16)
+
+[sub_resource type="FogMaterial" id="FogMaterial_yaehf"]
+density = 0.8
+albedo = Color(0.4, 0.6, 1, 1)
+
+[node name="Coverage" type="Node3D" unique_id=1544081758]
+script = ExtResource("1_ig7tw")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=747873044]
+environment = SubResource("Environment_1bvp3")
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=297371822]
+transform = Transform3D(0.81915206, -0.18673822, 0.54232717, 0, 0.94551855, 0.32556814, -0.57357645, -0.2666898, 0.7745235, 5, 3, 7)
+
+[node name="@DirectionalLight3D@2" type="DirectionalLight3D" parent="." unique_id=146720800]
+transform = Transform3D(0.8660254, 0.40957603, -0.28678823, 0, 0.57357645, 0.81915206, 0.5, -0.7094065, 0.49673176, 0, 0, 0)
+light_energy = 2.0
+shadow_enabled = true
+
+[node name="@MeshInstance3D@3" type="MeshInstance3D" parent="." unique_id=915732397]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.5, 0.5, 0)
+material_override = SubResource("StandardMaterial3D_lquwl")
+mesh = SubResource("SphereMesh_7mycd")
+
+[node name="@MeshInstance3D@4" type="MeshInstance3D" parent="." unique_id=1497834461]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.25, 0.5, 0)
+material_override = SubResource("StandardMaterial3D_272bh")
+mesh = SubResource("BoxMesh_5vw27")
+
+[node name="@MeshInstance3D@5" type="MeshInstance3D" parent="." unique_id=1373691442]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 0)
+material_override = SubResource("StandardMaterial3D_kek77")
+mesh = SubResource("SphereMesh_4c57u")
+
+[node name="@MeshInstance3D@6" type="MeshInstance3D" parent="." unique_id=1294945955]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.25, 0.5, 0)
+material_override = SubResource("StandardMaterial3D_efxa6")
+mesh = SubResource("BoxMesh_dg77c")
+
+[node name="@MeshInstance3D@7" type="MeshInstance3D" parent="." unique_id=491142695]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.5, 0.5, 0)
+material_override = SubResource("StandardMaterial3D_ycdy4")
+mesh = SubResource("SphereMesh_w48qg")
+
+[node name="@MeshInstance3D@8" type="MeshInstance3D" parent="." unique_id=468908371]
+material_override = SubResource("StandardMaterial3D_vivmo")
+mesh = SubResource("PlaneMesh_2cqfq")
+
+[node name="@FogVolume@9" type="FogVolume" parent="." unique_id=1459079520]
+size = Vector3(4, 3, 4)
+material = SubResource("FogMaterial_yaehf")
+
+[node name="Probe" type="ReflectionProbe" parent="." unique_id=2028618407]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0)
+visible = false
+size = Vector3(12, 8, 12)
