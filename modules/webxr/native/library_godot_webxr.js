@@ -192,16 +192,16 @@ const GodotWebXR = {
 				session_init['depthSensing'] = {
 					// Prefer GPU depth only when this browser exposes the binding API.
 					// WebGPU depth never uses luminance-alpha (Depth Sensing draft).
-					usagePreference: use_webgpu_binding && typeof globalThis.XRGPUBinding !== 'undefined' && typeof globalThis.XRGPUBinding.prototype.getDepthInformation === 'function' ? ['gpu-optimized', 'cpu-optimized'] : ['cpu-optimized', 'gpu-optimized'],
-					dataFormatPreference: use_webgpu_binding ? ['float32', 'unsigned-short'] : ['luminance-alpha', 'float32', 'unsigned-short'],
-					matchDepthView: true,
+					'usagePreference': use_webgpu_binding && typeof globalThis.XRGPUBinding !== 'undefined' && typeof globalThis.XRGPUBinding.prototype.getDepthInformation === 'function' ? ['gpu-optimized', 'cpu-optimized'] : ['cpu-optimized', 'gpu-optimized'],
+					'dataFormatPreference': use_webgpu_binding ? ['float32', 'unsigned-short'] : ['luminance-alpha', 'float32', 'unsigned-short'],
+					'matchDepthView': true,
 					// Prefer RAW depth: consumers use depth live (occlusion,
 					// per-frame view), where temporal 'smooth' fusion blends
 					// moving objects (a hand) into the background and erases
 					// exactly what dynamic occlusion needs. Smooth only helped a
 					// persistent accumulated scan, which is no longer the default.
 					// UAs predating depthTypeRequest ignore it (backward-safe).
-					depthTypeRequest: ['raw', 'smooth'],
+					'depthTypeRequest': ['raw', 'smooth'],
 				};
 			}
 			return session_init;
