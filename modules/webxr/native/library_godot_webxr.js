@@ -33,6 +33,12 @@ const GodotWebXR = {
 	$GodotWebXR: {
 		gl: null,
 
+		// Optional page diagnostics. No renderer policy or report UI lives here.
+		diagnostic_frame_reported: false,
+		reportDiagnostic: (detail) => {
+			window.dispatchEvent(new CustomEvent('godot-xr-diagnostic', { detail: detail }));
+		},
+
 		session: null,
 		gl_binding: null,
 		disable_webxr_layers: false,
@@ -90,6 +96,16 @@ const GodotWebXR = {
 					GodotWebXR.pose = frame.getViewerPose(GodotWebXR.space);
 					GodotWebXR.frame_subimage = null;
 					callback(time);
+					if (!GodotWebXR.diagnostic_frame_reported && GodotWebXR.pose
+						&& (GodotWebXR.frame_subimage || GodotWebXR.disable_webxr_layers)) {
+						GodotWebXR.diagnostic_frame_reported = true;
+						GodotWebXR.reportDiagnostic({
+							'type': 'frame',
+							'binding': GodotWebXR.gpu_binding ? 'webgpu' : 'webgl',
+							'views': GodotWebXR.pose.views.length,
+							'evidence': 'xr-callback-completed-with-projection-target',
+						});
+					}
 					GodotWebXR.frame = null;
 					GodotWebXR.pose = null;
 					GodotWebXR.frame_subimage = null;
@@ -690,7 +706,11 @@ const GodotWebXR = {
 		const requested_reference_space_types = GodotRuntime.parseString(p_requested_reference_spaces).split(',').map((s) => s.trim());
 		const onstarted = GodotRuntime.get_func(p_on_session_started);
 		const onended = GodotRuntime.get_func(p_on_session_ended);
-		const onfailed = GodotRuntime.get_func(p_on_session_failed);
+		const failed_callback = GodotRuntime.get_func(p_on_session_failed);
+		const onfailed = (message) => {
+			GodotWebXR.reportDiagnostic({ 'type': 'failure', 'message': GodotRuntime.parseString(message) });
+			failed_callback(message);
+		};
 		const oninputevent = GodotRuntime.get_func(p_on_input_event);
 		const onsimpleevent = GodotRuntime.get_func(p_on_simple_event);
 
@@ -728,9 +748,12 @@ const GodotWebXR = {
 		GodotWebXR.offered_session_mode = null;
 		session_promise.then(function (session) {
 			GodotWebXR.session = session;
+			GodotWebXR.diagnostic_frame_reported = false;
+			GodotWebXR.reportDiagnostic({ 'type': 'requested', 'mode': session_mode });
 			GodotWebXR.reportDepthSensingMismatch(session, session_init);
 
 			session.addEventListener('end', function (evt) {
+				GodotWebXR.reportDiagnostic({ 'type': 'ended' });
 				if (Module['GodotWebXRLayers']) {
 					Module['GodotWebXRLayers'].clear();
 				}
@@ -768,6 +791,22 @@ const GodotWebXR = {
 
 			function onReferenceSpaceSuccess(reference_space, reference_space_type) {
 				GodotWebXR.space = reference_space;
+				const device = Module['preinitializedWebGPUDevice'];
+				GodotWebXR.reportDiagnostic({
+					'type': 'started',
+					'mode': session_mode,
+					'binding': GodotWebXR.gpu_binding ? 'webgpu' : 'webgl',
+					'reference_space': reference_space_type,
+					'requested_features': { 'required': required_features, 'optional': optional_features },
+					'enabled_features': session.enabledFeatures ? Array.from(session.enabledFeatures) : null,
+					'frame_rate': session.frameRate || null,
+					'gpu_features': device ? Array.from(device.features) : null,
+					'gpu_limits': device ? {
+						'maxSampledTexturesPerShaderStage': device.limits.maxSampledTexturesPerShaderStage,
+						'maxStorageBuffersPerShaderStage': device.limits.maxStorageBuffersPerShaderStage,
+						'maxTextureDimension2D': device.limits.maxTextureDimension2D,
+					} : null,
+				});
 
 				// Using reference_space.addEventListener() crashes when
 				// using the polyfill with the WebXR Emulator extension,
