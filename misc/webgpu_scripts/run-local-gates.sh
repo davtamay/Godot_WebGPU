@@ -264,9 +264,13 @@ if [ -f "$IWER_PATH" ]; then
 	GLUE_LOG="$LOGDIR/glue-smoke.log"
 	rm -rf "$GLUE_DIR" && mkdir -p "$GLUE_DIR/template"
 	unzip -q -o "$REPO/bin/godot.web.template_release.wasm32.zip" -d "$GLUE_DIR/template"
-	"$EDITOR_EXE" --headless --path "$GLUE_FIXTURE" --import > "$GLUE_DIR/pack.log" 2>&1
-	"$EDITOR_EXE" --headless --path "$GLUE_FIXTURE" --export-pack Web "$GLUE_DIR/glue.pck" >> "$GLUE_DIR/pack.log" 2>&1
-	if ( cd "$TESTBED" && IWER_JS="$(cygpath -m "$IWER_PATH")" "$NODE" "$REPO/misc/webgpu_scripts/glue-smoke.mjs" "$GLUE_DIR/template" "$GLUE_DIR/glue.pck" ) > "$GLUE_LOG" 2>&1; then
+	if ! "$EDITOR_EXE" --headless --path "$GLUE_FIXTURE" --import > "$GLUE_DIR/pack.log" 2>&1; then
+		fail "webxr fixture import" "see $GLUE_DIR/pack.log"
+		tail -8 "$GLUE_DIR/pack.log" >&2
+	elif ! "$EDITOR_EXE" --headless --path "$GLUE_FIXTURE" --export-pack Web "$GLUE_DIR/glue.pck" >> "$GLUE_DIR/pack.log" 2>&1; then
+		fail "webxr fixture pack" "see $GLUE_DIR/pack.log"
+		tail -8 "$GLUE_DIR/pack.log" >&2
+	elif ( cd "$TESTBED" && IWER_JS="$(cygpath -m "$IWER_PATH")" "$NODE" "$REPO/misc/webgpu_scripts/glue-smoke.mjs" "$GLUE_DIR/template" "$GLUE_DIR/glue.pck" ) > "$GLUE_LOG" 2>&1; then
 		pass "webxr glue" "($(tail -1 "$GLUE_LOG"))"
 	else
 		fail "webxr glue" "see $GLUE_LOG"
