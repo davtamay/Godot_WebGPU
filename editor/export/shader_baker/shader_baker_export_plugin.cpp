@@ -391,6 +391,11 @@ Node *ShaderBakerExportPlugin::_customize_scene(Node *p_root, const String &p_pa
 			List<PropertyInfo> property_list;
 			node->get_property_list(&property_list);
 			for (const PropertyInfo &info : property_list) {
+				// Exported scenes are outside the tree. Read only material inputs,
+				// not unrelated properties such as Node3D's global transforms.
+				if (!properties.has(info.name)) {
+					continue;
+				}
 				bool valid = false;
 				Variant property = node->get(info.name, &valid);
 				if (valid) {
