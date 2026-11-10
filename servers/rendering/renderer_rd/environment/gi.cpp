@@ -3600,6 +3600,7 @@ GI::~GI() {
 }
 
 void GI::init(SkyRD *p_sky) {
+	dynamic_gi_supported = RD::get_singleton()->get_device_api_name() != "WebGPU" || RD::get_singleton()->has_feature(RD::SUPPORTS_READ_WRITE_STORAGE_IMAGES_ANY_FORMAT);
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 
@@ -3611,7 +3612,7 @@ void GI::init(SkyRD *p_sky) {
 
 	/* GI */
 
-	{
+	if (dynamic_gi_supported) {
 		//kinda complicated to compute the amount of slots, we try to use as many as we can
 
 		voxel_gi_lights = memnew_arr(VoxelGILight, voxel_gi_max_lights);
@@ -3720,7 +3721,7 @@ void GI::init(SkyRD *p_sky) {
 		}
 	}
 
-	{
+	if (dynamic_gi_supported) {
 		//calculate tables
 		String defines = "\n#define OCT_SIZE " + itos(SDFGI::LIGHTPROBE_OCT_SIZE) + "\n";
 		defines += "\n#define SH_SIZE " + itos(SDFGI::SH_SIZE) + "\n";
@@ -3852,7 +3853,11 @@ void GI::init(SkyRD *p_sky) {
 
 		sdfgi_shader.debug_probes.initialize(versions, defines);
 
-		// TODO disable multiview versions if turned off
+		// WebGPU renders XR views separately and has no multiview shaders.
+		if (RD::get_singleton()->get_device_api_name() == "WebGPU") {
+			sdfgi_shader.debug_probes.set_variant_enabled(SDFGIShader::PROBE_DEBUG_PROBES_MULTIVIEW, false);
+			sdfgi_shader.debug_probes.set_variant_enabled(SDFGIShader::PROBE_DEBUG_VISIBILITY_MULTIVIEW, false);
+		}
 
 		sdfgi_shader.debug_probes_shader = sdfgi_shader.debug_probes.version_create();
 
@@ -3864,7 +3869,9 @@ void GI::init(SkyRD *p_sky) {
 			ds.enable_depth_write = true;
 			ds.depth_compare_operator = RD::COMPARE_OP_GREATER_OR_EQUAL;
 			for (int i = 0; i < SDFGIShader::PROBE_DEBUG_MAX; i++) {
-				// TODO check if version is enabled
+				if (!sdfgi_shader.debug_probes.is_variant_enabled(i)) {
+					continue;
+				}
 
 				RID debug_probes_shader_version = sdfgi_shader.debug_probes.version_get_shader(sdfgi_shader.debug_probes_shader, i);
 				sdfgi_shader.debug_probes_pipeline[i].setup(debug_probes_shader_version, RD::RENDER_PRIMITIVE_TRIANGLE_STRIPS, rs, RD::PipelineMultisampleState(), ds, RD::PipelineColorBlendState::create_disabled(), 0);
@@ -3921,7 +3928,7 @@ void GI::setup_voxel_gi_instances(RenderDataRD *p_render_data, Ref<RenderSceneBu
 
 	for (int i = 0; i < MAX_VOXEL_GI_INSTANCES; i++) {
 		RID texture;
-		if (i < (int)p_voxel_gi_instances.size()) {
+		if (dynamic_gi_supported && i < (int)p_voxel_gi_instances.size()) {
 			VoxelGIInstance *gipi = voxel_gi_instance_owner.get_or_null(p_voxel_gi_instances[i]);
 
 			if (gipi) {
@@ -4003,7 +4010,7 @@ void GI::setup_voxel_gi_instances(RenderDataRD *p_render_data, Ref<RenderSceneBu
 		}
 	}
 
-	if (p_voxel_gi_instances.size() > 0) {
+	if (dynamic_gi_supported && p_voxel_gi_instances.size() > 0) {
 		RD::get_singleton()->draw_command_begin_label("VoxelGIs Setup");
 
 		RD::get_singleton()->buffer_update(voxel_gi_buffer, 0, sizeof(VoxelGIData) * MIN((uint64_t)MAX_VOXEL_GI_INSTANCES, p_voxel_gi_instances.size()), voxel_gi_data);
@@ -4112,7 +4119,7 @@ void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_nor
 
 	PushConstant push_constant;
 
-	push_constant.max_voxel_gi_instances = MIN((uint64_t)MAX_VOXEL_GI_INSTANCES, p_voxel_gi_instances.size());
+	push_constant.max_voxel_gi_instances = dynamic_gi_supported ? MIN((uint64_t)MAX_VOXEL_GI_INSTANCES, p_voxel_gi_instances.size()) : 0;
 	push_constant.high_quality_vct = voxel_gi_quality == RSE::VOXEL_GI_QUALITY_HIGH;
 
 	// these should be the same for all views
@@ -4369,6 +4376,9 @@ void GI::voxel_gi_instance_set_transform_to_data(RID p_probe, const Transform3D 
 }
 
 bool GI::voxel_gi_needs_update(RID p_probe) const {
+	if (!dynamic_gi_supported) {
+		return false;
+	}
 	VoxelGIInstance *voxel_gi = voxel_gi_instance_owner.get_or_null(p_probe);
 	ERR_FAIL_NULL_V(voxel_gi, false);
 
@@ -4376,6 +4386,10 @@ bool GI::voxel_gi_needs_update(RID p_probe) const {
 }
 
 void GI::voxel_gi_update(RID p_probe, bool p_update_light_instances, const Vector<RID> &p_light_instances, const PagedArray<RenderGeometryInstance *> &p_dynamic_objects) {
+	if (!dynamic_gi_supported) {
+		WARN_PRINT_ONCE("WebGPU VoxelGI requires texture-formats-tier2; use lightmaps or ambient lighting on this device.");
+		return;
+	}
 	VoxelGIInstance *voxel_gi = voxel_gi_instance_owner.get_or_null(p_probe);
 	ERR_FAIL_NULL(voxel_gi);
 
@@ -4383,6 +4397,10 @@ void GI::voxel_gi_update(RID p_probe, bool p_update_light_instances, const Vecto
 }
 
 void GI::debug_voxel_gi(RID p_voxel_gi, RD::DrawListID p_draw_list, RID p_framebuffer, const Projection &p_camera_with_transform, bool p_lighting, bool p_emission, float p_alpha) {
+	if (!dynamic_gi_supported) {
+		WARN_PRINT_ONCE("WebGPU VoxelGI requires texture-formats-tier2; use lightmaps or ambient lighting on this device.");
+		return;
+	}
 	VoxelGIInstance *voxel_gi = voxel_gi_instance_owner.get_or_null(p_voxel_gi);
 	ERR_FAIL_NULL(voxel_gi);
 
