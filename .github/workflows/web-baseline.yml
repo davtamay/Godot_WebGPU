@@ -174,9 +174,16 @@ jobs:
           gh release download tint-v20250531.224602 --repo "$GITHUB_REPOSITORY" --pattern 'tint-linux-x86_64' --dir "$RUNNER_TEMP" --clobber
           chmod +x "$RUNNER_TEMP/tint-linux-x86_64"
 
+          # Keep the proven primary translator; use the same extended fallback
+          # as the local zero-exclusion gates for packed RGB10A2 storage shaders.
+          gh release download tint-v20260916.214021 --repo "$GITHUB_REPOSITORY" --pattern 'tint-linux-x86_64' --dir "$RUNNER_TEMP/tint-extended" --clobber
+          printf '%s  %s\n' '6d433320c4b3f1bfbf6016d7d9dd329c14f5d703ab953383c76385825eb98d84' "$RUNNER_TEMP/tint-extended/tint-linux-x86_64" | sha256sum --check
+          chmod +x "$RUNNER_TEMP/tint-extended/tint-linux-x86_64"
+
       - name: Bake the fixture project
         env:
           GODOT_TINT_PATH: ${{ runner.temp }}/tint-linux-x86_64
+          GODOT_TINT_PATH_FALLBACK: ${{ runner.temp }}/tint-extended/tint-linux-x86_64
         run: |
           set -o pipefail
           sudo apt-get install -y xvfb
