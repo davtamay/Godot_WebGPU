@@ -1,0 +1,11 @@
+config_version=5
+[application]
+config/name="Compiled WebXR GPU depth integration"
+run/main_scene="res://main.tscn"
+[display]
+window/size/viewport_width=256
+window/size/viewport_height=256
+[rendering]
+renderer/rendering_method="mobile"
+renderer/rendering_method.web="mobile"
+rendering_device/driver.web="webgpu"
