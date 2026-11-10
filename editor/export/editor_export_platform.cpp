@@ -932,6 +932,11 @@ bool EditorExportPlatform::_export_customize_object(Object *p_object, LocalVecto
 	List<PropertyInfo> props;
 	p_object->get_property_list(&props);
 	for (const PropertyInfo &E : props) {
+		// Only stored properties contribute resources to the export. Disabled
+		// properties can have invalid getters (e.g. unused particle draw passes).
+		if (!(E.usage & PROPERTY_USAGE_STORAGE)) {
+			continue;
+		}
 		switch (E.type) {
 			case Variant::OBJECT: {
 				Ref<Resource> res = p_object->get(E.name);
