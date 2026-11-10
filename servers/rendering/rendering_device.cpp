@@ -8478,6 +8478,7 @@ void RenderingDevice::_execute_frame(bool p_present) {
 
 void RenderingDevice::_stall_for_frame(uint32_t p_frame) {
 	thread_local PackedByteArray packed_byte_array;
+	const bool async_readback = driver->buffer_readback_is_async();
 
 	if (frames[p_frame].fence_signaled) {
 		GodotProfileZoneGroupedFirst(_profile_zone, "driver->fence_wait");
@@ -8490,18 +8491,28 @@ void RenderingDevice::_stall_for_frame(uint32_t p_frame) {
 			for (uint32_t i = 0; i < frames[p_frame].download_buffer_get_data_requests.size(); i++) {
 				const BufferGetDataRequest &request = frames[p_frame].download_buffer_get_data_requests[i];
 				packed_byte_array.resize(request.size);
+				LocalVector<RDD::BufferReadbackRegion> readback_regions;
 
 				uint32_t array_offset = 0;
 				for (uint32_t j = 0; j < request.frame_local_count; j++) {
 					uint32_t local_index = request.frame_local_index + j;
 					const RDD::BufferCopyRegion &region = frames[p_frame].download_buffer_copy_regions[local_index];
+					if (async_readback) {
+						readback_regions.push_back({ frames[p_frame].download_buffer_staging_buffers[local_index], region.dst_offset, region.size, array_offset });
+						array_offset += region.size;
+						continue;
+					}
 					uint8_t *buffer_data = driver->buffer_map(frames[p_frame].download_buffer_staging_buffers[local_index]);
 					memcpy(&packed_byte_array.write[array_offset], &buffer_data[region.dst_offset], region.size);
 					driver->buffer_unmap(frames[p_frame].download_buffer_staging_buffers[local_index]);
 					array_offset += region.size;
 				}
 
-				request.callback.call(packed_byte_array);
+				if (async_readback) {
+					driver->buffer_readback_async(readback_regions, request.size, request.callback);
+				} else {
+					request.callback.call(packed_byte_array);
+				}
 			}
 
 			frames[p_frame].download_buffer_staging_buffers.clear();
@@ -8516,6 +8527,7 @@ void RenderingDevice::_stall_for_frame(uint32_t p_frame) {
 				const TextureGetDataRequest &request = frames[p_frame].download_texture_get_data_requests[i];
 				uint32_t texture_size = get_image_format_required_size(request.format, request.width, request.height, request.depth, request.mipmaps);
 				packed_byte_array.resize(texture_size);
+				LocalVector<RDD::BufferReadbackRegion> readback_regions;
 
 				// Find the block size of the texture's format.
 				uint32_t block_w = 0;
@@ -8534,8 +8546,8 @@ void RenderingDevice::_stall_for_frame(uint32_t p_frame) {
 					uint32_t region_w = MIN(region_size, w - region.texture_offset.x);
 					uint32_t region_h = MIN(region_size, h - region.texture_offset.y);
 
-					uint8_t *buffer_data = driver->buffer_map(frames[p_frame].download_texture_staging_buffers[local_index]);
-					const uint8_t *read_ptr = buffer_data + region.buffer_offset;
+					uint8_t *buffer_data = async_readback ? nullptr : driver->buffer_map(frames[p_frame].download_texture_staging_buffers[local_index]);
+					uint64_t read_offset = region.buffer_offset;
 					uint8_t *write_ptr = packed_byte_array.ptrw() + frames[p_frame].download_texture_mipmap_offsets[local_index];
 					uint32_t unit_size = pixel_size;
 					if (block_w != 1 || block_h != 1) {
@@ -8544,15 +8556,25 @@ void RenderingDevice::_stall_for_frame(uint32_t p_frame) {
 
 					write_ptr += ((region.texture_offset.y / block_h) * (w / block_w) + (region.texture_offset.x / block_w)) * unit_size;
 					for (uint32_t y = region_h / block_h; y > 0; y--) {
-						memcpy(write_ptr, read_ptr, (region_w / block_w) * unit_size);
+						if (async_readback) {
+							readback_regions.push_back({ frames[p_frame].download_texture_staging_buffers[local_index], read_offset, (region_w / block_w) * unit_size, uint64_t(write_ptr - packed_byte_array.ptrw()) });
+						} else {
+							memcpy(write_ptr, buffer_data + read_offset, (region_w / block_w) * unit_size);
+						}
 						write_ptr += (w / block_w) * unit_size;
-						read_ptr += region.row_pitch;
+						read_offset += region.row_pitch;
 					}
 
-					driver->buffer_unmap(frames[p_frame].download_texture_staging_buffers[local_index]);
+					if (!async_readback) {
+						driver->buffer_unmap(frames[p_frame].download_texture_staging_buffers[local_index]);
+					}
 				}
 
-				request.callback.call(packed_byte_array);
+				if (async_readback) {
+					driver->buffer_readback_async(readback_regions, texture_size, request.callback);
+				} else {
+					request.callback.call(packed_byte_array);
+				}
 			}
 
 			GodotProfileZoneGrouped(_profile_zone, "clear buffers");
