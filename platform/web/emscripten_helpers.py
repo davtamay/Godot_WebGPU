@@ -10,8 +10,8 @@ def run_closure_compiler(target, source, env, for_signature):
     closure_bin = os.path.join(
         os.path.dirname(WhereIs("emcc")),
         "node_modules",
-        ".bin",
         "google-closure-compiler",
+        "cli.js",
     )
     cmd = [WhereIs("node"), closure_bin]
     cmd.extend(["--compilation_level", "ADVANCED_OPTIMIZATIONS"])
