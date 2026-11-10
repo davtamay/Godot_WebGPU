@@ -34,8 +34,8 @@ func _request() -> void:
 		var source := rd.storage_buffer_create(data.size(), data)
 		rd.buffer_copy(source, destination, 0, 0, data.size())
 		var test := "buffer_%02d" % iteration
-		var offset := 4 * (iteration % 4)
-		var size := 4096 - offset
+		var offset := iteration % 4
+		var size := 4096 - offset - (iteration % 3)
 		expected[test] = data.slice(offset, offset + size)
 		var error := rd.buffer_get_data_async(destination, _received.bind(test), offset, size)
 		if error != OK:
@@ -61,15 +61,36 @@ func _texture(test: String, width: int, height: int, depth: int, layers: int, mi
 	format.texture_type = RenderingDevice.TEXTURE_TYPE_3D if depth > 1 else (RenderingDevice.TEXTURE_TYPE_2D_ARRAY if layers > 1 else RenderingDevice.TEXTURE_TYPE_2D)
 	format.format = RenderingDevice.DATA_FORMAT_R8_UNORM if single_channel else RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM
 	format.usage_bits = RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT | RenderingDevice.TEXTURE_USAGE_CAN_COPY_TO_BIT
-	var texture := rd.texture_create(format, RDTextureView.new())
-	rd.texture_clear(texture, Color(1, 0, 0, 1), 0, mips, 0, layers)
 	var data := PackedByteArray()
 	for mip in range(mips):
 		var pixels: int = maxi(1, width >> mip) * maxi(1, height >> mip) * maxi(1, depth >> mip)
 		for i in range(pixels):
-			data.append(255)
-			if not single_channel:
-				data.append_array(PackedByteArray([0, 0, 255]))
+			if depth > 1 or width > 256:
+				# Different rows and slices expose incorrect pitch/z assembly.
+				data.append_array(PackedByteArray([i % 251, int(i / width) % 251, 17 + mip * 31, 255]))
+			elif mips > 1:
+				data.append_array(PackedByteArray([255 if mip % 3 == 0 else 0, 255 if mip % 3 == 1 else 0, 255 if mip % 3 == 2 else 0, 255]))
+			else:
+				data.append(255)
+				if not single_channel:
+					data.append_array(PackedByteArray([0, 0, 255]))
+	if depth == 1:
+		format.usage_bits |= RenderingDevice.TEXTURE_USAGE_COLOR_ATTACHMENT_BIT
+	var texture := rd.texture_create(format, RDTextureView.new())
+	if depth > 1 or width > 256:
+		# The current driver supports only zero clears on volumes. Use an
+		# actual GPU texture copy to test nonzero volume data independently.
+		var source := rd.texture_create(format, RDTextureView.new(), [data])
+		rd.texture_copy(source, texture, Vector3.ZERO, Vector3.ZERO, Vector3(width, height, depth), 0, 0, 0, 0)
+		rd.free_rid(source)
+	elif mips > 1:
+		for mip in range(mips):
+			var color := Color(1 if mip % 3 == 0 else 0, 1 if mip % 3 == 1 else 0, 1 if mip % 3 == 2 else 0, 1)
+			rd.texture_clear(texture, color, mip, 1, 0, layers)
+	else:
+		if layers > 1:
+			rd.texture_clear(texture, Color(0, 0, 1, 1), 0, mips, 0, layers)
+		rd.texture_clear(texture, Color(1, 0, 0, 1), 0, mips, layers - 1, 1)
 	expected[test] = data
 	var error := rd.texture_get_data_async(texture, layers - 1, _received.bind(test))
 	if error != OK:

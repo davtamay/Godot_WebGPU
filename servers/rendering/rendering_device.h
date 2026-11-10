@@ -216,6 +216,7 @@ private:
 	RID_Owner<Buffer, true> texture_buffer_owner;
 
 	struct BufferGetDataRequest {
+		uint32_t prefix = 0; // Padding before the requested bytes in staging.
 		uint32_t frame_local_index = 0;
 		uint32_t frame_local_count = 0;
 		Callable callback;
