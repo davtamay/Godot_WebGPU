@@ -672,6 +672,7 @@ public:
 	virtual uint8_t *buffer_map(BufferID p_buffer) override;
 	virtual void buffer_unmap(BufferID p_buffer) override;
 	virtual bool buffer_readback_is_async() const override { return true; }
+	virtual uint32_t buffer_readback_alignment() const override { return 4; }
 	virtual void buffer_readback_async(VectorView<BufferReadbackRegion> p_regions, uint64_t p_size, const Callable &p_callback) override;
 
 	virtual uint8_t *buffer_persistent_map_advance(BufferID p_buffer, uint64_t p_frames_drawn) override;

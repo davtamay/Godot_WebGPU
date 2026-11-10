@@ -8,7 +8,8 @@ Branch: codex/async-readback. Do not merge into or rewrite codex/monday-readines
 The default driver keeps the existing fence wait / synchronous mapping path.
 An opt-in driver hook receives byte regions of already-submitted download staging
 buffers. RenderingDevice supplies packed buffer ranges or texture rows, retaining
-its existing mip/layer/volume layout calculations. WebGPU snapshots these regions
+its existing mip/layer/volume layout calculations. Byte-sized buffer requests
+are padded to the backend copy alignment and trimmed when assembling results. WebGPU snapshots these regions
 into an owned MapRead | CopyDst buffer before returning, then maps asynchronously.
 No source resource, driver, frame or RenderingDevice pointer is retained by the
 completion. The callback is deferred through Godot's message queue, exactly once;
@@ -25,7 +26,7 @@ change does not claim to fix synchronous GPU readback.
 
 The shared commit deliberately adds only rendering_device.cpp to check-stack's
 [shared]-only paths; the driver header was already allowed. This is a documented
-policy exception for the two async-download dispatch sites, not permission for
+policy exception for aligned async request preparation and the two download dispatch sites, not permission for
 unrelated RenderingDevice changes. Keep this adapter separate from WebGPU code
 for Monday replay review. Other backends do not opt in.
 

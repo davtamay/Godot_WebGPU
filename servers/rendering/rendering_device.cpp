@@ -1412,7 +1412,7 @@ Error RenderingDevice::buffer_get_data_async(RID p_buffer, const Callable &p_cal
 		p_size = buffer->size;
 	}
 
-	ERR_FAIL_COND_V_MSG(p_size + p_offset > buffer->size, ERR_INVALID_PARAMETER, "Size is larger than the buffer.");
+	ERR_FAIL_COND_V_MSG(uint64_t(p_size) + p_offset > buffer->size, ERR_INVALID_PARAMETER, "Size is larger than the buffer.");
 	ERR_FAIL_COND_V_MSG(!p_callback.is_valid(), ERR_INVALID_PARAMETER, "Callback must be valid.");
 
 	_check_transfer_worker_buffer(buffer);
@@ -1426,7 +1426,12 @@ Error RenderingDevice::buffer_get_data_async(RID p_buffer, const Callable &p_cal
 	uint32_t block_write_offset;
 	uint32_t block_write_amount;
 	StagingRequiredAction required_action;
-	uint32_t to_submit = p_size;
+	// Some asynchronous APIs require aligned copies even for byte subranges.
+	const uint32_t alignment = driver->buffer_readback_alignment();
+	get_data_request.prefix = p_offset % alignment;
+	const uint64_t copy_size = STEPIFY(uint64_t(p_size) + get_data_request.prefix, uint64_t(alignment));
+	ERR_FAIL_COND_V(copy_size > UINT32_MAX, ERR_INVALID_PARAMETER);
+	uint32_t to_submit = copy_size;
 	uint32_t submit_from = 0;
 	while (to_submit > 0) {
 		RETURN_IF_ERROR(_staging_buffer_allocate(download_staging_buffers, MIN(to_submit, download_staging_buffers.block_size), required_align, block_write_offset, block_write_amount, required_action));
@@ -1452,7 +1457,7 @@ Error RenderingDevice::buffer_get_data_async(RID p_buffer, const Callable &p_cal
 		}
 
 		RDD::BufferCopyRegion region;
-		region.src_offset = submit_from + p_offset;
+		region.src_offset = submit_from + p_offset - get_data_request.prefix;
 		region.dst_offset = block_write_offset;
 		region.size = block_write_amount;
 
@@ -8498,8 +8503,10 @@ void RenderingDevice::_stall_for_frame(uint32_t p_frame) {
 					uint32_t local_index = request.frame_local_index + j;
 					const RDD::BufferCopyRegion &region = frames[p_frame].download_buffer_copy_regions[local_index];
 					if (async_readback) {
-						readback_regions.push_back({ frames[p_frame].download_buffer_staging_buffers[local_index], region.dst_offset, region.size, array_offset });
-						array_offset += region.size;
+						const uint32_t prefix = j == 0 ? request.prefix : 0;
+						const uint32_t size = MIN(region.size - prefix, request.size - array_offset);
+						readback_regions.push_back({ frames[p_frame].download_buffer_staging_buffers[local_index], region.dst_offset + prefix, size, array_offset });
+						array_offset += size;
 						continue;
 					}
 					uint8_t *buffer_data = driver->buffer_map(frames[p_frame].download_buffer_staging_buffers[local_index]);
