@@ -37,6 +37,176 @@
 // upstreamed, its export moves into the upstream file as part of that PR.
 
 const GodotWebXRExt = {
+	$GodotWebXRDepth: {
+		state: null,
+		'generation': 0,
+		'sequence': 0,
+		lostDevices: null,
+		observedDevices: null,
+
+		reset: function () {
+			const state = GodotWebXRDepth.state;
+			if (state) {
+				GodotWebXRDepth.disposeOutput(state);
+				for (const buffer of state.uniforms) buffer.destroy();
+				state.dummy.destroy();
+			}
+			GodotWebXRDepth.state = null;
+		},
+
+		disposeOutput: function (state) {
+			for (const name of ['sample', 'readback']) {
+				if (state[name]) state[name].destroy();
+				if (state[name + 'Handle']) Module['GodotWebGPUXR'].releaseOwnedTexture(state[name + 'Handle']);
+				state[name] = null;
+				state[name + 'Handle'] = 0;
+			}
+		},
+
+		pipeline: function (state, integer) {
+			const key = integer ? 'uint' : 'float';
+			if (state.pipelines[key]) return state.pipelines[key];
+			const layout = state.device.createBindGroupLayout({ entries: [
+				{ binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: integer ? 'uint' : 'unfilterable-float', viewDimension: '2d' } },
+				{ binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', 'format': 'rgba16float', viewDimension: '2d' } },
+				{ binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', 'format': 'r32float', viewDimension: '2d' } },
+				{ binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+			] });
+			const module = state.device.createShaderModule({ label: 'Godot WebXR depth normalization', code: `
+struct Params { uv: mat4x4<f32>, scale: f32, valid: u32, padding: vec2<u32> };
+@group(0) @binding(0) var source: texture_2d<${integer ? 'u32' : 'f32'}>;
+@group(0) @binding(1) var sample_output: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(2) var readback_output: texture_storage_2d<r32float, write>;
+@group(0) @binding(3) var<uniform> params: Params;
+@compute @workgroup_size(8, 8) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+ let size = textureDimensions(sample_output);
+ if (any(id.xy >= size)) { return; }
+ var meters = 0.0;
+ if (params.valid != 0u) {
+  let uv = (vec2<f32>(id.xy) + vec2<f32>(0.5)) / vec2<f32>(size);
+  let mapped = params.uv * vec4<f32>(uv, 0.0, 1.0);
+  if (abs(mapped.w) > 0.000001) {
+   let q = mapped.xy / mapped.w;
+   if (all(q >= vec2<f32>(0.0)) && all(q <= vec2<f32>(1.0))) {
+    let extent = textureDimensions(source);
+    let pixel = min(vec2<u32>(q * vec2<f32>(extent)), extent - vec2<u32>(1u));
+    let raw = f32(textureLoad(source, vec2<i32>(pixel), 0).r);
+    let value = raw * params.scale;
+    if (value > 0.0 && value < 3.402823e38) { meters = value; }
+   }
+  }
+ }
+ textureStore(readback_output, vec2<i32>(id.xy), vec4<f32>(meters, 0.0, 0.0, 1.0));
+ // A universally filterable copy for spatial materials; readback_output data remains f32.
+ textureStore(sample_output, vec2<i32>(id.xy), vec4<f32>(min(meters, 65504.0), 0.0, 0.0, 1.0));
+}` });
+			const pipeline = state.device.createComputePipeline({ label: 'Godot WebXR depth normalization', layout: state.device.createPipelineLayout({ bindGroupLayouts: [layout] }), compute: { module, entryPoint: 'main' } });
+			state.pipelines[key] = { pipeline, layout };
+			return state.pipelines[key];
+		},
+
+		prepare: function () {
+			const xr = GodotWebXR;
+			const failure = (status) => ({ 'status': status, 'sequence': GodotWebXRDepth['sequence'], 'valid_mask': 0 });
+			if (!xr.session) { GodotWebXRDepth.reset(); return failure('no_session'); }
+			if (!xr.gpu_binding) return failure('webgl_session');
+			if (xr.session.depthUsage !== 'gpu-optimized') return failure('cpu_depth');
+			if (typeof xr.gpu_binding.getDepthInformation !== 'function') return failure('unsupported_by_browser');
+			if (xr.session.depthActive === false) return failure('depth_paused');
+			if (!xr.frame || !xr.pose) return failure('no_frame');
+			const device = Module['preinitializedWebGPUDevice'];
+			if (!device) return failure('device_unavailable');
+			if (!GodotWebXRDepth.lostDevices) GodotWebXRDepth.lostDevices = new WeakSet();
+			if (!GodotWebXRDepth.observedDevices) GodotWebXRDepth.observedDevices = new WeakSet();
+			if (!GodotWebXRDepth.observedDevices.has(device)) {
+				GodotWebXRDepth.observedDevices.add(device);
+				// Do not retain per-session textures/pipelines through device.lost.
+				device.lost.then(() => GodotWebXRDepth.lostDevices.add(device));
+			}
+			if (GodotWebXRDepth.lostDevices.has(device)) { GodotWebXRDepth.reset(); return failure('device_lost'); }
+			let state = GodotWebXRDepth.state;
+			if (state && (state.session !== xr.session || state.device !== device)) { GodotWebXRDepth.reset(); state = null; }
+			if (!state) {
+				state = { session: xr.session, device, pipelines: {}, uniforms: [], sample: null, readback: null, sampleHandle: 0, readbackHandle: 0, frame: null };
+				state.dummy = device.createTexture({ size: [1, 1], 'format': 'r32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+				device.queue.writeTexture({ texture: state.dummy }, new Float32Array([0]), { bytesPerRow: 4 }, [1, 1]);
+				GodotWebXRDepth.state = state;
+			}
+			if (state.frame === xr.frame) return state.report;
+			state.frame = xr.frame;
+			const views = xr.pose['views'];
+			if (!views.length || views.length > 32) return (state.report = failure('unsupported_view_count'));
+			const records = [];
+			let width = 1, height = 1, validMask = 0;
+			for (let index = 0; index < views.length; index++) {
+				const view = views[index];
+				const record = { 'valid': false, 'eye': view['eye'] || 'none', 'projection': Array.from(view.projectionMatrix || []), 'transform': Array.from(view['transform'] ? view['transform'].matrix : []) };
+				try {
+					const depth = xr.gpu_binding.getDepthInformation(view);
+					if (!depth) { record['reason'] = 'no_depth_data'; records.push(record); continue; }
+					const texture = depth.texture;
+					if (!texture || !['r16uint', 'r32float'].includes(texture['format'])) throw new Error('unsupported_format');
+					if (!(texture.usage & GPUTextureUsage.TEXTURE_BINDING) || texture.dimension !== '2d' || texture.mipLevelCount !== 1 || texture.sampleCount !== 1) throw new Error('invalid_texture');
+					if (depth['width'] !== texture['width'] || depth['height'] !== texture['height'] || !depth['width'] || !depth['height']) throw new Error('invalid_size');
+					const matrix = Array.from(depth.normDepthBufferFromNormView.matrix);
+					if (matrix.length !== 16 || !matrix.every(Number.isFinite) || !Number.isFinite(depth.rawValueToMeters) || depth.rawValueToMeters <= 0) throw new Error('invalid_transform_or_scale');
+					let descriptor;
+					if (typeof depth.getViewDescriptor === 'function') descriptor = depth.getViewDescriptor();
+					else if (texture.depthOrArrayLayers === 1) descriptor = { dimension: '2d', baseArrayLayer: 0, arrayLayerCount: 1 };
+					else throw new Error('missing_view_descriptor');
+					const layer = descriptor.baseArrayLayer === undefined ? 0 : descriptor.baseArrayLayer;
+					if ((descriptor.aspect && descriptor.aspect !== 'all') || descriptor.dimension !== '2d' || !Number.isInteger(layer) || layer < 0 || layer >= texture.depthOrArrayLayers || (descriptor.arrayLayerCount !== undefined && descriptor.arrayLayerCount !== 1) || (descriptor.baseMipLevel || 0) !== 0 || (descriptor.mipLevelCount !== undefined && descriptor.mipLevelCount !== 1) || (descriptor['format'] && descriptor['format'] !== texture['format'])) throw new Error('invalid_view_descriptor');
+					record.source = texture.createView(descriptor);
+					record['valid'] = true;
+					record['format'] = texture['format'];
+					record['raw_to_meters'] = depth.rawValueToMeters;
+					record['norm_depth_from_view'] = matrix;
+					record['source_layer'] = layer;
+					record['width'] = depth['width'];
+					record['height'] = depth['height'];
+					width = Math.max(width, depth['width']); height = Math.max(height, depth['height']);
+					validMask |= (1 << index);
+				} catch (error) { record['reason'] = String(error.message || error); }
+				records.push(record);
+			}
+			// Never retain last frame's depth for a missing eye. Every output layer
+			// is overwritten, with zero (unknown) where data/UV coverage is absent.
+			if (!validMask && state.sample) { width = state.sample['width']; height = state.sample['height']; }
+			// Texture2DArrayRD requires at least two layers, including mono sessions.
+			const outputLayers = Math.max(2, views.length);
+			if (!state.sample || state.sample['width'] !== width || state.sample['height'] !== height || state.sample.depthOrArrayLayers !== outputLayers) {
+				GodotWebXRDepth.disposeOutput(state);
+				const usage = GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC;
+				state.sample = device.createTexture({ label: 'Godot normalized XR depth (filterable)', size: [width, height, outputLayers], 'format': 'rgba16float', usage });
+				state.readback = device.createTexture({ label: 'Godot normalized XR depth (precise)', size: [width, height, outputLayers], 'format': 'r32float', usage });
+				state.sampleHandle = Module['GodotWebGPUXR'].importOwnedTexture(state.sample);
+				state.readbackHandle = Module['GodotWebGPUXR'].importOwnedTexture(state.readback);
+				state['generation'] = ++GodotWebXRDepth['generation'];
+			}
+			const encoder = device.createCommandEncoder({ label: 'Godot WebXR depth frame' });
+			for (let index = 0; index < outputLayers; index++) {
+				const record = records[index] || { 'valid': false };
+				const pipeline = GodotWebXRDepth.pipeline(state, record['format'] === 'r16uint');
+				if (!state.uniforms[index]) state.uniforms[index] = device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+				const params = new ArrayBuffer(80);
+				if (record['valid']) { new Float32Array(params).set(record['norm_depth_from_view']); new Float32Array(params)[16] = record['raw_to_meters']; new Uint32Array(params)[17] = 1; }
+				device.queue.writeBuffer(state.uniforms[index], 0, params);
+				const descriptor = { dimension: '2d', baseArrayLayer: index, arrayLayerCount: 1 };
+				const bindings = device.createBindGroup({ layout: pipeline.layout, entries: [
+					{ binding: 0, resource: record.source || state.dummy.createView() },
+					{ binding: 1, resource: state.sample.createView(descriptor) },
+					{ binding: 2, resource: state.readback.createView(descriptor) },
+					{ binding: 3, resource: { buffer: state.uniforms[index] } },
+				] });
+				const pass = encoder.beginComputePass(); pass.setPipeline(pipeline.pipeline); pass.setBindGroup(0, bindings); pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8)); pass.end();
+				delete record.source;
+			}
+			device.queue.submit([encoder.finish()]);
+			state.report = { 'status': validMask ? 'ok' : 'no_depth_data', 'sequence': ++GodotWebXRDepth['sequence'], 'generation': state['generation'], 'width': width, 'height': height, 'view_count': views.length, 'texture_layers': outputLayers, 'valid_mask': validMask >>> 0, 'texture_handle': state.sampleHandle, 'readback_handle': state.readbackHandle, 'units': 'meters', 'uv_space': 'normalized_view', 'views': records };
+			return state.report;
+		},
+	},
+
 
 	godot_webxr_offer_session__proxy: 'sync',
 	godot_webxr_offer_session__sig: 'viiiii',
@@ -65,56 +235,21 @@ const GodotWebXRExt = {
 	},
 
 	godot_webxr_get_depth_sensing_info__proxy: 'sync',
-	godot_webxr_get_depth_sensing_info__sig: 'iii',
-	godot_webxr_get_depth_sensing_info: function (p_view, r_params) {
-		// WebGPU path only: returns an imported WGPUTexture handle for the
-		// view's depth-sensing texture and writes [rawValueToMeters, width,
-		// height, format(0=unorm16,1=float32)] to r_params (4 floats).
-		// On failure (return 0), r_params[0] holds why: 0 = no session,
-		// 1 = WebGL-binding session, 2 = the browser's XRGPUBinding has no
-		// getDepthInformation(), 3 = the session has no depth data.
-		const fail = function (reason) {
-			GodotRuntime.setHeapValue(r_params + 0, reason, 'float');
-			return 0;
-		};
-		// Capability checks come BEFORE the pose check: UI clicks can reach
-		// this outside the XR frame callback (pose is null there), and the
-		// binding/API checks don't need a pose - without this order a
-		// mid-session click misreports "no session" instead of the real
-		// capability verdict.
-		if (!GodotWebXR.session) {
-			return fail(0);
-		}
-		if (!GodotWebXR.gpu_binding) {
-			return fail(1);
-		}
-		if (typeof GodotWebXR.gpu_binding.getDepthInformation !== 'function') {
-			return fail(2);
-		}
-		if (!GodotWebXR.pose) {
-			// Supported, but no pose this instant (outside the frame
-			// callback). Per-frame data can't be fetched here; callers
-			// polling from _process land inside the frame and succeed.
-			return fail(3);
-		}
-		const views = GodotWebXR.pose.views;
-		if (p_view >= views.length) {
-			return fail(3);
-		}
-		let depth = null;
+	godot_webxr_get_depth_sensing_info__sig: 'i',
+	godot_webxr_get_depth_sensing_info__deps: ['$GodotWebXRDepth'],
+	godot_webxr_get_depth_sensing_info: function () {
 		try {
-			depth = GodotWebXR.gpu_binding.getDepthInformation(views[p_view]);
-		} catch (e) {
-			return fail(3);
+			const report = GodotWebXRDepth.prepare();
+			const key = [report['status'], report['generation'], report['valid_mask']].join(':');
+			if (key !== GodotWebXRDepth.lastDiagnostic) {
+				GodotWebXRDepth.lastDiagnostic = key;
+				GodotWebXR.reportDiagnostic({ 'type': 'depth', 'status': report['status'], 'view_count': report['view_count'] || 0, 'valid_mask': report['valid_mask'] || 0, 'units': 'meters', 'normalization': 'gpu', 'source_formats': (report['views'] || []).map((view) => view['format'] || null) });
+			}
+			return GodotRuntime.allocString(JSON.stringify(report));
+		} catch (error) {
+			GodotWebXRDepth.reset();
+			return GodotRuntime.allocString(JSON.stringify({ 'status': 'depth_error', 'valid_mask': 0, 'error': String(error.message || error) }));
 		}
-		if (!depth || !depth.texture) {
-			return fail(3);
-		}
-		GodotRuntime.setHeapValue(r_params + 0, depth.rawValueToMeters !== undefined ? depth.rawValueToMeters : 1.0, 'float');
-		GodotRuntime.setHeapValue(r_params + 4, depth.texture.width, 'float');
-		GodotRuntime.setHeapValue(r_params + 8, depth.texture.height, 'float');
-		GodotRuntime.setHeapValue(r_params + 12, depth.texture.format === 'r32float' ? 1.0 : 0.0, 'float');
-		return Module['GodotWebGPUXR'].importTexture(depth.texture);
 	},
 
 	godot_webxr_get_pass_info__proxy: 'sync',

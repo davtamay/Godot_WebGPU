@@ -84,9 +84,11 @@ private:
 	uint32_t layer_generation = 0;
 	void _free_rd_layer_textures();
 	RID depth_sensing_texture;
-	float depth_sensing_raw_to_meters = 1.0f;
-	Size2 depth_sensing_size;
-	int depth_sensing_status = 0;
+	RID depth_sensing_readback;
+	RID depth_sensing_view0;
+	uint64_t depth_sensing_generation = 0;
+	Dictionary depth_sensing_info;
+	void _free_depth_sensing();
 	void _update_depth_sensing();
 #endif
 	struct Touch {
