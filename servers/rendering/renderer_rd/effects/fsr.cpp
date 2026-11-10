@@ -30,6 +30,9 @@
 
 #include "fsr.h"
 
+#include "copy_effects.h"
+#include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
+
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 
@@ -76,6 +79,17 @@ void FSR::process(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_source_rd_te
 	}
 
 	RID upscale_texture = p_render_buffers->get_texture(SNAME("FSR"), SNAME("upscale_texture"));
+	// WebGPU storage bindings require an exact format match. The final LDR
+	// target may be RGBA8 and attachment-only, while FSR writes RGBA16Float.
+	RID output_texture = p_destination_texture;
+	const bool webgpu = RD::get_singleton()->get_device_api_name() == "WebGPU";
+	if (webgpu) {
+		if (!p_render_buffers->has_texture(SNAME("FSR"), SNAME("webgpu_output"))) {
+			p_render_buffers->create_texture(SNAME("FSR"), SNAME("webgpu_output"), RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT, RD::TEXTURE_SAMPLES_1, target_size, 1);
+		}
+		output_texture = p_render_buffers->get_texture(SNAME("FSR"), SNAME("webgpu_output"));
+	}
+
 
 	FSRUpscalePushConstant push_constant;
 	memset(&push_constant, 0, sizeof(FSRUpscalePushConstant));
@@ -112,7 +126,7 @@ void FSR::process(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_source_rd_te
 
 	//FSR Rcas
 	RD::Uniform u_upscale_texture_with_sampler(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, { default_sampler, upscale_texture });
-	RD::Uniform u_destination_texture(RD::UNIFORM_TYPE_IMAGE, 0, { p_destination_texture });
+	RD::Uniform u_destination_texture(RD::UNIFORM_TYPE_IMAGE, 0, { output_texture });
 
 	push_constant.pass = FSR_UPSCALE_PASS_RCAS;
 	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 0, u_upscale_texture_with_sampler), 0);
@@ -123,4 +137,7 @@ void FSR::process(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_source_rd_te
 	RD::get_singleton()->compute_list_dispatch(compute_list, dispatch_x, dispatch_y, 1);
 
 	RD::get_singleton()->compute_list_end();
+	if (webgpu) {
+		CopyEffects::get_singleton()->copy_to_fb_rect(output_texture, FramebufferCacheRD::get_singleton()->get_cache(p_destination_texture), Rect2i(Point2i(), target_size));
+	}
 }
