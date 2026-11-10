@@ -16,8 +16,8 @@
 		<method name="is_natively_supported" qualifiers="const">
 			<return type="bool" />
 			<description>
-				Returns [code]true[/code] if the active WebXR session supports composition layers, in which case the layer is rendered by the browser's compositor rather than the fallback mesh.
-				[b]Note:[/b] This will only return an accurate result after the WebXR session has started.
+				Returns [code]true[/code] after the browser has created a native composition layer for this node. Granting the session's [code]layers[/code] feature alone does not guarantee support for every layer type. A rejected layer keeps its fallback mesh.
+				[b]Note:[/b] Creation happens while preparing a frame after the WebXR session starts. This returns [code]false[/code] while creation is pending and after the layer is released.
 			</description>
 		</method>
 	</methods>
