@@ -1381,7 +1381,9 @@ static bool _is_depth_stencil_format(RenderingDeviceCommons::DataFormat p_format
 // when reflection lacks the image format (GLSL allows format-less writeonly
 // images) -- the baked WGSL declaration is authoritative.
 static WGPUTextureFormat _wgsl_storage_format_to_wgpu(const String &p_format) {
-	if (p_format == "rgba8unorm") {
+	if (p_format == "rgb10a2unorm") {
+		return WGPUTextureFormat_RGB10A2Unorm;
+	} else if (p_format == "rgba8unorm") {
 		return WGPUTextureFormat_RGBA8Unorm;
 	} else if (p_format == "rgba8snorm") {
 		return WGPUTextureFormat_RGBA8Snorm;

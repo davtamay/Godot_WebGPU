@@ -40,4 +40,5 @@ public:
 	virtual bool matches_driver(const String &p_driver) override;
 	virtual bool skips_variant(const Vector<String> &p_stage_sources) const override;
 	virtual bool bakes_disabled_groups() const override;
+	virtual void prepare_stage_sources(Vector<String> &r_sources) const override;
 };
