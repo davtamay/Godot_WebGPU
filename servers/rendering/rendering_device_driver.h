@@ -211,6 +211,7 @@ public:
 	// all completion state, and defer exactly one callback (empty data on failure).
 	// The default keeps the existing fence + synchronous map path unchanged.
 	virtual bool buffer_readback_is_async() const { return false; }
+	virtual uint32_t buffer_readback_alignment() const { return 1; }
 	virtual void buffer_readback_async(VectorView<BufferReadbackRegion> p_regions, uint64_t p_size, const Callable &p_callback) {}
 
 	virtual uint8_t *buffer_persistent_map_advance(BufferID p_buffer, uint64_t p_frames_drawn) = 0;
