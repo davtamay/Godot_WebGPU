@@ -833,6 +833,7 @@ public:
 	// RGBA8) instead of RGBE/nibble-packed integers reinterpreted at sampling
 	// time; only the writers change (their SDFGI_FLOAT_STORAGE twins).
 	bool sdfgi_float_storage = false;
+	bool dynamic_gi_supported = true;
 	GiShaderRD shader;
 	RID shader_version;
 	PipelineDeferredRD pipelines[SHADER_SPECIALIZATION_VARIATIONS][MODE_MAX];
