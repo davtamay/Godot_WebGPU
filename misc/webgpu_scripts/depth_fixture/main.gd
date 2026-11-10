@@ -55,6 +55,7 @@ func _request() -> void:
 	var metadata: Dictionary = info.get("webxr_depth", {})
 	var valid: bool = str(metadata.get("status", "")) == expected.status
 	valid = valid and int(metadata.get("valid_mask", 0)) == int(expected.mask)
+	valid = valid and not metadata.has("texture_handle") and not metadata.has("readback_handle")
 	var rid: RID = info.get("webxr_depth_readback_array_rd", RID())
 	var sample_rid: RID = info.get("webxr_depth_texture_array_rd", RID())
 	var generation := int(metadata.get("generation", -1))

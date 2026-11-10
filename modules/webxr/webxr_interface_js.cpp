@@ -1003,12 +1003,16 @@ void WebXRInterfaceJS::_update_depth_sensing() {
 	free(info);
 	if (depth_sensing_info.get("status", "") != Variant("ok")) {
 		// Do not expose a previous frame's texture after missing data or loss.
+		depth_sensing_info.erase("texture_handle");
+		depth_sensing_info.erase("readback_handle");
 		_free_depth_sensing();
 		return;
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd == nullptr) {
 		depth_sensing_info["status"] = "renderer_unavailable";
+		depth_sensing_info.erase("texture_handle");
+		depth_sensing_info.erase("readback_handle");
 		return;
 	}
 	uint64_t generation = depth_sensing_info["generation"];
