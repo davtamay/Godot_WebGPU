@@ -74,7 +74,7 @@ private:
 		// synchronous map, so buffer_map() returns the shadow and
 		// buffer_unmap() flushes it with wgpuQueueWriteBuffer (which executes
 		// before any subsequently submitted command buffer, matching the
-		// engine's staging semantics). Downloads are not supported yet.
+		// engine's staging semantics). Async downloads use owned GPU snapshots.
 		uint8_t *shadow = nullptr;
 		// Dynamic-slice flushes are range-diffed against the bytes last
 		// uploaded (the engine writes through the persistent map, so the
@@ -671,6 +671,9 @@ public:
 	virtual uint64_t buffer_get_allocation_size(BufferID p_buffer) override;
 	virtual uint8_t *buffer_map(BufferID p_buffer) override;
 	virtual void buffer_unmap(BufferID p_buffer) override;
+	virtual bool buffer_readback_is_async() const override { return true; }
+	virtual void buffer_readback_async(VectorView<BufferReadbackRegion> p_regions, uint64_t p_size, const Callable &p_callback) override;
+
 	virtual uint8_t *buffer_persistent_map_advance(BufferID p_buffer, uint64_t p_frames_drawn) override;
 	virtual void buffer_flush(BufferID p_buffer) override;
 	virtual void buffer_flush_range(BufferID p_buffer, uint64_t p_offset, uint64_t p_size) override;
@@ -792,7 +795,6 @@ public:
 	bool use_push_constant_diff = true;
 	bool use_lazy_unmap = true;
 	bool use_readback_mirror = true;
-	bool readback_unsupported_reported = false;
 	void _mirror_buffer_copy(const BufferInfo *p_src, BufferInfo *p_dst, VectorView<BufferCopyRegion> p_regions);
 	bool device_has_indirect_first_instance = false;
 	uint64_t present_count = 0;
