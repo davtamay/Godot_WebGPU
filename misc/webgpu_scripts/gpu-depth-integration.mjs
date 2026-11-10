@@ -20,9 +20,24 @@ const server=http.createServer((req,res)=>{
  if(!noIsolation)Object.assign(headers,{'Cross-Origin-Opener-Policy':'same-origin','Cross-Origin-Embedder-Policy':'require-corp'});
  res.writeHead(200,headers);
  if(file.endsWith('index.js')){
-  const source=fs.readFileSync(file,'utf8'),marker='Module["GodotWebGPUXR"]=GodotWebGPUXR;';
-  assert.equal(source.split(marker).length,2,'Injection marker must be unique');injections++;
-  res.end(source.replace(marker,marker+'\n'+bootstrap));
+  const source=fs.readFileSync(file,'utf8');
+  // Closure flattens private XR state into variables. Locate it from the
+  // preserved diagnostic guards; fail closed if the generated shape changes.
+  const markers=[...source.matchAll(/Module(?:\["GodotWebGPUXR"\]|\.GodotWebGPUXR)\s*=\s*[\w$]+;/g)];
+  assert.equal(markers.length,1,'Injection marker must be unique');
+  let injected=bootstrap;
+  if(!source.includes('GodotWebXR.session')){
+   const state=[...source.matchAll(/if\(!([\w$]+)\)return [^;]+?\("no_session"\);if\(!([\w$]+)\)return [^;]+?\("webgl_session"\)/g)];
+   const frame=[...source.matchAll(/if\(!([\w$]+)\|\|!([\w$]+)\)return [^;]+?\("no_frame"\)/g)];
+   assert.equal(state.length,1,'Closure XR session/binding guards must be unique');
+   assert.equal(frame.length,1,'Closure XR frame/pose guard must be unique');
+   for(const [field,symbol] of Object.entries({session:state[0][1],gpu_binding:state[0][2],frame:frame[0][1],pose:frame[0][2]})){
+    injected=injected.replaceAll('GodotWebXR.'+field,symbol);
+   }
+   assert.ok(!injected.includes('GodotWebXR.'),'All test-only state references must be resolved');
+  }
+  injections++;
+  res.end(source.replace(markers[0][0],markers[0][0]+'\n'+injected));
  }else fs.createReadStream(file).pipe(res);
 });
 await new Promise(r=>server.listen(0,'127.0.0.1',r));

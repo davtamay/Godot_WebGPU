@@ -119,9 +119,8 @@ build_editor() {
 }
 
 # The web build needs the emsdk environment. It is set explicitly rather than
-# through emsdk_env.bat: MSYS mangles the PATH that script exports. Closure is
-# off locally because Godot's helper invokes node through a Unix shim that does
-# not exist on Windows; CI keeps closure on.
+# through emsdk_env.bat: MSYS mangles the PATH that script exports. Use full
+# Closure for both the loader and Emscripten runtime, matching release CI.
 build_web() {
 	local threads=$1 label=$2
 	local log="$LOGDIR/build-web-$label.log"
@@ -140,7 +139,7 @@ build_web() {
 		\$env:EMSDK_PYTHON = "$py"
 		\$env:PATH = "$EMSDK_ROOT;$EMSDK_ROOT/upstream/emscripten;$(dirname "$node");" + \$env:PATH
 		Set-Location "$REPO"
-		scons platform=web target=template_release threads=$threads webgpu=yes use_closure_compiler=no
+		scons platform=web target=template_release threads=$threads webgpu=yes use_closure_compiler=yes
 		exit \$LASTEXITCODE
 	PS
 
@@ -226,11 +225,8 @@ else
 	fail "strict probe (nothreads)" "could not stage artifacts"
 fi
 
-# The CI web builds run the loader sources through the Closure compiler, which
-# rejects things a plain parse accepts (a duplicate extern, a renamed property
-# crossing a boundary). Godot's own invocation cannot run here - it calls the
-# node_modules shim, which is a shell script on Windows - so call the compiler
-# directly with the same flags. A skip is not a pass.
+# Independently check loader sources, including when --skip-build is used.
+# This check alone does not prove the Emscripten runtime was Closure-built.
 phase "Closure"
 CLOSURE_CLI="${EMSDK:-$HOME/emsdk}/upstream/emscripten/node_modules/google-closure-compiler/cli.js"
 if [ -f "$CLOSURE_CLI" ]; then
