@@ -199,6 +199,20 @@ public:
 	virtual uint64_t buffer_get_allocation_size(BufferID p_buffer) = 0;
 	virtual uint8_t *buffer_map(BufferID p_buffer) = 0;
 	virtual void buffer_unmap(BufferID p_buffer) = 0;
+
+	struct BufferReadbackRegion {
+		BufferID buffer;
+		uint64_t offset = 0;
+		uint64_t size = 0;
+		uint64_t destination_offset = 0;
+	};
+	// Called after download commands have been submitted, before staging reuse.
+	// An asynchronous backend must snapshot the regions before returning, own
+	// all completion state, and defer exactly one callback (empty data on failure).
+	// The default keeps the existing fence + synchronous map path unchanged.
+	virtual bool buffer_readback_is_async() const { return false; }
+	virtual void buffer_readback_async(VectorView<BufferReadbackRegion> p_regions, uint64_t p_size, const Callable &p_callback) {}
+
 	virtual uint8_t *buffer_persistent_map_advance(BufferID p_buffer, uint64_t p_frames_drawn) = 0;
 	virtual uint64_t buffer_get_dynamic_offsets(Span<BufferID> p_buffers) = 0;
 	virtual void buffer_flush(BufferID p_buffer) {}
