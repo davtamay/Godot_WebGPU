@@ -39,8 +39,10 @@
 const GodotWebXRExt = {
 	$GodotWebXRDepth: {
 		state: null,
-		'generation': 0,
-		'sequence': 0,
+		// Emscripten serializes library object keys without quotes. Keep private
+		// counter accesses consistent so Closure renames declarations and uses.
+		generation: 0,
+		sequence: 0,
 		lostDevices: null,
 		observedDevices: null,
 
@@ -107,7 +109,7 @@ struct Params { uv: mat4x4<f32>, scale: f32, valid: u32, padding: vec2<u32> };
 
 		prepare: function () {
 			const xr = GodotWebXR;
-			const failure = (status) => ({ 'status': status, 'sequence': GodotWebXRDepth['sequence'], 'valid_mask': 0 });
+			const failure = (status) => ({ 'status': status, 'sequence': GodotWebXRDepth.sequence, 'valid_mask': 0 });
 			if (!xr.session) { GodotWebXRDepth.reset(); return failure('no_session'); }
 			if (!xr.gpu_binding) return failure('webgl_session');
 			if (xr.session.depthUsage !== 'gpu-optimized') return failure('cpu_depth');
@@ -181,7 +183,7 @@ struct Params { uv: mat4x4<f32>, scale: f32, valid: u32, padding: vec2<u32> };
 				state['readback'] = device.createTexture({ label: 'Godot normalized XR depth (precise)', size: [width, height, outputLayers], 'format': 'r32float', usage });
 				state['sampleHandle'] = Module['GodotWebGPUXR'].importOwnedTexture(state['sample']);
 				state['readbackHandle'] = Module['GodotWebGPUXR'].importOwnedTexture(state['readback']);
-				state['generation'] = ++GodotWebXRDepth['generation'];
+				state['generation'] = ++GodotWebXRDepth.generation;
 			}
 			const encoder = device.createCommandEncoder({ label: 'Godot WebXR depth frame' });
 			for (let index = 0; index < outputLayers; index++) {
@@ -202,7 +204,7 @@ struct Params { uv: mat4x4<f32>, scale: f32, valid: u32, padding: vec2<u32> };
 				delete record.source;
 			}
 			device.queue.submit([encoder.finish()]);
-			state.report = { 'status': validMask ? 'ok' : 'no_depth_data', 'sequence': ++GodotWebXRDepth['sequence'], 'generation': state['generation'], 'width': width, 'height': height, 'view_count': views.length, 'texture_layers': outputLayers, 'valid_mask': validMask >>> 0, 'texture_handle': state['sampleHandle'], 'readback_handle': state['readbackHandle'], 'units': 'meters', 'uv_space': 'normalized_view', 'views': records };
+			state.report = { 'status': validMask ? 'ok' : 'no_depth_data', 'sequence': ++GodotWebXRDepth.sequence, 'generation': state['generation'], 'width': width, 'height': height, 'view_count': views.length, 'texture_layers': outputLayers, 'valid_mask': validMask >>> 0, 'texture_handle': state['sampleHandle'], 'readback_handle': state['readbackHandle'], 'units': 'meters', 'uv_space': 'normalized_view', 'views': records };
 			return state.report;
 		},
 	},
