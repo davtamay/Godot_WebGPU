@@ -1290,3 +1290,27 @@ XRMediaBinding.prototype.createEquirectLayer = function(video, init) {};
  * @type {Array<XRLayer>}
  */
 XRRenderState.prototype.layers;
+
+// WebXR Depth Sensing + WebGPU (Editor draft, 25 August 2026).
+/** @type {string} */
+XRSession.prototype.depthUsage;
+/** @type {string} */
+XRSession.prototype.depthDataFormat;
+/** @type {boolean} */
+XRSession.prototype.depthActive;
+/** @constructor */
+function XRGPUDepthInformation() {}
+/** @type {GPUTexture} */
+XRGPUDepthInformation.prototype.texture;
+/** @type {number} */
+XRGPUDepthInformation.prototype.width;
+/** @type {number} */
+XRGPUDepthInformation.prototype.height;
+/** @type {number} */
+XRGPUDepthInformation.prototype.rawValueToMeters;
+/** @type {XRRigidTransform} */
+XRGPUDepthInformation.prototype.normDepthBufferFromNormView;
+/** @return {GPUTextureViewDescriptor} */
+XRGPUDepthInformation.prototype.getViewDescriptor = function () {};
+/** @param {XRView} view @return {?XRGPUDepthInformation} */
+XRGPUBinding.prototype.getDepthInformation = function (view) {};
