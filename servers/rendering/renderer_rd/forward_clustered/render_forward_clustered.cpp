@@ -4181,6 +4181,10 @@ void RenderForwardClustered::sdfgi_update(const Ref<RenderSceneBuffers> &p_rende
 	}
 
 	bool needs_sdfgi = p_environment.is_valid() && environment_get_sdfgi_enabled(p_environment);
+	if (needs_sdfgi && !gi.dynamic_gi_supported) {
+		WARN_PRINT_ONCE("WebGPU SDFGI requires texture-formats-tier2; use lightmaps or ambient lighting on this device.");
+		needs_sdfgi = false;
+	}
 	bool needs_reset = sdfgi.is_valid() ? sdfgi->version != gi.sdfgi_current_version : false;
 
 	if (!needs_sdfgi || needs_reset) {
