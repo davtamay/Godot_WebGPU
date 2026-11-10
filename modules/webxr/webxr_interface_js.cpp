@@ -1058,11 +1058,23 @@ void WebXRInterfaceJS::composition_layer_unregister(WebXRCompositionLayer *p_lay
 void WebXRInterfaceJS::composition_layer_update(WebXRCompositionLayer *p_layer, bool p_active, const float *p_params, RID p_viewport, const Size2i &p_size) {
 	CompositionLayerState *state = composition_layers.getptr(p_layer);
 	ERR_FAIL_NULL(state);
+	if (state->viewport != p_viewport) {
+		// Restore the old viewport before replacing its identity.
+		_free_composition_layer(*state);
+	}
+	if (state->viewport != p_viewport || state->size != p_size || memcmp(state->params + 7, p_params + 7, 9 * sizeof(float)) != 0) {
+		state->create_failed = false;
+	}
 	state->active = p_active;
 	state->layer_type = (int)p_layer->get_layer_type();
 	memcpy(state->params, p_params, sizeof(state->params));
 	state->viewport = p_viewport;
 	state->size = p_size;
+}
+
+bool WebXRInterfaceJS::composition_layer_is_supported(const WebXRCompositionLayer *p_layer) const {
+	const CompositionLayerState *state = composition_layers.getptr(const_cast<WebXRCompositionLayer *>(p_layer));
+	return composition_layers_supported() && state != nullptr && state->js_id != 0;
 }
 
 bool WebXRInterfaceJS::composition_layers_supported() const {
@@ -1191,6 +1203,7 @@ void WebXRInterfaceJS::_free_composition_layer(CompositionLayerState &p_state) {
 		p_state.js_id = 0;
 	}
 	p_state.js_size = Size2i();
+	p_state.create_failed = false;
 	p_state.generation = 0;
 	p_state.own_generation = 0;
 }

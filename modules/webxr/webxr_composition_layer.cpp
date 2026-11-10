@@ -170,6 +170,9 @@ void WebXRCompositionLayer::_notification(int p_what) {
 			}
 		} break;
 		case NOTIFICATION_INTERNAL_PROCESS: {
+			// A granted Layers feature does not guarantee that this layer
+			// kind was accepted. Keep the mesh until creation succeeds.
+			session_state_changed();
 			if (fallback && should_update_fallback_mesh) {
 				fallback->set_mesh(_create_fallback_mesh());
 				_reset_fallback_material();
@@ -245,7 +248,7 @@ float WebXRCompositionLayer::get_opacity() const {
 bool WebXRCompositionLayer::is_natively_supported() const {
 #ifdef WEB_ENABLED
 	WebXRInterfaceJS *webxr = _get_webxr_interface();
-	return webxr != nullptr && webxr->composition_layers_supported();
+	return webxr != nullptr && webxr->composition_layer_is_supported(this);
 #else
 	return false;
 #endif
