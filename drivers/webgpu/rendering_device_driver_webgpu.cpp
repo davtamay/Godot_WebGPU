@@ -2635,12 +2635,20 @@ RenderingDeviceDriver::TextureID RenderingDeviceDriverWebGPU::texture_create_fro
 	xr_import_epoch++;
 	WGPUTexture wgpu_texture = (WGPUTexture)p_native_texture;
 	ERR_FAIL_NULL_V(wgpu_texture, TextureID());
-	WGPUTextureView wgpu_view = wgpuTextureCreateView(wgpu_texture, nullptr);
+	WGPUTextureViewDescriptor view_desc = WGPU_TEXTURE_VIEW_DESCRIPTOR_INIT;
+	view_desc.dimension = _texture_type_to_wgpu_view_dimension(p_type);
+	if (view_desc.dimension != WGPUTextureViewDimension_3D) {
+		view_desc.arrayLayerCount = p_array_layers;
+	}
+	view_desc.mipLevelCount = p_mipmaps;
+	WGPUTextureView wgpu_view = wgpuTextureCreateView(wgpu_texture, &view_desc);
 	ERR_FAIL_NULL_V(wgpu_view, TextureID());
 
 	TextureInfo *texture = memnew(TextureInfo);
 	texture->texture = wgpu_texture;
 	texture->view = wgpu_view;
+	texture->view_dimension = view_desc.dimension;
+	texture->usage = wgpuTextureGetUsage(wgpu_texture);
 	texture->wgpu_format = _data_format_to_wgpu(p_format);
 	texture->format = p_format;
 	texture->owned = false;
