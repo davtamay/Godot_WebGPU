@@ -91,7 +91,9 @@ fi
 # The editor executable is held open by a running game or editor, and the link
 # step then fails with "Access is denied" - a failure that looks like a build
 # error and has cost this project several cycles.
-if tasklist //FI "IMAGENAME eq godot*" 2>/dev/null | grep -qi "^godot"; then
+# Runtime-only gates do not link or replace the editor binary. Other Godot
+# worktrees may be active while this isolated testbed validates built outputs.
+if [ "$SKIP_BUILD" = 0 ] && tasklist //FI "IMAGENAME eq godot*" 2>/dev/null | grep -qi "^godot"; then
 	echo
 	echo "  A Godot process is running and will hold bin/*.exe open, breaking the link step." >&2
 	echo "  Close the editor (or: taskkill //F //IM godot.windows.editor.x86_64.exe) and re-run." >&2
