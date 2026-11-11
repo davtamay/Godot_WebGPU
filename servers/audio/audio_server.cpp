@@ -1484,6 +1484,16 @@ void AudioServer::finish() {
 		AudioDriverManager::get_driver(i)->finish();
 	}
 
+	// No driver can mix now. A stopped or suspended driver may never have
+	// consumed the final fade-out, so release every remaining playback here.
+	for (AudioStreamPlaybackListNode *playback : playback_list) {
+		_delete_stream_playback_list_node(playback);
+	}
+	// Bus detail retirement normally spans two updates. Drain both generations
+	// before destroying the server, since there will be no further audio frames.
+	_cleanup_lists();
+	_cleanup_lists();
+
 	for (int i = 0; i < buses.size(); i++) {
 		memdelete(buses[i]);
 	}
