@@ -37,8 +37,20 @@ jobs:
       matrix:
         include:
           - leg: stock
+            threads: "yes"
+            suffix: ""
+            extra_flags: ""
+          - leg: stock-single
+            threads: "no"
+            suffix: ".nothreads"
             extra_flags: ""
           - leg: rd
+            threads: "yes"
+            suffix: ""
+            extra_flags: webgpu=yes
+          - leg: rd-single
+            threads: "no"
+            suffix: ".nothreads"
             extra_flags: webgpu=yes
 
     steps:
@@ -66,9 +78,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y brotli
 
-      - name: Build threaded web template (${{ matrix.leg }})
+      - name: Build web template (${{ matrix.leg }}, threads=${{ matrix.threads }})
         run: |
-          scons platform=web target=template_release ${{ env.SCONS_FLAGS }} threads=yes "cache_path=${{ env.SCONS_CACHE }}" redirect_build_objects=no ${{ matrix.extra_flags }}
+          scons platform=web target=template_release ${{ env.SCONS_FLAGS }} threads=${{ matrix.threads }} "cache_path=${{ env.SCONS_CACHE }}" redirect_build_objects=no ${{ matrix.extra_flags }}
 
       - name: Record WASM size
         run: |
@@ -93,7 +105,7 @@ jobs:
       # feature detection and the WebGL fallback warning. Loader JS is
       # identical across legs, so run it once on the stock leg.
       - name: Loader smoke test
-        if: matrix.leg == 'stock'
+        if: startsWith(matrix.leg, 'stock')
         run: |
           cd platform/web
           npm i --no-save playwright
@@ -104,7 +116,7 @@ jobs:
       # WebGPU adapter and assert the presented clear color on the probe
       # canvas. Skips gracefully when the runner cannot deliver an adapter.
       - name: WebGPU probe smoke test
-        if: matrix.leg == 'rd'
+        if: startsWith(matrix.leg, 'rd')
         run: |
           cd platform/web
           npm i --no-save playwright
@@ -118,11 +130,11 @@ jobs:
           path: sizes/
 
       - name: Upload the template for the WebXR glue smoke test
-        if: matrix.leg == 'stock'
+        if: startsWith(matrix.leg, 'stock')
         uses: actions/upload-artifact@v7
         with:
-          name: stock-template-${{ github.sha }}
-          path: bin/godot.web.template_release.wasm32.zip
+          name: ${{ matrix.leg }}-template-${{ github.sha }}
+          path: bin/godot.web.template_release.wasm32${{ matrix.suffix }}.zip
           retention-days: 1
 
   # Expensive (~1h cold). Disable this job if runner minutes matter; web-template is the required gate.
@@ -255,15 +267,22 @@ jobs:
           key: linux-editor-${{ runner.os }}-${{ github.sha }}
 
   # The one check of the JS glue short of a headset: a real XRSession from IWER,
-  # an emulated WebXR runtime. The robot's replay never reaches this code, and
-  # [wgpu 102] broke hands on every headset with green CI. Advisory until it has
-  # proven itself on the Closure-built template, so a flaky first run cannot
-  # file a false build failure: drop continue-on-error once it has.
+  # an emulated WebXR runtime. Both Closure-built thread modes are required;
+  # the single-thread leg deliberately has no SharedArrayBuffer isolation.
   webxr-glue-smoke:
     needs: [web-template, linux-editor]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - leg: stock
+            suffix: ""
+            no_isolation: "0"
+          - leg: stock-single
+            suffix: ".nothreads"
+            no_isolation: "1"
 
     steps:
       - name: Checkout
@@ -272,7 +291,7 @@ jobs:
       - name: Fetch the template
         uses: actions/download-artifact@v8
         with:
-          name: stock-template-${{ github.sha }}
+          name: ${{ matrix.leg }}-template-${{ github.sha }}
           path: ${{ runner.temp }}/artifacts
 
       - name: Fetch the fixture
@@ -282,8 +301,10 @@ jobs:
           path: ${{ runner.temp }}/artifacts
 
       - name: Run the fixture in an emulated session
+        env:
+          GLUE_NO_ISOLATION: ${{ matrix.no_isolation }}
         run: |
-          unzip -q "$RUNNER_TEMP/artifacts/godot.web.template_release.wasm32.zip" -d "$RUNNER_TEMP/template"
+          unzip -q "$RUNNER_TEMP/artifacts/godot.web.template_release.wasm32${{ matrix.suffix }}.zip" -d "$RUNNER_TEMP/template"
           cd platform/web
           npm i --no-save playwright iwer@2.7.0
           npx playwright install --with-deps chromium
