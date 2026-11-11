@@ -316,21 +316,15 @@ export_and_boot() {
 	fi
 
 	# The harness always exits 0, so the verdict comes from the console log.
-	local pageerrs invalid warns inert unknown
+	local pageerrs invalid warns unknown
 	pageerrs=$(grep -ac '^\[pageerror\]' "$blog")
 	invalid=$(grep -ac 'Invalid CommandBuffer' "$blog")
 	warns=$(grep -ac '^\[warning\]' "$blog")
 
-	# Every excluded variant from the census above still gets one warm-up
-	# pipeline-creation attempt, which reports a null shader and is skipped;
-	# the renderer then takes the path that does exist and the frames are
-	# valid, which is what the invalid-command-buffer count actually proves.
-	# Those are tolerated by signature - not by count, so a genuinely new
-	# error can never hide inside an expected total. The "at:" lines are
-	# continuations of the message above them and never stand alone.
-	local INERT_RE='Parameter "shader" is null|Condition "p_shader\.is_null\(\)" is true'
-	inert=$(grep -a '^\[error\].*ERROR:' "$blog" | grep -acE "$INERT_RE")
-	unknown=$(grep -a '^\[error\].*ERROR:' "$blog" | grep -avcE "$INERT_RE")
+	# Current complete bakes must boot without engine or browser console errors.
+	# Null shaders are failures too: do not hide regressions behind historical
+	# exclusions from earlier, incomplete shader coverage.
+	unknown=$(grep -ac '^\[error\]' "$blog")
 
 	if ! grep -aq "custom_build.$HEAD_SHORT" "$blog"; then
 		fail "boot ($label)" "booted binary reports a different commit than HEAD"
@@ -341,10 +335,10 @@ export_and_boot() {
 		# Invalid CommandBuffer is the one that matters most: it means whole
 		# frames are discarded, which renders as a black page with no errors.
 		fail "boot ($label)" "unexpected-errors=$unknown pageerrors=$pageerrs invalid-command-buffers=$invalid (log: $blog)"
-		grep -a '^\[error\].*ERROR:' "$blog" | grep -avE "$INERT_RE" | head -5 | sed 's/^/           /' >&2
+		grep -a '^\[error\]' "$blog" | head -5 | sed 's/^/           /' >&2
 		return 1
 	fi
-	pass "boot ($label)" "clean ($inert inert warm-up nulls, $warns warnings, shot: $png)"
+	pass "boot ($label)" "clean (zero console errors, $warns warnings, shot: $png)"
 }
 
 phase "Bake, export and boot"
