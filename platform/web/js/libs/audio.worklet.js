@@ -102,6 +102,7 @@ class GodotProcessor extends AudioWorkletProcessor {
 		this.notifier = null;
 		this.output = null;
 		this.output_buffer = new Float32Array();
+		this.pending_read = 0;
 		this.input = null;
 		this.input_buffer = new Float32Array();
 		this.port.onmessage = (event) => {
@@ -130,12 +131,14 @@ class GodotProcessor extends AudioWorkletProcessor {
 			this.input = new RingBuffer(p_data[1], avail_in, true);
 			this.output = new RingBuffer(p_data[2], avail_out, true);
 		} else if (p_cmd === 'stop') {
+			this.pending_read = 0;
 			this.running = false;
 			this.output = null;
 			this.input = null;
 			this.lock = null;
 			this.notifier = null;
 		} else if (p_cmd === 'start_nothreads') {
+			this.pending_read = 0;
 			this.output = new RingBuffer(p_data[0], p_data[0].length, false);
 		} else if (p_cmd === 'chunk') {
 			this.output.write(p_data);
@@ -181,7 +184,16 @@ class GodotProcessor extends AudioWorkletProcessor {
 				this.output.read(this.output_buffer);
 				GodotProcessor.write_output(output, this.output_buffer);
 				if (!this.threads) {
-					this.port.postMessage({ 'cmd': 'read', 'data': chunk });
+					this.pending_read += chunk;
+					// Amortize the main-thread round trip without changing the ring size.
+					// Keep at least three quarters of the buffer as scheduling headroom,
+					// and never batch more than four render quanta. Small buffers and
+					// recovery from an underrun still request a refill immediately.
+					const batch = Math.min(Math.floor(this.output.buffer.length / (4 * chunk)) * chunk, 4 * chunk);
+					if (this.pending_read >= batch || this.output.data_left() < chunk) {
+						this.port.postMessage({ 'cmd': 'read', 'data': this.pending_read });
+						this.pending_read = 0;
+					}
 				}
 			} else {
 				// this.port.postMessage('Output buffer has not enough frames! Skipping output frame.'); // Uncomment this line to debug output buffer.
