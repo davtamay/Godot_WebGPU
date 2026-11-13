@@ -980,6 +980,10 @@ public:
 	virtual const Capabilities &get_capabilities() const = 0;
 	virtual const RenderingShaderContainerFormat &get_shader_container_format() const = 0;
 
+	// Native swapchains can benefit from delaying the acquire-semaphore wait
+	// until the final blit. Drivers without that wait can keep one command buffer.
+	virtual bool prefers_separate_swapchain_command_buffer() const { return true; }
+
 	virtual bool is_composite_alpha_supported(CommandQueueID p_queue) const { return false; }
 
 	virtual DriverWorkarounds get_driver_workarounds() const { return DriverWorkarounds(); }
