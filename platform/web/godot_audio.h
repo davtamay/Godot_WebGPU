@@ -74,7 +74,9 @@ extern void godot_audio_worklet_start(float *p_in_buf, int p_in_size, float *p_o
 extern void godot_audio_worklet_start_no_threads(float *p_out_buf, int p_out_size, void (*p_out_cb)(int p_pos, int p_frames), float *p_in_buf, int p_in_size, void (*p_in_cb)(int p_pos, int p_frames));
 extern int godot_audio_worklet_state_add(GodotAudioState p_state, int p_idx, int p_value);
 extern int godot_audio_worklet_state_get(GodotAudioState p_state, int p_idx);
+// A negative timeout waits until the state changes or is explicitly notified.
 extern int godot_audio_worklet_state_wait(int32_t *p_state, int p_idx, int32_t p_expected, int p_timeout);
+extern void godot_audio_worklet_state_notify(GodotAudioState p_state, int p_idx);
 
 // Script
 extern int godot_audio_script_create(int *p_buffer_size, int p_channels);
