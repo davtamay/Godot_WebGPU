@@ -62,7 +62,7 @@ class RingBuffer {
 		this.rpos += to_write;
 		if (this.threads) {
 			Atomics.add(this.avail, 0, -output.length);
-			Atomics.notify(this.avail, 0);
+			// The mixer waits on the process notifier, not this sample count.
 		} else {
 			this.avail -= output.length;
 		}
@@ -86,7 +86,7 @@ class RingBuffer {
 		}
 		if (this.threads) {
 			Atomics.add(this.avail, 0, to_write);
-			Atomics.notify(this.avail, 0);
+			// The mixer waits on the process notifier, not this sample count.
 		} else {
 			this.avail += to_write;
 		}
