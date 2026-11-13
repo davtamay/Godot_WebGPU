@@ -8668,6 +8668,7 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 	device = context->device_get(device_index);
 	err = driver->initialize(device_index, frame_count);
 	ERR_FAIL_COND_V_MSG(err != OK, FAILED, "Failed to initialize driver for device.");
+	split_swapchain_into_its_own_cmd_buffer = driver->prefers_separate_swapchain_command_buffer();
 
 	if (is_main_instance) {
 		// Only the singleton instance with a display should print this information.
