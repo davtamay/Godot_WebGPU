@@ -1140,7 +1140,7 @@ const GodotAudioWorklet = {
 				let wpos = 0;
 				let rpos = 0;
 				let pending_samples = 0;
-				const wbuf = new Float32Array(p_out_size);
+				let wbuf = new Float32Array(0);
 
 				function send(port) {
 					if (pending_samples === 0) {
@@ -1149,6 +1149,11 @@ const GodotAudioWorklet = {
 					const buffer = GodotRuntime.heapSub(HEAPF32, p_out_buf, p_out_size);
 					const size = buffer.length;
 					const tot_sent = pending_samples;
+					// Structured cloning a view copies its entire backing buffer.
+					// Reuse an exact-size payload instead of cloning the whole ring.
+					if (wbuf.length !== tot_sent) {
+						wbuf = new Float32Array(tot_sent);
+					}
 					out_callback(wpos, pending_samples);
 					if (wpos + pending_samples >= size) {
 						const high = size - wpos;
@@ -1162,7 +1167,7 @@ const GodotAudioWorklet = {
 							tot_sent - pending_samples
 						);
 					}
-					port.postMessage({ 'cmd': 'chunk', 'data': wbuf.subarray(0, tot_sent) });
+					port.postMessage({ 'cmd': 'chunk', 'data': wbuf });
 					wpos += pending_samples;
 					pending_samples = 0;
 				}
