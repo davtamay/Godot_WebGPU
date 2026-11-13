@@ -243,6 +243,13 @@ else
 	skip "closure" "compiler not found beside emsdk - CI is then the only check"
 fi
 
+phase "Audio transport"
+if "$NODE" misc/webgpu_scripts/test-audio-worklet-transport.mjs > "$LOGDIR/audio-transport.log" 2>&1; then
+	pass "audio transport"
+else
+	fail "audio transport" "see $LOGDIR/audio-transport.log"
+fi
+
 phase "Loader smoke"
 LOADER_LOG="$LOGDIR/loader-smoke.log"
 if ( cd "$TESTBED" && "$NODE" "$REPO/misc/webgpu_scripts/loader-smoke.mjs" "$LOGDIR/probebin-threaded" ) > "$LOADER_LOG" 2>&1; then
