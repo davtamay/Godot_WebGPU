@@ -407,7 +407,7 @@ void AudioDriverWorklet::_audio_thread_func(void *p_data) {
 	int rpos = 0;
 	int to_read = 0;
 	int32_t step = 0;
-	while (!driver->quit) {
+	while (!driver->quit.is_set()) {
 		if (to_read) {
 			driver->lock();
 			driver->_audio_driver_capture(rpos, to_read);
@@ -428,7 +428,9 @@ void AudioDriverWorklet::_audio_thread_func(void *p_data) {
 				wpos -= out_samples;
 			}
 		}
-		step = godot_audio_worklet_state_wait(driver->state, STATE_PROCESS, step, 1);
+		// The worklet wakes us for refills or capture. Shutdown also wakes this
+		// counter explicitly, including while the AudioContext is suspended.
+		step = godot_audio_worklet_state_wait(driver->state, STATE_PROCESS, step, -1);
 		to_write = out_samples - godot_audio_worklet_state_get(driver->state, STATE_SAMPLES_OUT);
 		to_read = godot_audio_worklet_state_get(driver->state, STATE_SAMPLES_IN);
 	}
@@ -456,7 +458,9 @@ void AudioDriverWorklet::unlock() {
 
 void AudioDriverWorklet::finish_driver() {
 	if (thread.is_started()) {
-		quit = true; // Ask thread to quit.
+		quit.set();
+		// Increment before notifying so a thread about to wait cannot miss exit.
+		godot_audio_worklet_state_notify(state, STATE_PROCESS);
 		thread.wait_to_finish();
 	}
 }

@@ -157,6 +157,8 @@ class GodotProcessor extends AudioWorkletProcessor {
 			return true; // Not ready yet, keep processing.
 		}
 		const process_input = GodotProcessor.array_has_data(inputs);
+		// Keep capture latency unchanged; output-only mixing can be batched.
+		let notify = process_input;
 		if (process_input) {
 			const input = inputs[0];
 			const chunk = input[0].length * input.length;
@@ -198,8 +200,16 @@ class GodotProcessor extends AudioWorkletProcessor {
 			} else {
 				// this.port.postMessage('Output buffer has not enough frames! Skipping output frame.'); // Uncomment this line to debug output buffer.
 			}
+			if (this.threads) {
+				// Use the same bounded refill batch as the non-threaded path. The
+				// mixer waits for this notification instead of polling the ring.
+				const batch = Math.max(chunk, Math.min(Math.floor(this.output.buffer.length / (4 * chunk)) * chunk, 4 * chunk));
+				notify = notify || this.output.space_left() >= batch;
+			}
 		}
-		this.process_notify();
+		if (notify) {
+			this.process_notify();
+		}
 		return true;
 	}
 

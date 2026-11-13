@@ -34,6 +34,7 @@
 
 #include "core/os/mutex.h"
 #include "core/os/thread.h"
+#include "core/templates/safe_refcount.h"
 #include "servers/audio/audio_driver.h"
 
 class AudioDriverWeb : public AudioDriver {
@@ -122,7 +123,7 @@ private:
 	};
 	Mutex mutex;
 	Thread thread;
-	bool quit = false;
+	SafeFlag quit;
 	int32_t state[STATE_MAX] = { 0 };
 
 	static void _audio_thread_func(void *p_data);

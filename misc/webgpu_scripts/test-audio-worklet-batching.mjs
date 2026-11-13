@@ -95,6 +95,36 @@ for (let i = 0; i < 4; i++) {
     assert(out.every(ch => ch.every(v => v === 0.75)));
 }
 assert.equal(state[3], 4096 - 4 * 256);
-assert.equal(state[1], 4);
+assert.equal(state[1], 1, "Threaded output refills batch four quanta");
+threaded.process([[new Float32Array(128)]], [[new Float32Array(128), new Float32Array(128)]], {});
+assert.equal(state[1], 2, "Input capture wakes the mixer immediately");
 assert.equal(messages.length, 0);
-console.log(`PASS: ${cases} PCM/wrap/delay configurations, underrun recovery, variable quanta, input and threaded parity`);
+// Shared-ring producer follows notifications, including delayed scheduling and wrap.
+let threadedCases = 0;
+for (const channels of [1, 2, 6]) for (const frames of [64, 128, 256]) {
+    for (const quanta of [1, 2, 4, 8, 16, 32]) for (const delay of [0, Math.max(0, Math.floor(quanta / 2) - 1)]) {
+        const processor = new Processor(), chunk = channels * frames, size = chunk * quanta;
+        const sharedState = new Int32Array(new SharedArrayBuffer(16));
+        const sharedPCM = new Float32Array(new SharedArrayBuffer(size * 4));
+        let produced = 0, consumed = 0, writePos = 0, pending = null, lastStep = 0;
+        const refill = () => {
+            const count = size - Atomics.load(sharedState, 3);
+            for (let i = 0; i < count; i++) { sharedPCM[writePos] = ++produced; writePos = (writePos + 1) % size; }
+            Atomics.add(sharedState, 3, count);
+        };
+        refill();
+        processor.parse_message('start', [sharedState, new Float32Array(new SharedArrayBuffer(size * 4)), sharedPCM]);
+        for (let tick = 0; tick < 128; tick++) {
+            if (pending !== null && pending <= tick) { refill(); pending = null; }
+            const out = Array.from({ length: channels }, () => new Float32Array(frames));
+            processor.process([], [out], {});
+            for (let frame = 0; frame < frames; frame++) for (let ch = 0; ch < channels; ch++) assert.equal(out[ch][frame], ++consumed);
+            const step = Atomics.load(sharedState, 1);
+            if (step !== lastStep && pending === null) pending = tick + delay + 1;
+            lastStep = step;
+        }
+        threadedCases++;
+    }
+}
+assert.equal(threadedCases, 108);
+console.log(`PASS: ${threadedCases} shared-ring PCM/delay configurations; ${cases} PCM/wrap/delay configurations, underrun recovery, variable quanta, input and threaded parity`);
