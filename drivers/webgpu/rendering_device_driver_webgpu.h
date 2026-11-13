@@ -956,6 +956,9 @@ public:
 	virtual const Capabilities &get_capabilities() const override { return capabilities; }
 	virtual const RenderingShaderContainerFormat &get_shader_container_format() const override { return shader_container_format; }
 	virtual uint64_t api_trait_get(ApiTrait p_trait) override;
+	// The browser manages presentation; there is no native acquire-semaphore
+	// wait to postpone. Keep all frame passes in the same command buffer.
+	virtual bool prefers_separate_swapchain_command_buffer() const override { return false; }
 
 	// Driver-internal (non-RDD) helper: the current acquired texture of a swap
 	// chain, as a native handle for texture_create_from_extension. Used by the
