@@ -47,24 +47,33 @@ class RingBuffer {
 
 	read(output) {
 		const size = this.buffer.length;
-		let from = 0;
-		let to_write = output.length;
-		if (this.rpos + to_write > size) {
-			const high = size - this.rpos;
-			output.set(this.buffer.subarray(this.rpos, size));
-			from = high;
-			to_write -= high;
-			this.rpos = 0;
+		const channels = output.length;
+		const frames = output[0].length;
+		const samples = channels * frames;
+		// Deinterleave directly from the ring, without a scratch copy or views.
+		// Split each channel at the wrap so the inner loops stay contiguous
+		// in frame order, including rings not aligned to a channel boundary.
+		for (let ch = 0; ch < channels; ch++) {
+			const dest = output[ch];
+			let pos = this.rpos + ch;
+			const high = Math.min(frames, Math.max(0, Math.ceil((size - pos) / channels)));
+			for (let frame = 0; frame < high; frame++, pos += channels) {
+				dest[frame] = this.buffer[pos];
+			}
+			pos -= size;
+			for (let frame = high; frame < frames; frame++, pos += channels) {
+				dest[frame] = this.buffer[pos];
+			}
 		}
-		if (to_write) {
-			output.set(this.buffer.subarray(this.rpos, this.rpos + to_write), from);
+		this.rpos += samples;
+		if (this.rpos >= size) {
+			this.rpos -= size;
 		}
-		this.rpos += to_write;
 		if (this.threads) {
-			Atomics.add(this.avail, 0, -output.length);
+			Atomics.add(this.avail, 0, -samples);
 			// The mixer waits on the process notifier, not this sample count.
 		} else {
-			this.avail -= output.length;
+			this.avail -= samples;
 		}
 	}
 
@@ -101,7 +110,6 @@ class GodotProcessor extends AudioWorkletProcessor {
 		this.lock = null;
 		this.notifier = null;
 		this.output = null;
-		this.output_buffer = new Float32Array();
 		this.pending_read = 0;
 		this.input = null;
 		this.input_buffer = new Float32Array();
@@ -179,12 +187,8 @@ class GodotProcessor extends AudioWorkletProcessor {
 		if (process_output) {
 			const output = outputs[0];
 			const chunk = output[0].length * output.length;
-			if (this.output_buffer.length !== chunk) {
-				this.output_buffer = new Float32Array(chunk);
-			}
 			if (this.output.data_left() >= chunk) {
-				this.output.read(this.output_buffer);
-				GodotProcessor.write_output(output, this.output_buffer);
+				this.output.read(output);
 				if (!this.threads) {
 					this.pending_read += chunk;
 					// Amortize the main-thread round trip without changing the ring size.
@@ -211,15 +215,6 @@ class GodotProcessor extends AudioWorkletProcessor {
 			this.process_notify();
 		}
 		return true;
-	}
-
-	static write_output(dest, source) {
-		const channels = dest.length;
-		for (let ch = 0; ch < channels; ch++) {
-			for (let sample = 0; sample < dest[ch].length; sample++) {
-				dest[ch][sample] = source[sample * channels + ch];
-			}
-		}
 	}
 
 	static write_input(dest, source) {

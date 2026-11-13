@@ -243,6 +243,13 @@ else
 	skip "closure" "compiler not found beside emsdk - CI is then the only check"
 fi
 
+phase "Direct audio output"
+if "$NODE" misc/webgpu_scripts/test-audio-worklet-direct.mjs > "$LOGDIR/audio-direct.log" 2>&1; then
+	pass "direct audio output"
+else
+	fail "direct audio output" "see $LOGDIR/audio-direct.log"
+fi
+
 phase "Audio transport"
 if "$NODE" misc/webgpu_scripts/test-audio-worklet-transport.mjs > "$LOGDIR/audio-transport.log" 2>&1; then
 	pass "audio transport"
