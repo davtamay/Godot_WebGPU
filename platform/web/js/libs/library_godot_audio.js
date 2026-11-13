@@ -1305,8 +1305,16 @@ const GodotAudioWorklet = {
 		p_expected,
 		p_timeout
 	) {
-		Atomics.wait(HEAP32, (p_state >> 2) + p_idx, p_expected, p_timeout);
+		Atomics.wait(HEAP32, (p_state >> 2) + p_idx, p_expected, p_timeout < 0 ? Infinity : p_timeout);
 		return Atomics.load(HEAP32, (p_state >> 2) + p_idx);
+	},
+
+	godot_audio_worklet_state_notify__sig: 'vii',
+	godot_audio_worklet_state_notify: function (p_state, p_idx) {
+		const index = (p_state >> 2) + p_idx;
+		// A changed value also wakes a caller that has not entered wait yet.
+		Atomics.add(HEAP32, index, 1);
+		Atomics.notify(HEAP32, index);
 	},
 
 	godot_audio_worklet_state_add__sig: 'iiii',
