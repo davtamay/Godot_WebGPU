@@ -28,7 +28,12 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-function GodotSampleDriver(audioContext, positionWorkletPath) {
+function GodotSampleDriver(audioContext, positionWorkletPath, onActivityChange) {
+	function activityChanged() {
+		if (onActivityChange) {
+			onActivityChange();
+		}
+	}
 	/** @type {?AudioContext} */
 	let ctx = audioContext;
 	/** @type {?Promise} */
@@ -411,6 +416,7 @@ function GodotSampleDriver(audioContext, positionWorkletPath) {
 				node.stop();
 				if (!finishedCallback) {
 					playbacks.delete(playbackId); // Cleanup after ourselves.
+					activityChanged();
 					return;
 				}
 				const cstr = GodotRuntime.allocString(playbackId);
@@ -486,6 +492,7 @@ function GodotSampleDriver(audioContext, positionWorkletPath) {
 		node.setPitchScale = setPitchScale;
 		node.getPlaybackPosition = getPlaybackPosition;
 		playbacks.set(playbackId, node);
+		activityChanged();
 		return node;
 	}
 	/**
@@ -501,6 +508,7 @@ function GodotSampleDriver(audioContext, positionWorkletPath) {
 		if (playback) {
 			playback.stop();
 			playbacks.delete(id);
+			activityChanged();
 		}
 	}
 	/** @param {number} count */
@@ -617,6 +625,8 @@ function GodotSampleDriver(audioContext, positionWorkletPath) {
 		createStream,
 		getStream,
 		removeStream,
+		// Paused samples also inhibit sleep; their browser graph stays intact.
+		has_playbacks: function () { return playbacks.size > 0; },
 		// Playbacks
 		createPlayback,
 		getPlayback,
@@ -635,7 +645,99 @@ function GodotSampleDriver(audioContext, positionWorkletPath) {
 };
 
 const _GodotAudio = {
-	$GodotAudio__deps: ['$GodotRuntime', '$GodotOS'],
+	$GodotAudioIdle: {
+		ctx: null,
+		desired: false,
+		owned: false,
+		pending: false,
+		sleep_failed: false,
+		resume_blocked: false,
+		start: function (ctx) {
+			GodotAudioIdle.ctx = ctx;
+			GodotAudioIdle.desired = false;
+			GodotAudioIdle.owned = false;
+			GodotAudioIdle.pending = false;
+			GodotAudioIdle.sleep_failed = false;
+			GodotAudioIdle.resume_blocked = false;
+		},
+		close: function () {
+			// Invalidate every outstanding transition before context shutdown.
+			GodotAudioIdle.ctx = null;
+		},
+		request: function (sleep) {
+			GodotAudioIdle.desired = sleep;
+			GodotAudioIdle.reconcile();
+		},
+		reconcile: function () {
+			const ctx = GodotAudioIdle.ctx;
+			if (!ctx || ctx.state === 'closed' || GodotAudioIdle.pending) {
+				return;
+			}
+			const sleep = GodotAudioIdle.desired && !GodotAudioIdle.sleep_failed;
+			let operation = '';
+			if (sleep && ctx.state === 'running') {
+				GodotAudioIdle.owned = true;
+				operation = 'suspend';
+			} else if (!sleep && GodotAudioIdle.owned) {
+				if (ctx.state === 'running') {
+					GodotAudioIdle.owned = false;
+				} else if (!GodotAudioIdle.resume_blocked) {
+					operation = 'resume';
+				}
+			}
+			if (!operation) {
+				return;
+			}
+			GodotAudioIdle.pending = true;
+			const complete = function (failed) {
+				if (GodotAudioIdle.ctx !== ctx) {
+					return;
+				}
+				GodotAudioIdle.pending = false;
+				if (failed) {
+					// Unsupported suspension falls back to normal audio. A denied
+					// resume waits for a gesture instead of retrying every frame.
+					if (operation === 'suspend') {
+						GodotAudioIdle.sleep_failed = true;
+					} else {
+						GodotAudioIdle.resume_blocked = true;
+					}
+				}
+				if (ctx.state === 'running' && (operation === 'resume' || failed)) {
+					GodotAudioIdle.owned = false;
+				}
+				GodotAudioIdle.reconcile();
+			};
+			try {
+				ctx[operation]().then(function () { complete(false); }, function () { complete(true); });
+			} catch (e) {
+				complete(true);
+			}
+		},
+		resume: function () {
+			const ctx = GodotAudioIdle.ctx;
+			if (!ctx || ctx.state === 'closed' || (GodotAudioIdle.desired && GodotAudioIdle.owned && !GodotAudioIdle.resume_blocked)) {
+				return;
+			}
+			GodotAudioIdle.resume_blocked = false;
+			// Invoke immediately in the gesture stack, even when an earlier
+			// automatic resume is still waiting for browser activation.
+			try {
+				ctx.resume().then(function () {
+					if (GodotAudioIdle.ctx === ctx) {
+						GodotAudioIdle.reconcile();
+					}
+				}, function () {
+					if (GodotAudioIdle.ctx === ctx) {
+						GodotAudioIdle.resume_blocked = true;
+					}
+				});
+			} catch (e) {
+				GodotAudioIdle.resume_blocked = true;
+			}
+		},
+	},
+	$GodotAudio__deps: ['$GodotRuntime', '$GodotOS', '$GodotAudioIdle'],
 	$GodotAudio: {
 		/** @type {AudioContext} */
 		ctx: null,
@@ -643,6 +745,31 @@ const _GodotAudio = {
 		driver: null,
 		sample_driver: null,
 		interval: 0,
+		sleep_requested: false,
+		sleep_allowed: true,
+		input_requested: false,
+		input_generation: 0,
+		sleep_blocked: false,
+		sleep_timer: 0,
+		update_sleep: function () {
+			const blocked = !GodotAudio.sleep_allowed || GodotAudio.input_requested || (GodotAudio.sample_driver && GodotAudio.sample_driver.has_playbacks());
+			if (blocked && GodotAudio.sleep_timer) {
+				clearTimeout(GodotAudio.sleep_timer);
+				GodotAudio.sleep_timer = 0;
+			} else if (!blocked && GodotAudio.sleep_blocked && GodotAudio.ctx) {
+				// The server's idle timer tracks mixed streams, not browser
+				// samples/input. Give their final queued audio the same grace.
+				const ctx = GodotAudio.ctx;
+				GodotAudio.sleep_timer = setTimeout(function () {
+					if (GodotAudio.ctx === ctx) {
+						GodotAudio.sleep_timer = 0;
+						GodotAudio.update_sleep();
+					}
+				}, 3000);
+			}
+			GodotAudio.sleep_blocked = !!blocked;
+			GodotAudioIdle.request(GodotAudio.sleep_requested && !blocked && !GodotAudio.sleep_timer);
+		},
 
 		GodotSampleDriver,
 		init: function (mix_rate, latency, onstatechange, onlatencyupdate) {
@@ -656,6 +783,12 @@ const _GodotAudio = {
 			// opts['latencyHint'] = latency / 1000;
 			const ctx = new (window.AudioContext || window.webkitAudioContext)(opts);
 			GodotAudio.ctx = ctx;
+			GodotAudio.sleep_requested = false;
+			GodotAudio.sleep_allowed = true;
+			GodotAudio.input_requested = false;
+			GodotAudio.sleep_blocked = false;
+			GodotAudio.sleep_timer = 0;
+			GodotAudioIdle.start(ctx);
 			ctx.onstatechange = function () {
 				let state = 0;
 				switch (ctx.state) {
@@ -672,6 +805,7 @@ const _GodotAudio = {
 					// Do nothing.
 				}
 				onstatechange(state);
+				GodotAudioIdle.reconcile();
 			};
 			ctx.onstatechange(); // Immediately notify state.
 			// Update computed latency
@@ -689,48 +823,70 @@ const _GodotAudio = {
 
 			// Initialize sample driver.
 			const path = GodotConfig.locate_file('godot.audio.position.worklet.js');
-			GodotAudio.sample_driver = GodotAudio.GodotSampleDriver(ctx, path);
+			GodotAudio.sample_driver = GodotAudio.GodotSampleDriver(ctx, path, GodotAudio.update_sleep);
 
 			return ctx.destination.channelCount;
 		},
 
 		create_input: function (callback) {
-			if (GodotAudio.input) {
-				return 0; // Already started.
+			if (GodotAudio.input_requested) {
+				return 0;
+			}
+			const ctx = GodotAudio.ctx;
+			if (!ctx) {
+				return 1;
+			}
+			const generation = ++GodotAudio.input_generation;
+			GodotAudio.input_requested = true;
+			GodotAudio.update_sleep();
+			function failed(error) {
+				if (GodotAudio.ctx === ctx && GodotAudio.input_generation === generation) {
+					GodotAudio.input_requested = false;
+					GodotAudio.update_sleep();
+					GodotRuntime.error('Error getting user media.', error);
+				}
 			}
 			function gotMediaInput(stream) {
+				if (GodotAudio.ctx !== ctx || GodotAudio.input_generation !== generation || !GodotAudio.input_requested) {
+					stream.getTracks().forEach(function (track) { track.stop(); });
+					return;
+				}
 				try {
-					GodotAudio.input = GodotAudio.ctx.createMediaStreamSource(stream);
+					GodotAudio.input = ctx.createMediaStreamSource(stream);
 					callback(GodotAudio.input);
 				} catch (e) {
-					GodotRuntime.error('Failed creating input.', e);
+					stream.getTracks().forEach(function (track) { track.stop(); });
+					GodotAudio.input = null;
+					failed(e);
 				}
 			}
-			if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-				navigator.mediaDevices.getUserMedia({
-					'audio': true,
-				}).then(gotMediaInput, function (e) {
-					GodotRuntime.error('Error getting user media.', e);
-				});
-			} else {
-				if (!navigator.getUserMedia) {
-					navigator.getUserMedia = navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+			try {
+				if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+					navigator.mediaDevices.getUserMedia({ 'audio': true }).then(gotMediaInput, failed);
+				} else {
+					const getMedia = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+					if (!getMedia) {
+						failed('getUserMedia not available.');
+						return 1;
+					}
+					getMedia.call(navigator, { 'audio': true }, gotMediaInput, failed);
 				}
-				if (!navigator.getUserMedia) {
-					GodotRuntime.error('getUserMedia not available.');
-					return 1;
-				}
-				navigator.getUserMedia({
-					'audio': true,
-				}, gotMediaInput, function (e) {
-					GodotRuntime.print(e);
-				});
+			} catch (e) {
+				failed(e);
+				return 1;
 			}
 			return 0;
 		},
 
 		close_async: function (resolve, reject) {
 			const ctx = GodotAudio.ctx;
+			GodotAudioIdle.close();
+			if (GodotAudio.sleep_timer) {
+				clearTimeout(GodotAudio.sleep_timer);
+				GodotAudio.sleep_timer = 0;
+			}
+			GodotAudio.input_requested = false;
+			GodotAudio.input_generation++;
 			GodotAudio.ctx = null;
 			// Audio was not initialized.
 			if (!ctx) {
@@ -749,6 +905,7 @@ const _GodotAudio = {
 			}
 			// Disconnect input, if it was started.
 			if (GodotAudio.input) {
+				GodotAudio.input.mediaStream.getTracks().forEach(function (track) { track.stop(); });
 				GodotAudio.input.disconnect();
 				GodotAudio.input = null;
 			}
@@ -815,9 +972,25 @@ const _GodotAudio = {
 	godot_audio_resume__proxy: 'sync',
 	godot_audio_resume__sig: 'v',
 	godot_audio_resume: function () {
-		if (GodotAudio.ctx && GodotAudio.ctx.state !== 'running') {
-			GodotAudio.ctx.resume();
+		GodotAudioIdle.resume();
+	},
+
+	godot_audio_set_output_sleep__proxy: 'sync',
+	godot_audio_set_output_sleep__sig: 'ii',
+	godot_audio_set_output_sleep: function (p_enable) {
+		if (!GodotAudio.ctx || GodotAudio.ctx.state === 'closed') {
+			return 0;
 		}
+		GodotAudio.sleep_requested = !!p_enable;
+		GodotAudio.update_sleep();
+		return 1;
+	},
+
+	godot_audio_set_sleep_allowed__proxy: 'sync',
+	godot_audio_set_sleep_allowed__sig: 'vi',
+	godot_audio_set_sleep_allowed: function (p_allowed) {
+		GodotAudio.sleep_allowed = !!p_allowed;
+		GodotAudio.update_sleep();
 	},
 
 	godot_audio_input_start__proxy: 'sync',
@@ -831,6 +1004,8 @@ const _GodotAudio = {
 	godot_audio_input_stop__proxy: 'sync',
 	godot_audio_input_stop__sig: 'v',
 	godot_audio_input_stop: function () {
+		GodotAudio.input_requested = false;
+		GodotAudio.input_generation++;
 		if (GodotAudio.input) {
 			const tracks = GodotAudio.input['mediaStream']['getTracks']();
 			for (let i = 0; i < tracks.length; i++) {
@@ -839,6 +1014,7 @@ const _GodotAudio = {
 			GodotAudio.input.disconnect();
 			GodotAudio.input = null;
 		}
+		GodotAudio.update_sleep();
 	},
 };
 
