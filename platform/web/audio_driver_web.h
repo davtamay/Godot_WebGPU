@@ -47,6 +47,9 @@ private:
 		int mix_rate = 0;
 	};
 	static AudioContext audio_context;
+	bool sleep_update_registered = false;
+	bool sleep_allowed = true;
+	static void _update_sleep_callback(void *p_userdata);
 
 	float *output_rb = nullptr;
 	float *input_rb = nullptr;
@@ -76,6 +79,8 @@ public:
 
 	virtual Error init() final;
 	virtual void start() final;
+	virtual bool can_output_device_sleep() const override { return true; }
+	virtual bool set_output_device_sleep(bool p_enable) override;
 	virtual void finish() final;
 
 	virtual int get_mix_rate() const override;
