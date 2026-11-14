@@ -243,6 +243,13 @@ else
 	skip "closure" "compiler not found beside emsdk - CI is then the only check"
 fi
 
+phase "Idle audio lifecycle"
+if "$NODE" misc/webgpu_scripts/test-audio-idle.mjs > "$LOGDIR/audio-idle.log" 2>&1; then
+	pass "idle audio lifecycle"
+else
+	fail "idle audio lifecycle" "see $LOGDIR/audio-idle.log"
+fi
+
 phase "Direct audio output"
 if "$NODE" misc/webgpu_scripts/test-audio-worklet-direct.mjs > "$LOGDIR/audio-direct.log" 2>&1; then
 	pass "direct audio output"
