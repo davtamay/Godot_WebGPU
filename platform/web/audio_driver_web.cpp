@@ -155,6 +155,32 @@ Error AudioDriverWeb::init() {
 
 void AudioDriverWeb::start() {
 	start(output_rb, memarr_len(output_rb), input_rb, memarr_len(input_rb));
+	AudioServer::get_singleton()->add_update_callback(&_update_sleep_callback, this);
+	sleep_update_registered = true;
+}
+
+void AudioDriverWeb::_update_sleep_callback(void *p_userdata) {
+	AudioDriverWeb *driver = static_cast<AudioDriverWeb *>(p_userdata);
+	AudioServer *server = AudioServer::get_singleton();
+	bool allowed = true;
+	for (int bus = 0; bus < server->get_bus_count(); bus++) {
+		// Conservatively preserve tails, capture effects and effects which
+		// generate output without a playing stream, including later additions.
+		if (server->get_bus_effect_count(bus) > 0) {
+			allowed = false;
+			break;
+		}
+	}
+	if (allowed != driver->sleep_allowed) {
+		driver->sleep_allowed = allowed;
+		godot_audio_set_sleep_allowed(allowed);
+	}
+}
+
+bool AudioDriverWeb::set_output_device_sleep(bool p_enable) {
+	// The browser transition is asynchronous. The bridge accepts the desired
+	// state and reconciles races with wake, input, samples and shutdown.
+	return godot_audio_set_output_sleep(p_enable) != 0;
 }
 
 void AudioDriverWeb::resume() {
@@ -176,6 +202,10 @@ AudioDriver::SpeakerMode AudioDriverWeb::get_speaker_mode() const {
 }
 
 void AudioDriverWeb::finish() {
+	if (sleep_update_registered) {
+		AudioServer::get_singleton()->remove_update_callback(&_update_sleep_callback, this);
+		sleep_update_registered = false;
+	}
 	finish_driver();
 	if (output_rb) {
 		memdelete_arr(output_rb);
