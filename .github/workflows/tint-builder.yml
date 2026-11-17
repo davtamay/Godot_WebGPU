@@ -15,7 +15,10 @@
 # light loop needs it), but the command line never exposed it. The step below
 # adds --allow-non-uniform-subgroup-operations next to the existing
 # --allow-non-uniform-derivatives flag; that binary is what
-# GODOT_TINT_PATH_SUBGROUPS points at.
+# GODOT_TINT_PATH_SUBGROUPS points at. Dawn releases from November 2026 ship
+# the same writer option as --allow-non-uniform-subgroups, declared as
+# `allow_nus`; the inserted option uses its own variable so both spellings
+# coexist and older bake configurations keep working.
 
 name: WebGPU stack - tint builder
 
@@ -67,13 +70,13 @@ jobs:
           assert s.count(anchor) == 1, "derivatives option block not found - the tint CLI moved, update this step"
           add = anchor + (
               "\n"
-              "    auto& allow_nus = options.Add<BoolOption>(\n"
+              "    auto& allow_nus_ops = options.Add<BoolOption>(\n"
               '        "allow-non-uniform-subgroup-operations",\n'
               '        R"(Allow subgroup builtins in non-uniform control flow by inserting a module-scope directive to\n'
               'suppress any uniformity violations that may be produced)",\n'
               "        Default{false});\n"
               "    TINT_DEFER({\n"
-              "        if (allow_nus.value.value_or(false)) {\n"
+              "        if (allow_nus_ops.value.value_or(false)) {\n"
               "            opts->wgsl_writer_options.allow_non_uniform_subgroup_operations = true;\n"
               "        }\n"
               "    });\n"
