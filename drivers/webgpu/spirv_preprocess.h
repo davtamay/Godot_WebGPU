@@ -113,4 +113,17 @@ bool uses_subgroup_ops(const Vector<uint8_t> &p_bytes);
 // validator and convert Dref-sampled textures to depth textures themselves.
 Vector<uint8_t> retype_sampled_image_results(const Vector<uint8_t> &p_bytes);
 
+// Drop NonReadable from storage buffers (write-only buffers are not WGSL;
+// newer Tint readers reject them). Storage images keep it.
+Vector<uint8_t> strip_nonreadable_buffer_decorations(const Vector<uint8_t> &p_bytes);
+
+// Retype sampler2DMS variables to the multisampled image they wrap (newer
+// Tint readers assert on multisampled sampled-image types).
+Vector<uint8_t> unwrap_multisampled_sampled_images(const Vector<uint8_t> &p_bytes);
+
+// Turn storage images the shader only reads into sampled images read at
+// mip 0, as Tint's original SPIR-V reader did (WGSL can read storage
+// textures in only a few formats).
+Vector<uint8_t> sample_read_only_storage_images(const Vector<uint8_t> &p_bytes);
+
 } // namespace spirv_preprocess

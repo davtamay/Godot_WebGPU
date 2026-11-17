@@ -2262,58 +2262,11 @@ static uint32_t _storage_image_format_substitute(uint32_t p_format) {
 	}
 }
 
-Vector<uint8_t> substitute_storage_image_formats(const Vector<uint8_t> &p_bytes) {
-	const int64_t len = p_bytes.size();
-	const uint32_t total_words = (uint32_t)(len / 4);
-	if (total_words < 5) {
-		return p_bytes;
-	}
-	const uint8_t *data = p_bytes.ptr();
-	bool found = false;
-	uint32_t pos = 5;
-	while (pos < total_words) {
-		uint32_t w0 = read_word(data, len, pos);
-		uint32_t wc = (w0 >> 16);
-		uint16_t op = (uint16_t)(w0 & 0xFFFF);
-		if (wc == 0 || pos + wc > total_words) {
-			break;
-		}
-		// OpTypeImage: [result, sampled type, dim, depth, arrayed, ms,
-		// sampled, format, (access)]; format is word 8. Sampled == 2 means
-		// a storage image.
-		if (op == SSIF_OP_TYPE_IMAGE && wc >= 9 && read_word(data, len, pos + 7) == 2 && _storage_image_format_substitute(read_word(data, len, pos + 8)) != read_word(data, len, pos + 8)) {
-			found = true;
-			break;
-		}
-		pos += wc;
-	}
-	if (!found) {
-		return p_bytes;
-	}
-	Vector<uint8_t> out = p_bytes;
-	{
-		uint8_t *out_data = out.ptrw();
-		pos = 5;
-		while (pos < total_words) {
-			uint32_t w0 = read_word(out_data, len, pos);
-			uint32_t wc = (w0 >> 16);
-			uint16_t op = (uint16_t)(w0 & 0xFFFF);
-			if (wc == 0 || pos + wc > total_words) {
-				break;
-			}
-			if (op == SSIF_OP_TYPE_IMAGE && wc >= 9 && read_word(out_data, len, pos + 7) == 2) {
-				const uint32_t substitute = _storage_image_format_substitute(read_word(out_data, len, pos + 8));
-				memcpy(out_data + (pos + 8) * 4, &substitute, 4);
-			}
-			pos += wc;
-		}
-	}
-
-	// Substitution can merge formerly-distinct declarations (r8 and rg8 both
-	// become rgba8), and SPIR-V forbids duplicate non-aggregate types.
-	// Dedupe image, sampled-image, and pointer types (each round can expose
-	// the next kind of duplicate), remapping references at the positions
-	// where a type id can legally appear.
+// SPIR-V forbids duplicate non-aggregate types. Passes that rewrite type
+// declarations can make two of them identical; this drops the later
+// image, sampled-image and pointer duplicates and remaps their references
+// (each round can expose the next kind of duplicate).
+static void _dedupe_type_declarations(Vector<uint8_t> &out) {
 	for (int round = 0; round < 4; round++) {
 		uint8_t *out_data = out.ptrw();
 		const int64_t dlen = out.size();
@@ -2418,6 +2371,61 @@ Vector<uint8_t> substitute_storage_image_formats(const Vector<uint8_t> &p_bytes)
 		}
 		out = next;
 	}
+}
+
+Vector<uint8_t> substitute_storage_image_formats(const Vector<uint8_t> &p_bytes) {
+	const int64_t len = p_bytes.size();
+	const uint32_t total_words = (uint32_t)(len / 4);
+	if (total_words < 5) {
+		return p_bytes;
+	}
+	const uint8_t *data = p_bytes.ptr();
+	bool found = false;
+	uint32_t pos = 5;
+	while (pos < total_words) {
+		uint32_t w0 = read_word(data, len, pos);
+		uint32_t wc = (w0 >> 16);
+		uint16_t op = (uint16_t)(w0 & 0xFFFF);
+		if (wc == 0 || pos + wc > total_words) {
+			break;
+		}
+		// OpTypeImage: [result, sampled type, dim, depth, arrayed, ms,
+		// sampled, format, (access)]; format is word 8. Sampled == 2 means
+		// a storage image.
+		if (op == SSIF_OP_TYPE_IMAGE && wc >= 9 && read_word(data, len, pos + 7) == 2 && _storage_image_format_substitute(read_word(data, len, pos + 8)) != read_word(data, len, pos + 8)) {
+			found = true;
+			break;
+		}
+		pos += wc;
+	}
+	if (!found) {
+		return p_bytes;
+	}
+	Vector<uint8_t> out = p_bytes;
+	{
+		uint8_t *out_data = out.ptrw();
+		pos = 5;
+		while (pos < total_words) {
+			uint32_t w0 = read_word(out_data, len, pos);
+			uint32_t wc = (w0 >> 16);
+			uint16_t op = (uint16_t)(w0 & 0xFFFF);
+			if (wc == 0 || pos + wc > total_words) {
+				break;
+			}
+			if (op == SSIF_OP_TYPE_IMAGE && wc >= 9 && read_word(out_data, len, pos + 7) == 2) {
+				const uint32_t substitute = _storage_image_format_substitute(read_word(out_data, len, pos + 8));
+				memcpy(out_data + (pos + 8) * 4, &substitute, 4);
+			}
+			pos += wc;
+		}
+	}
+
+	// Substitution can merge formerly-distinct declarations (r8 and rg8 both
+	// become rgba8), and SPIR-V forbids duplicate non-aggregate types.
+	// Dedupe image, sampled-image, and pointer types (each round can expose
+	// the next kind of duplicate), remapping references at the positions
+	// where a type id can legally appear.
+	_dedupe_type_declarations(out);
 	return out;
 }
 
@@ -3300,6 +3308,437 @@ Vector<uint8_t> retype_sampled_image_results(const Vector<uint8_t> &p_bytes) {
 		pos += wc;
 	}
 	return out;
+}
+
+// ---- strip_nonreadable_buffer_decorations ----
+//
+// glslang marks the members (and sometimes the variable) of a `writeonly`
+// storage buffer NonReadable. Tint's original reader ignored it; the
+// rewritten reader turns it into a write-only storage pointer, which WGSL
+// does not have for buffers ("vars in the 'storage' address space must have
+// access 'read' or 'read_write'"), and the variant is dropped. Write-only is
+// a hint the shader already obeys, so it is removed from buffers. Storage
+// images keep it: a write-only storage texture is legal WGSL and is how the
+// engine declares them.
+
+static constexpr uint32_t SNR_DECO_NONREADABLE = 25;
+
+static Vector<uint32_t> _spirv_words(const Vector<uint8_t> &p_bytes) {
+	Vector<uint32_t> words;
+	words.resize(p_bytes.size() / 4);
+	memcpy(words.ptrw(), p_bytes.ptr(), words.size() * 4);
+	return words;
+}
+
+static Vector<uint8_t> _spirv_bytes(const Vector<uint32_t> &p_words) {
+	Vector<uint8_t> bytes;
+	bytes.resize(p_words.size() * 4);
+	memcpy(bytes.ptrw(), p_words.ptr(), bytes.size());
+	return bytes;
+}
+
+Vector<uint8_t> strip_nonreadable_buffer_decorations(const Vector<uint8_t> &p_bytes) {
+	if (p_bytes.size() < 20) {
+		return p_bytes;
+	}
+	const Vector<uint32_t> words = _spirv_words(p_bytes);
+	const uint32_t count = words.size();
+	HashSet<uint32_t> image_types;
+	HashMap<uint32_t, uint32_t> array_element; // array type -> element type
+	HashMap<uint32_t, uint32_t> pointee; // pointer type -> pointee
+	HashMap<uint32_t, uint32_t> variable_type; // variable -> its pointer type
+	bool found = false;
+	uint32_t pos = 5;
+	while (pos < count) {
+		const uint32_t wc = words[pos] >> 16;
+		const uint16_t op = (uint16_t)(words[pos] & 0xFFFF);
+		if (wc == 0 || pos + wc > count) {
+			return p_bytes;
+		}
+		if (op == OP_TYPE_IMAGE) {
+			image_types.insert(words[pos + 1]);
+		} else if ((op == OP_TYPE_ARRAY || op == OP_TYPE_RUNTIME_ARRAY) && wc >= 3) {
+			array_element[words[pos + 1]] = words[pos + 2];
+		} else if (op == OP_TYPE_POINTER && wc >= 4) {
+			pointee[words[pos + 1]] = words[pos + 3];
+		} else if (op == OP_VARIABLE && wc >= 4) {
+			variable_type[words[pos + 2]] = words[pos + 1];
+		} else if ((op == OP_MEMBER_DECORATE && wc == 4 && words[pos + 3] == SNR_DECO_NONREADABLE) || (op == OP_DECORATE && wc == 3 && words[pos + 2] == SNR_DECO_NONREADABLE)) {
+			found = true;
+		}
+		pos += wc;
+	}
+	if (!found) {
+		return p_bytes;
+	}
+	// Members of a struct are never images, so every member decoration
+	// goes; a variable keeps it when it holds an image or an array of them.
+	auto holds_image = [&](uint32_t p_variable) -> bool {
+		const uint32_t *ptr_type = variable_type.getptr(p_variable);
+		if (ptr_type == nullptr) {
+			return false;
+		}
+		const uint32_t *type = pointee.getptr(*ptr_type);
+		uint32_t t = type ? *type : 0;
+		for (int depth = 0; depth < 8; depth++) {
+			const uint32_t *element = array_element.getptr(t);
+			if (element == nullptr) {
+				break;
+			}
+			t = *element;
+		}
+		return image_types.has(t);
+	};
+	Vector<uint32_t> out;
+	out.resize(5);
+	memcpy(out.ptrw(), words.ptr(), 5 * 4);
+	pos = 5;
+	while (pos < count) {
+		const uint32_t wc = words[pos] >> 16;
+		const uint16_t op = (uint16_t)(words[pos] & 0xFFFF);
+		const bool skip = (op == OP_MEMBER_DECORATE && wc == 4 && words[pos + 3] == SNR_DECO_NONREADABLE) || (op == OP_DECORATE && wc == 3 && words[pos + 2] == SNR_DECO_NONREADABLE && !holds_image(words[pos + 1]));
+		if (!skip) {
+			for (uint32_t i = 0; i < wc; i++) {
+				out.push_back(words[pos + i]);
+			}
+		}
+		pos += wc;
+	}
+	return _spirv_bytes(out);
+}
+
+// ---- unwrap_multisampled_sampled_images ----
+//
+// glslang types a `sampler2DMS` variable as a sampled image of a
+// multisampled image. Tint's rewritten reader asserts constructing that
+// type (TINT_ASSERT(img_type->GetMultisampled() != kMultisampled) and the
+// translator process aborts. Multisampled images can only be read with
+// texelFetch, which extracts the image first (OpImage), so the sampler half
+// carries nothing: the variable and its loads are retyped to the image
+// itself and each OpImage becomes a copy of the loaded value (same word
+// count), giving texture_multisampled_2d + textureLoad.
+
+static constexpr uint16_t UMS_OP_IMAGE = 100;
+static constexpr uint32_t UMS_DECO_BINDING = 33;
+static constexpr uint32_t UMS_DECO_DESCRIPTOR_SET = 34;
+// RenderingShaderContainerWebGPU::PUSH_CONSTANT_BINDING: bindings from here up
+// (push constants, fanned-out arrays) are not part of the per-set numbering.
+static constexpr uint32_t UMS_FIRST_RESERVED_BINDING = 510;
+
+Vector<uint8_t> unwrap_multisampled_sampled_images(const Vector<uint8_t> &p_bytes) {
+	if (p_bytes.size() < 20) {
+		return p_bytes;
+	}
+	Vector<uint32_t> words = _spirv_words(p_bytes);
+	const uint32_t count = words.size();
+	HashSet<uint32_t> ms_images;
+	HashMap<uint32_t, uint32_t> ms_sampled; // sampled-image type -> its image type
+	HashMap<uint64_t, uint32_t> pointer_by_target; // (storage class << 32 | pointee) -> pointer type
+	LocalVector<uint32_t> pointer_positions;
+	uint32_t pos = 5;
+	while (pos < count) {
+		const uint32_t wc = words[pos] >> 16;
+		const uint16_t op = (uint16_t)(words[pos] & 0xFFFF);
+		if (wc == 0 || pos + wc > count) {
+			return p_bytes;
+		}
+		if (op == OP_TYPE_IMAGE && wc >= 9 && words[pos + 6] == 1) {
+			ms_images.insert(words[pos + 1]);
+		} else if (op == OP_TYPE_SAMPLED_IMAGE && wc >= 3 && ms_images.has(words[pos + 2])) {
+			ms_sampled[words[pos + 1]] = words[pos + 2];
+		} else if (op == OP_TYPE_POINTER && wc >= 4) {
+			pointer_by_target[((uint64_t)words[pos + 2] << 32) | words[pos + 3]] = words[pos + 1];
+			pointer_positions.push_back(pos);
+		}
+		pos += wc;
+	}
+	if (ms_sampled.is_empty()) {
+		return p_bytes;
+	}
+	// The driver lays out a combined image-sampler as the texture at its
+	// binding and the sampler one above it, shifting every later binding of
+	// the set up by one, as Tint's splitting of combined samplers does. An
+	// unwrapped variable is no longer combined, so Tint will not shift, and
+	// the bindings after it would land one below where the layout expects
+	// them. Shift them here instead (the sampler's slot stays empty, which a
+	// layout may have). Bindings from the push-constant binding up are placed
+	// separately and keep their numbers.
+	{
+		HashMap<uint32_t, uint32_t> pointee_of; // pointer type -> pointee, before repointing
+		for (uint32_t ptr_pos : pointer_positions) {
+			pointee_of[words[ptr_pos + 1]] = words[ptr_pos + 3];
+		}
+		HashSet<uint32_t> unwrapped_vars;
+		HashMap<uint32_t, uint32_t> var_set;
+		HashMap<uint32_t, uint32_t> binding_pos; // variable -> position of its Binding decoration
+		pos = 5;
+		while (pos < count) {
+			const uint32_t wc = words[pos] >> 16;
+			const uint16_t op = (uint16_t)(words[pos] & 0xFFFF);
+			if (op == OP_VARIABLE && wc >= 4) {
+				const uint32_t *pointee = pointee_of.getptr(words[pos + 1]);
+				if (pointee != nullptr && ms_sampled.has(*pointee)) {
+					unwrapped_vars.insert(words[pos + 2]);
+				}
+			} else if (op == OP_DECORATE && wc == 4 && words[pos + 2] == UMS_DECO_DESCRIPTOR_SET) {
+				var_set[words[pos + 1]] = words[pos + 3];
+			} else if (op == OP_DECORATE && wc == 4 && words[pos + 2] == UMS_DECO_BINDING) {
+				binding_pos[words[pos + 1]] = pos;
+			}
+			pos += wc;
+		}
+		LocalVector<Pair<uint32_t, uint32_t>> unwrapped_slots; // (set, binding)
+		for (uint32_t var : unwrapped_vars) {
+			const uint32_t *set = var_set.getptr(var);
+			const uint32_t *bpos = binding_pos.getptr(var);
+			if (set != nullptr && bpos != nullptr) {
+				unwrapped_slots.push_back(Pair<uint32_t, uint32_t>(*set, words[*bpos + 3]));
+			}
+		}
+		for (const KeyValue<uint32_t, uint32_t> &kv : binding_pos) {
+			const uint32_t *set = var_set.getptr(kv.key);
+			const uint32_t binding = words[kv.value + 3];
+			if (set == nullptr || binding >= UMS_FIRST_RESERVED_BINDING) {
+				continue;
+			}
+			uint32_t shift = 0;
+			for (const Pair<uint32_t, uint32_t> &slot : unwrapped_slots) {
+				if (slot.first == *set && slot.second < binding) {
+					shift++;
+				}
+			}
+			words.write[kv.value + 3] = binding + shift;
+		}
+	}
+	// A pointer to the sampled type is repointed at the image, or replaced
+	// by an existing pointer to that image where one is declared already.
+	HashMap<uint32_t, uint32_t> pointer_remap;
+	for (uint32_t ptr_pos : pointer_positions) {
+		const uint32_t *image = ms_sampled.getptr(words[ptr_pos + 3]);
+		if (image == nullptr) {
+			continue;
+		}
+		const uint32_t *existing = pointer_by_target.getptr(((uint64_t)words[ptr_pos + 2] << 32) | *image);
+		if (existing != nullptr) {
+			pointer_remap[words[ptr_pos + 1]] = *existing;
+		} else {
+			words.write[ptr_pos + 3] = *image;
+		}
+	}
+	pos = 5;
+	while (pos < count) {
+		const uint32_t wc = words[pos] >> 16;
+		const uint16_t op = (uint16_t)(words[pos] & 0xFFFF);
+		if (op == OP_VARIABLE && wc >= 4) {
+			const uint32_t *remapped = pointer_remap.getptr(words[pos + 1]);
+			if (remapped != nullptr) {
+				words.write[pos + 1] = *remapped;
+			}
+		} else if (op == OP_LOAD && wc >= 4) {
+			const uint32_t *image = ms_sampled.getptr(words[pos + 1]);
+			if (image != nullptr) {
+				words.write[pos + 1] = *image;
+			}
+		} else if (op == UMS_OP_IMAGE && wc == 4 && ms_images.has(words[pos + 1])) {
+			words.write[pos] = (4u << 16) | OP_COPY_OBJECT;
+		}
+		pos += wc;
+	}
+	// The sampled-image types are now unreferenced; drop their declarations.
+	Vector<uint32_t> out;
+	out.resize(5);
+	memcpy(out.ptrw(), words.ptr(), 5 * 4);
+	pos = 5;
+	while (pos < count) {
+		const uint32_t wc = words[pos] >> 16;
+		const uint16_t op = (uint16_t)(words[pos] & 0xFFFF);
+		const bool drop = (op == OP_TYPE_SAMPLED_IMAGE && ms_sampled.has(words[pos + 1]));
+		if (!drop) {
+			for (uint32_t i = 0; i < wc; i++) {
+				out.push_back(words[pos + i]);
+			}
+		}
+		pos += wc;
+	}
+	return _spirv_bytes(out);
+}
+
+// ---- sample_read_only_storage_images ----
+//
+// Tint's original SPIR-V reader turned every storage image the shader only
+// reads into a sampled texture read with textureLoad; the rewritten reader
+// keeps it a read-only storage texture. WGSL can only read storage
+// textures in a few formats, so a read-only image in any other format (the
+// VRS buffer's r8uint, which the driver creates without storage use) makes
+// the variant unusable. This restores the original reader's behaviour: an
+// image type whose every variable is NonWritable, and which is only ever
+// read with OpImageRead, becomes a sampled image with an unknown format,
+// and each read becomes an OpImageFetch at mip level 0. Bindings then come
+// out exactly as the shaders shipped with the original reader.
+
+static constexpr uint16_t RO_OP_NAME = 5;
+static constexpr uint16_t RO_OP_TYPE_FUNCTION = 33;
+static constexpr uint16_t RO_OP_FUNCTION_PARAMETER = 55;
+static constexpr uint16_t RO_OP_IMAGE_FETCH = 95;
+static constexpr uint16_t RO_OP_IMAGE_READ = 98;
+static constexpr uint32_t RO_DECO_NONWRITABLE = 24;
+static constexpr uint32_t RO_STORAGE_UNIFORM_CONSTANT = 0;
+static constexpr uint32_t RO_IMAGE_OPERANDS_LOD = 0x2;
+
+Vector<uint8_t> sample_read_only_storage_images(const Vector<uint8_t> &p_bytes) {
+	if (p_bytes.size() < 20) {
+		return p_bytes;
+	}
+	const Vector<uint32_t> words = _spirv_words(p_bytes);
+	const uint32_t count = words.size();
+
+	HashSet<uint32_t> storage_images; // single-sampled, Sampled=2
+	HashMap<uint32_t, uint32_t> pointer_pointee; // UniformConstant pointer -> pointee
+	HashMap<uint32_t, uint32_t> variable_pointer; // variable -> pointer type
+	HashSet<uint32_t> non_writable;
+	HashMap<uint32_t, uint32_t> value_type; // load result -> its type
+	HashSet<uint32_t> disqualified; // image types we must leave alone
+	uint32_t int_type = 0;
+	uint32_t int_zero = 0;
+	uint32_t pos = 5;
+	while (pos < count) {
+		const uint32_t wc = words[pos] >> 16;
+		const uint16_t op = (uint16_t)(words[pos] & 0xFFFF);
+		if (wc == 0 || pos + wc > count) {
+			return p_bytes;
+		}
+		switch (op) {
+			case OP_TYPE_IMAGE:
+				// Dim 5 is a texel buffer and 6 a subpass input: neither has a
+				// sampled form here.
+				if (wc >= 9 && words[pos + 3] != 5 && words[pos + 3] != 6 && words[pos + 6] == 0 && words[pos + 7] == 2) {
+					storage_images.insert(words[pos + 1]);
+				}
+				break;
+			case OP_TYPE_INT:
+				if (wc >= 4 && words[pos + 2] == 32 && words[pos + 3] == 1 && int_type == 0) {
+					int_type = words[pos + 1];
+				}
+				break;
+			case OP_CONSTANT:
+				if (wc == 4 && int_type != 0 && words[pos + 1] == int_type && words[pos + 3] == 0 && int_zero == 0) {
+					int_zero = words[pos + 2];
+				}
+				break;
+			case OP_TYPE_POINTER:
+				if (wc >= 4 && words[pos + 2] == RO_STORAGE_UNIFORM_CONSTANT) {
+					pointer_pointee[words[pos + 1]] = words[pos + 3];
+				}
+				break;
+			case OP_VARIABLE:
+				if (wc >= 4) {
+					variable_pointer[words[pos + 2]] = words[pos + 1];
+				}
+				break;
+			case OP_DECORATE:
+				if (wc == 3 && words[pos + 2] == RO_DECO_NONWRITABLE) {
+					non_writable.insert(words[pos + 1]);
+				}
+				break;
+			case OP_LOAD:
+				if (wc >= 4) {
+					value_type[words[pos + 2]] = words[pos + 1];
+				}
+				break;
+			case RO_OP_TYPE_FUNCTION:
+				// An image passed to a function would need its parameters
+				// retyped too; leave those alone.
+				for (uint32_t i = 3; i < wc; i++) {
+					disqualified.insert(words[pos + i]);
+				}
+				break;
+			case RO_OP_FUNCTION_PARAMETER:
+				disqualified.insert(words[pos + 1]);
+				break;
+			default:
+				break;
+		}
+		pos += wc;
+	}
+	if (storage_images.is_empty() || int_zero == 0) {
+		return p_bytes;
+	}
+	// Every variable of a converted type must be read-only.
+	for (const KeyValue<uint32_t, uint32_t> &kv : variable_pointer) {
+		const uint32_t *pointee = pointer_pointee.getptr(kv.value);
+		if (pointee != nullptr && storage_images.has(*pointee) && !non_writable.has(kv.key)) {
+			disqualified.insert(*pointee);
+		}
+	}
+	// Every use of a loaded image must be a plain read: writes, size
+	// queries, reads with image operands and anything else that names the
+	// image disqualify its type.
+	pos = 5;
+	while (pos < count) {
+		const uint32_t wc = words[pos] >> 16;
+		const uint16_t op = (uint16_t)(words[pos] & 0xFFFF);
+		// Load results only ever appear as operands, so every word after the
+		// opcode can be checked (names and decorations aside).
+		if (op != OP_LOAD && op != RO_OP_NAME && op != OP_DECORATE && op != OP_MEMBER_DECORATE) {
+			for (uint32_t i = 1; i < wc; i++) {
+				const uint32_t *type = value_type.getptr(words[pos + i]);
+				if (type == nullptr || !storage_images.has(*type)) {
+					continue;
+				}
+				if (!(op == RO_OP_IMAGE_READ && i == 3 && wc == 5)) {
+					disqualified.insert(*type);
+				}
+			}
+		}
+		pos += wc;
+	}
+	HashSet<uint32_t> converted;
+	for (uint32_t type : storage_images) {
+		if (!disqualified.has(type)) {
+			converted.insert(type);
+		}
+	}
+	if (converted.is_empty()) {
+		return p_bytes;
+	}
+	Vector<uint32_t> out;
+	out.resize(5);
+	memcpy(out.ptrw(), words.ptr(), 5 * 4);
+	pos = 5;
+	while (pos < count) {
+		const uint32_t wc = words[pos] >> 16;
+		const uint16_t op = (uint16_t)(words[pos] & 0xFFFF);
+		if (op == OP_TYPE_IMAGE && converted.has(words[pos + 1])) {
+			for (uint32_t i = 0; i < wc; i++) {
+				uint32_t w = words[pos + i];
+				if (i == 7) {
+					w = 1; // Sampled.
+				} else if (i == 8) {
+					w = 0; // Unknown format.
+				}
+				out.push_back(w);
+			}
+		} else if (op == RO_OP_IMAGE_READ && wc == 5 && value_type.has(words[pos + 3]) && converted.has(value_type[words[pos + 3]])) {
+			out.push_back((7u << 16) | RO_OP_IMAGE_FETCH);
+			out.push_back(words[pos + 1]);
+			out.push_back(words[pos + 2]);
+			out.push_back(words[pos + 3]);
+			out.push_back(words[pos + 4]);
+			out.push_back(RO_IMAGE_OPERANDS_LOD);
+			out.push_back(int_zero);
+		} else if (op == OP_DECORATE && wc == 3 && words[pos + 2] == RO_DECO_NONWRITABLE && variable_pointer.has(words[pos + 1]) && pointer_pointee.has(variable_pointer[words[pos + 1]]) && converted.has(pointer_pointee[variable_pointer[words[pos + 1]]])) {
+			// Sampled images carry no access decorations.
+		} else {
+			for (uint32_t i = 0; i < wc; i++) {
+				out.push_back(words[pos + i]);
+			}
+		}
+		pos += wc;
+	}
+	// A converted image can now equal a sampled image declared already.
+	Vector<uint8_t> bytes = _spirv_bytes(out);
+	_dedupe_type_declarations(bytes);
+	return bytes;
 }
 
 } // namespace spirv_preprocess
