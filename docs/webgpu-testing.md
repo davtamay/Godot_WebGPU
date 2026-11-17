@@ -49,7 +49,7 @@ vendored). The canonical source is the fork's release assets, built by the
 "WebGPU stack - tint builder" workflow from the same Dawn tag the runtime
 bindings pin and verified to produce byte-identical baked WGSL:
 
-    gh release download tint-v20250531.224602 -p 'tint-*'  # pick your platform
+    gh release download tint-v20261113.214538 -p 'tint-*'  # pick your platform
 
 Set GODOT_TINT_PATH to the downloaded executable - or simply drop it next
 to the editor binary (tint.exe / tint), which the baker finds automatically

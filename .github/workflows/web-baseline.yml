@@ -174,28 +174,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Published by the tint-builder workflow, pinned BY TAG: the newer
-          # tint built from Dawn v20260423 (the ref emsdk 6.0.1's emdawnwebgpu
-          # port paired with) replaced the spirv-reader with a stricter IR
-          # reader that still refuses ~76 of the mobile renderer's variants
-          # (depth-image sampled-type mismatches, write-only SSBOs, an
-          # atomic-inference crash, MS sampled images). The failure map and
-          # adoption gate live in C:/ws/xr/testbed/tint-adoption-v20260423 on
-          # the dev machine; move this pin forward only together with that
-          # adoption (and GODOT_TINT_PATH locally).
-          gh release download tint-v20250531.224602 --repo "$GITHUB_REPOSITORY" --pattern 'tint-linux-x86_64' --dir "$RUNNER_TEMP" --clobber
+          # Published by the tint-builder workflow, pinned BY TAG and hash.
+          # Dawn v20261113.214538 carries the reader fix for the
+          # texture-parameter assert (85b7901) that kept the rewritten SPIR-V
+          # reader from translating the scene shaders; with the bake's
+          # preprocessing passes it translates every variant on its own, so
+          # no fallback translator is configured. Move this pin only together
+          # with GODOT_TINT_PATH locally and a zero-exclusion census.
+          gh release download tint-v20261113.214538 --repo "$GITHUB_REPOSITORY" --pattern 'tint-linux-x86_64' --dir "$RUNNER_TEMP" --clobber
+          printf '%s  %s\n' '43bbfe5fc0e4a9480a6daac1349612103806a73a932788af029a172054d94589' "$RUNNER_TEMP/tint-linux-x86_64" | sha256sum --check
           chmod +x "$RUNNER_TEMP/tint-linux-x86_64"
-
-          # Keep the proven primary translator; use the same extended fallback
-          # as the local zero-exclusion gates for packed RGB10A2 storage shaders.
-          gh release download tint-v20260916.214021 --repo "$GITHUB_REPOSITORY" --pattern 'tint-linux-x86_64' --dir "$RUNNER_TEMP/tint-extended" --clobber
-          printf '%s  %s\n' '6d433320c4b3f1bfbf6016d7d9dd329c14f5d703ab953383c76385825eb98d84' "$RUNNER_TEMP/tint-extended/tint-linux-x86_64" | sha256sum --check
-          chmod +x "$RUNNER_TEMP/tint-extended/tint-linux-x86_64"
 
       - name: Bake the fixture project
         env:
           GODOT_TINT_PATH: ${{ runner.temp }}/tint-linux-x86_64
-          GODOT_TINT_PATH_FALLBACK: ${{ runner.temp }}/tint-extended/tint-linux-x86_64
         run: |
           set -o pipefail
           sudo apt-get install -y xvfb
