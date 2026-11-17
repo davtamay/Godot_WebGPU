@@ -1471,6 +1471,16 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 		// glslang hint that Tint's reader rejects.
 		spirv = spirv_preprocess::strip_nonwritable_on_function_vars(spirv);
 		spirv = spirv_preprocess::strip_hint_decorations(spirv);
+		// Shapes Tint's rewritten SPIR-V reader rejects or translates
+		// differently from the original: write-only storage buffers,
+		// multisampled sampled-image types, sampled images whose result type
+		// disagrees with their image (a texture declared as color but sampled
+		// with a shadow sampler), and read-only storage images, which it keeps
+		// as storage textures instead of sampling them.
+		spirv = spirv_preprocess::strip_nonreadable_buffer_decorations(spirv);
+		spirv = spirv_preprocess::unwrap_multisampled_sampled_images(spirv);
+		spirv = spirv_preprocess::retype_sampled_image_results(spirv);
+		spirv = spirv_preprocess::sample_read_only_storage_images(spirv);
 		// The clustered renderer uses subgroup ops (as a wave-coherence
 		// optimization) and the HelperInvocation builtin unconditionally;
 		// Tint's reader supports neither. Lower both to exact degraded
