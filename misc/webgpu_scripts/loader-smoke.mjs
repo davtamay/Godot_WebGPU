@@ -282,7 +282,12 @@ function samplePngPixel(buf, fx, fy) {
 	return [cur[o], cur[o + 1], cur[o + 2], bpp === 4 ? cur[o + 3] : 255];
 }
 
+// Returns the problems found instead of failing the run, so a lost device
+// can be retried in a fresh browser (see the probe loop below).
 async function runProbe(browser, base) {
+	const problems = [];
+	const problem = (msg) => problems.push(msg);
+	let deviceLost = false;
 	const page = await browser.newPage();
 	const consoleMessages = [];
 	const pageErrors = [];
@@ -293,42 +298,43 @@ async function runProbe(browser, base) {
 	await page.waitForFunction('window.__probe.rc !== null || window.__probe.error !== null', null, { timeout: 120000 });
 
 	const probe = await page.evaluate('window.__probe');
+	deviceLost = (probe.gpuErrors ?? []).some((m) => m.startsWith('device lost:'));
 	if (probe.error !== null) {
-		fail(`[probe] threw: ${probe.error}`);
-		return;
+		problem(`[probe] threw: ${probe.error}`);
+		return { problems, deviceLost };
 	}
 	if (probe.rc === -1) {
 		console.log('loader-smoke: [probe] SKIPPED (this environment cannot deliver a WebGPU device)');
 		await page.close();
-		return;
+		return { problems, deviceLost };
 	}
 	if (probe.rc !== 0) {
-		fail(`[probe] godot_webgpu_probe() returned stage ${probe.rc}; console: ${consoleMessages.slice(-5).join(' | ')}`);
-		return;
+		problem(`[probe] godot_webgpu_probe() returned stage ${probe.rc}; console: ${consoleMessages.slice(-5).join(' | ')}`);
+		return { problems, deviceLost };
 	}
 	if (pageErrors.length > 0) {
-		fail(`[probe] pageerror(s): ${pageErrors.join(' | ')}`);
+		problem(`[probe] pageerror(s): ${pageErrors.join(' | ')}`);
 	}
 	if (probe.gpuErrors && probe.gpuErrors.length > 0) {
-		fail(`[probe] GPU validation error(s): ${probe.gpuErrors.join(' | ')}`);
+		problem(`[probe] GPU validation error(s): ${probe.gpuErrors.join(' | ')}`);
 	}
 	if (!consoleMessages.some((m) => m.includes('WebGPU probe: OK'))) {
-		fail('[probe] success marker not found in console output');
+		problem('[probe] success marker not found in console output');
 	}
 	if (!consoleMessages.some((m) => m.includes('WebGPU probe: shader module OK'))) {
-		fail('[probe] shader module marker not found in console output');
+		problem('[probe] shader module marker not found in console output');
 	}
 	if (!consoleMessages.some((m) => m.includes('WebGPU probe: triangle OK'))) {
-		fail('[probe] triangle marker not found in console output');
+		problem('[probe] triangle marker not found in console output');
 	}
 	if (!consoleMessages.some((m) => m.includes('WebGPU probe: uniform set OK'))) {
-		fail('[probe] uniform set marker not found in console output');
+		problem('[probe] uniform set marker not found in console output');
 	}
 	if (!consoleMessages.some((m) => m.includes('WebGPU probe: dynamic buffer OK'))) {
-		fail('[probe] dynamic buffer marker not found in console output');
+		problem('[probe] dynamic buffer marker not found in console output');
 	}
 	if (!consoleMessages.some((m) => m.includes('WebGPU probe: instanced quads OK'))) {
-		fail('[probe] instanced quads marker not found in console output');
+		problem('[probe] instanced quads marker not found in console output');
 	}
 
 	// Read back the presented pixels via a compositor screenshot. A 2D
@@ -351,13 +357,13 @@ async function runProbe(browser, base) {
 	const requirePixels = process.env.PROBE_REQUIRE_PIXELS === '1';
 	const checkPixel = (label, pixel, expected) => {
 		if (pixel == null) {
-			fail(`[probe] could not decode the probe canvas screenshot (${label})`);
+			problem(`[probe] could not decode the probe canvas screenshot (${label})`);
 			return;
 		}
 		const delta = Math.max(Math.abs(pixel[0] - expected[0]), Math.abs(pixel[1] - expected[1]), Math.abs(pixel[2] - expected[2]));
 		if (delta > PROBE_TOLERANCE) {
 			if (requirePixels) {
-				fail(`[probe] ${label} color mismatch: got rgb(${pixel[0]},${pixel[1]},${pixel[2]}), expected ~rgb(${expected.join(',')})`);
+				problem(`[probe] ${label} color mismatch: got rgb(${pixel[0]},${pixel[1]},${pixel[2]}), expected ~rgb(${expected.join(',')})`);
 			} else {
 				console.warn(`loader-smoke: [probe] PIXEL CHECK INCONCLUSIVE (${label}): got rgb(${pixel[0]},${pixel[1]},${pixel[2]}), expected ~rgb(${expected.join(',')}) - this environment does not composite WebGPU canvases into screenshots; presentation must be verified on a real GPU (PROBE_CHANNEL=chrome PROBE_REQUIRE_PIXELS=1)`);
 			}
@@ -372,6 +378,7 @@ async function runProbe(browser, base) {
 
 	console.log(`loader-smoke: [probe] rc=0, markers found, corner=${JSON.stringify(cornerPixel)}, center=${JSON.stringify(centerPixel)}, pageErrors=${pageErrors.length}`);
 	await page.close();
+	return { problems, deviceLost };
 }
 
 const base = await new Promise((resolve) => {
@@ -388,17 +395,39 @@ if (mode === 'probe' && process.env.PROBE_CHANNEL) {
 	launchOptions.channel = process.env.PROBE_CHANNEL;
 	launchOptions.args = [];
 }
-const browser = await chromium.launch(launchOptions);
+// A software adapter (SwiftShader on CI) occasionally loses the device in
+// the middle of the probe ("A valid external Instance reference no longer
+// exists") with no fault in the probe itself. A lost device gets one more
+// try in a fresh browser; any other problem, or a second loss, fails.
+const PROBE_ATTEMPTS = 2;
 try {
 	if (mode === 'probe') {
-		await runProbe(browser, base);
+		for (let attempt = 1; attempt <= PROBE_ATTEMPTS; attempt++) {
+			const browser = await chromium.launch(launchOptions);
+			let result;
+			try {
+				result = await runProbe(browser, base);
+			} finally {
+				await browser.close();
+			}
+			if (result.deviceLost && attempt < PROBE_ATTEMPTS) {
+				console.warn(`loader-smoke: [probe] RETRYING: the GPU device was lost on attempt ${attempt} (${result.problems.join(' | ')})`);
+				continue;
+			}
+			result.problems.forEach((msg) => fail(msg));
+			break;
+		}
 	} else {
-		await runScenario(browser, base, 'off');
-		await runScenario(browser, base, 'on');
-		await runScenario(browser, base, 'xr');
+		const browser = await chromium.launch(launchOptions);
+		try {
+			await runScenario(browser, base, 'off');
+			await runScenario(browser, base, 'on');
+			await runScenario(browser, base, 'xr');
+		} finally {
+			await browser.close();
+		}
 	}
 } finally {
-	await browser.close();
 	server.close();
 }
 
