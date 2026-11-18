@@ -10,6 +10,12 @@
 5. Sizes:   bash misc/webgpu_scripts/wasm-size.sh bin
 6. Loader:  node misc/webgpu_scripts/loader-smoke.mjs bin
    (run from platform/web after `npm i --no-save playwright`)
+7. Device:  node misc/webgpu_scripts/device-check.mjs <devcheck_export_dir>
+   (colour cases against native references; the gates export it)
+8. Calls:   node misc/webgpu_scripts/webgpu-call-probe.mjs <export_dir|url> [wait_ms]
+   names the buffer or texture behind a WebGPU validation error (copy and
+   write sizes, row pitch, usage flags) and prints each uncaptured device
+   error with the calls just before it. THROTTLE=6 emulates a phone CPU.
 
 Prereqs: emsdk (version pinned to match upstream CI - see
 .github/workflows/web-baseline.yml), scons, Python 3, Node 18+ with
@@ -32,6 +38,7 @@ Prereqs: emsdk (version pinned to match upstream CI - see
 | 3.8 (now) | Patch 33 | Loader smoke gains the `xr` scenario: with requiresWebXR + navigator.xr present (shimmed when absent), the loader must keep the WebGL driver exactly once (until the engine renders immersive sessions through WebGPU) and expose isWebXRWebGPUAvailable |
 | 3.9 | Patch 179 | WebXR glue smoke (glue-smoke.mjs, webxr_fixture): a pack on the stock template inside IWER, an emulated runtime, so a real XRSession runs the JS glue. Hands reach the tracker and follow it, a pinch fires select, a hand survives an input-source swap, the root viewport comes back after the session, no page errors. GL path only: IWER has no XRGPUBinding. Advisory in CI until proven on the Closure-built template. GLUE_BREAK=iterator and =churn put shipped bugs back and must fail, on an unminified template |
 | 3.95 | Patch 185 | Frame hygiene (frame-hygiene.mjs, local gates only, needs a real GPU): one warm frame of the mobile export is captured by WebGPU Inspector, injected before any page script, and graded by the inspector's own frame-issue rules. Fails on pipelines, shader modules, buffers, textures or bind groups created mid-frame, fragmented queue.writeBuffer calls, or many submits; other findings are printed only. Skipped when no inspector copy sits at `$GODOT_WEBGPU_TESTBED/vendor/webgpu_inspector-afc6bbe` or `WEBGPU_INSPECTOR_DIR`. `?nowritebatch` as the query makes it fail (fragmented writes), which is how it was shown able to |
+| 3.96 | Patch 250 | Device check (device-check.mjs, local gates only, needs a real GPU): the devcheck_fixture project, exported with the single-threaded template, samples its own pixels through WebGPU in 13 cases and compares them with natively rendered references (tolerance 24); a mesh readback must return exact values; any page console error or warning fails. `--quick` skips it. |
 | 4 | Patch 11+ | Browser boots exported project; unlit-cube screenshot diff vs goldens (tolerance ~1-2%) |
 
 Software-adapter Chromium flags (stage 2, recorded when it landed; they are
