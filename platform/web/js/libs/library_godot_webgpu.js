@@ -398,6 +398,14 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('alwayscapture') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_bundle_slots__sig: 'i',
+	godot_js_webgpu_bundle_slots: function () {
+		// ?bundleslots=N uses N of each framebuffer's bundle slots (1-32),
+		// for A/B of the ring size against passes repeated on one target.
+		const v = new URLSearchParams(window.location.search).get('bundleslots');
+		return v ? parseInt(v, 10) | 0 : 0;
+	},
+
 	godot_js_webgpu_use_js_ops__sig: 'i',
 	godot_js_webgpu_use_js_ops: function () {
 		// ?nojsops encodes each render-pass command through its own binding

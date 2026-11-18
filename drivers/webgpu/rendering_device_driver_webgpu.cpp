@@ -76,6 +76,9 @@ int godot_js_webgpu_use_state_skip();
 // 0 when the page URL carries ?alwayscapture (benchmark A/B switch for
 // encoding passes whose streams rarely repeat directly instead of capturing).
 int godot_js_webgpu_use_capture_gate();
+// N when the page URL carries ?bundleslots=N (benchmark A/B switch for the
+// size of each framebuffer's bundle ring), else 0.
+int godot_js_webgpu_bundle_slots();
 // 0 when the page URL carries ?nojsops (benchmark A/B switch for encoding
 // each render-pass command through its own binding call).
 int godot_js_webgpu_use_js_ops();
@@ -160,6 +163,11 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	use_capture_gate = godot_js_webgpu_use_capture_gate() != 0;
 	if (!use_capture_gate) {
 		print_line("WebGPU: every pass captured for bundling, repeating or not (?alwayscapture).");
+	}
+	const int bundle_slots = godot_js_webgpu_bundle_slots();
+	if (bundle_slots > 0) {
+		bundle_slot_count = CLAMP((uint32_t)bundle_slots, 1u, FramebufferInfo::BUNDLE_SLOTS);
+		print_line(vformat("WebGPU: %d bundle slots per framebuffer (?bundleslots).", bundle_slot_count));
 	}
 	use_js_ops = godot_js_webgpu_use_js_ops() != 0;
 	if (!use_js_ops) {
@@ -1036,7 +1044,8 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 			// this build). Mismatches exit at the first differing block
 			// (usually a dynamic offset in the first bind-group record), and a
 			// match needs no hashing at all.
-			for (BundleCacheEntry &entry : framebuffer->bundle_cache) {
+			for (uint32_t slot = 0; slot < bundle_slot_count; slot++) {
+				BundleCacheEntry &entry = framebuffer->bundle_cache[slot];
 				if (entry.bundle != nullptr && entry.epoch == resource_epoch &&
 						entry.records.size() == cb_info->render_records.size() &&
 						_first_difference((const uint8_t *)entry.records.ptr(), (const uint8_t *)cb_info->render_records.ptr(), record_bytes) >= record_bytes) {
@@ -1048,7 +1057,8 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 		}
 		if (hit == nullptr) {
 			stream_hash = _fnv1a64_append(0xcbf29ce484222325ULL, cb_info->render_records.ptr(), record_bytes);
-			for (BundleCacheEntry &entry : framebuffer->bundle_cache) {
+			for (uint32_t slot = 0; slot < bundle_slot_count; slot++) {
+				BundleCacheEntry &entry = framebuffer->bundle_cache[slot];
 				if (entry.bundle != nullptr && entry.hash == stream_hash && entry.epoch == resource_epoch) {
 					hit = &entry;
 					perf.bundle_hash_hits++;
@@ -1084,7 +1094,8 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 			// repeat (one-off passes, structure churn) cost nothing beyond
 			// the capture itself.
 			bool build_bundle = false;
-			for (const uint64_t recent : framebuffer->recent_hashes) {
+			for (uint32_t slot = 0; slot < bundle_slot_count; slot++) {
+				const uint64_t recent = framebuffer->recent_hashes[slot];
 				if (recent == stream_hash) {
 					build_bundle = true;
 					break;
@@ -1092,7 +1103,7 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 			}
 			if (!build_bundle) {
 				framebuffer->recent_hashes[framebuffer->recent_hash_next] = stream_hash;
-				framebuffer->recent_hash_next = (framebuffer->recent_hash_next + 1) % (sizeof(framebuffer->recent_hashes) / sizeof(uint64_t));
+				framebuffer->recent_hash_next = (framebuffer->recent_hash_next + 1) % bundle_slot_count;
 			}
 			if (build_bundle) {
 				// Second sighting: record it into a bundle so subsequent
@@ -1146,7 +1157,7 @@ void RenderingDeviceDriverWebGPU::command_end_render_pass(CommandBufferID p_cmd_
 				if (bundle != nullptr) {
 					perf.bundle_builds++;
 					BundleCacheEntry &evict = framebuffer->bundle_cache[framebuffer->bundle_cache_evict];
-					framebuffer->bundle_cache_evict = (framebuffer->bundle_cache_evict + 1) % (sizeof(framebuffer->bundle_cache) / sizeof(BundleCacheEntry));
+					framebuffer->bundle_cache_evict = (framebuffer->bundle_cache_evict + 1) % bundle_slot_count;
 					if (evict.bundle != nullptr) {
 						wgpuRenderBundleRelease(evict.bundle);
 					}

@@ -423,12 +423,13 @@ private:
 		// atlas with 4 cascades per eye is 16 streams across two frame slices,
 		// and a ring smaller than the cycle evicts each one before it returns,
 		// so nothing is ever cached.
-		BundleCacheEntry bundle_cache[32];
+		static constexpr uint32_t BUNDLE_SLOTS = 32;
+		BundleCacheEntry bundle_cache[BUNDLE_SLOTS];
 		uint32_t bundle_cache_evict = 0;
 		// Bundles are only built for streams seen twice: a pass whose stream
 		// changes every frame (sorted transparents under a moving camera)
 		// must not pay bundle creation for replays that never happen.
-		uint64_t recent_hashes[32] = {};
+		uint64_t recent_hashes[BUNDLE_SLOTS] = {};
 		uint32_t recent_hash_next = 0;
 		// Whether capturing pays, per pass position within a frame (the
 		// framebuffer's first pass this frame, its second, ...): a position
@@ -790,6 +791,7 @@ public:
 	bool use_write_batching = true;
 	bool use_state_skip = true;
 	bool use_capture_gate = true;
+	uint32_t bundle_slot_count = FramebufferInfo::BUNDLE_SLOTS;
 	bool use_js_ops = true;
 	bool use_flush_range = true;
 	bool use_pass_elide = true;
