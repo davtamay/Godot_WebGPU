@@ -383,6 +383,39 @@ else
 	skip "frame hygiene" "no WebGPU Inspector copy at $WGI_DIR"
 fi
 
+# The device check: fixed rendering cases whose sampled pixels must match
+# reference colours rendered natively (desktop Vulkan), plus numeric checks
+# with exact answers. It runs on the single-threaded template, the one a
+# phone or headset gets without cross-origin isolation, from a staged copy so
+# the fixture in the repo never gains a .godot folder or a template path.
+DEVCHECK_TEMPLATE="$REPO/bin/godot.web.template_release.wasm32.nothreads.zip"
+if [ "$QUICK" = 1 ]; then
+	skip "device check" "(--quick builds no single-threaded template)"
+elif [ ! -f "$DEVCHECK_TEMPLATE" ]; then
+	fail "device check" "missing $DEVCHECK_TEMPLATE"
+else
+	DEVCHECK_PROJECT="$LOGDIR/devcheck_project"
+	DEVCHECK_OUT="$TESTBED/devcheck_gate_out"
+	DEVCHECK_LOG="$LOGDIR/device-check.log"
+	rm -rf "$DEVCHECK_PROJECT" "$DEVCHECK_OUT"
+	mkdir -p "$DEVCHECK_OUT"
+	cp -r "$REPO/misc/webgpu_scripts/devcheck_fixture" "$DEVCHECK_PROJECT"
+	rm -rf "$DEVCHECK_PROJECT/.godot"
+	sed -i "s#^custom_template/release=.*#custom_template/release=\"$(cygpath -m "$DEVCHECK_TEMPLATE")\"#" "$DEVCHECK_PROJECT/export_presets.cfg"
+	"$EDITOR_EXE" --headless --path "$DEVCHECK_PROJECT" --import > "$LOGDIR/devcheck-import.log" 2>&1
+	if ! "$EDITOR_EXE" --path "$DEVCHECK_PROJECT" --export-release "Web" "$DEVCHECK_OUT/index.html" 		--rendering-method mobile --rendering-driver vulkan > "$LOGDIR/devcheck-export.log" 2>&1 || [ ! -f "$DEVCHECK_OUT/index.pck" ]; then
+		fail "device check" "export failed; see $LOGDIR/devcheck-export.log"
+	else
+		cp "$DEVCHECK_PROJECT/devcheck.js" "$DEVCHECK_PROJECT/golden.json" "$DEVCHECK_OUT/"
+		if ( cd "$TESTBED" && "$NODE" "$REPO/misc/webgpu_scripts/device-check.mjs" "$DEVCHECK_OUT" "$LOGDIR/device-check.png" ) > "$DEVCHECK_LOG" 2>&1; then
+			pass "device check" "($(tail -1 "$DEVCHECK_LOG" | sed 's/^device-check: OK (//; s/)$//'))"
+		else
+			fail "device check" "see $DEVCHECK_LOG"
+			grep -aE '^(FAIL|console:|device-check:)' "$DEVCHECK_LOG" | head -8 | sed 's/^/           /' >&2
+		fi
+	fi
+fi
+
 if [ "$FORWARD_PLUS" = 1 ]; then
 	# Forward+ shaders are only instantiated when the editor itself runs the
 	# clustered renderer, so the project has to be flipped for the bake. The
