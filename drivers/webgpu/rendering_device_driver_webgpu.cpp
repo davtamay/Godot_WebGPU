@@ -3548,10 +3548,13 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 
 	ShaderInfo *shader = memnew(ShaderInfo);
 	shader->name = p_shader_container->shader_name;
+	// These read a depth attachment through a combined sampler, which WebGPU
+	// only admits as an unfilterable binding with a non-filtering sampler.
 	// Downsampling reads the depth attachment directly when MSAA is disabled,
-	// and a resolved float texture otherwise. Both admit unfilterable-float
-	// bindings. Its gather/texel-center reads do not need linear filtering.
-	shader->combined_slots_read_depth = shader->name == "CubeToDpShaderRD" || shader->name == "SsEffectsDownsampleShaderRD";
+	// and a resolved float texture otherwise; its gather/texel-center reads
+	// do not need linear filtering. The motion-vector debug view samples one
+	// texel per 32-pixel cell from velocity and depth.
+	shader->combined_slots_read_depth = shader->name == "CubeToDpShaderRD" || shader->name == "SsEffectsDownsampleShaderRD" || shader->name == "MotionVectorsShaderRD";
 	shader->push_constant_size = reflection.push_constant_size;
 	shader->fragment_output_mask = reflection.fragment_output_mask;
 	bool set0_only_push_constant = false;
