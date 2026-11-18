@@ -1267,6 +1267,90 @@ static Error _execute_tint(const String &p_path, const List<String> &p_args, Str
 	return err;
 }
 
+// Tint's SPIR-V reader turns OpUnreachable at the end of a function into a
+// zero-value `return T();`, which browsers then report as "code is
+// unreachable" for every shader module they compile. WGSL has no diagnostic
+// filter for it, so drop the lines Tint itself flags. Only text with that
+// tail pays the extra Tint runs; the edited text must validate cleanly, or
+// the original is kept.
+static bool _is_zero_value_return(const String &p_line) {
+	const String line = p_line.strip_edges();
+	return line.begins_with("return ") && line.ends_with("();");
+}
+
+static void _drop_unreachable_returns(PackedByteArray &r_wgsl, const String &p_tint_path, const String &p_temp_base) {
+	String text;
+	text.append_utf8((const char *)r_wgsl.ptr(), r_wgsl.size());
+	Vector<String> lines = text.split("\n");
+	bool candidate = false;
+	for (int i = 0; i + 1 < lines.size() && !candidate; i++) {
+		candidate = _is_zero_value_return(lines[i]) && lines[i + 1].strip_edges() == "}";
+	}
+	if (!candidate) {
+		return;
+	}
+
+	const String check_path = p_temp_base + ".unreachable.wgsl";
+	const String out_path = check_path + ".out.wgsl";
+	auto run_tint = [&](const String &p_text, String &r_output) -> bool {
+		{
+			Ref<FileAccess> file = FileAccess::open(check_path, FileAccess::WRITE);
+			if (file.is_null()) {
+				return false;
+			}
+			const CharString utf8 = p_text.utf8();
+			file->store_buffer((const uint8_t *)utf8.get_data(), utf8.length());
+		}
+		List<String> args;
+		args.push_back(check_path);
+		args.push_back("--format");
+		args.push_back("wgsl");
+		args.push_back("--allow-non-uniform-derivatives");
+		args.push_back("-o");
+		args.push_back(out_path);
+		int exit_code = -1;
+		const Error err = _execute_tint(p_tint_path, args, &r_output, &exit_code);
+		return err == OK && exit_code == 0;
+	};
+
+	String output;
+	bool dropped = false;
+	if (run_tint(text, output)) {
+		HashSet<int> flagged;
+		for (const String &message : output.split("\n")) {
+			const int at = message.find(" warning: code is unreachable");
+			if (at < 0) {
+				continue;
+			}
+			// "<path>:<line>:<column>"; the path may itself contain ':'.
+			const String location = message.substr(0, at);
+			const int count = location.get_slice_count(":");
+			if (count >= 3) {
+				flagged.insert(location.get_slice(":", count - 2).to_int() - 1);
+			}
+		}
+		Vector<String> kept;
+		for (int i = 0; i < lines.size(); i++) {
+			if (flagged.has(i) && _is_zero_value_return(lines[i])) {
+				dropped = true;
+				continue;
+			}
+			kept.push_back(lines[i]);
+		}
+		if (dropped) {
+			const String edited = String("\n").join(kept);
+			String recheck;
+			if (run_tint(edited, recheck) && !recheck.contains("warning: code is unreachable")) {
+				const CharString utf8 = edited.utf8();
+				r_wgsl.resize(utf8.length());
+				memcpy(r_wgsl.ptrw(), utf8.get_data(), utf8.length());
+			}
+		}
+	}
+	DirAccess::remove_absolute(check_path);
+	DirAccess::remove_absolute(out_path);
+}
+
 uint32_t RenderingShaderContainerWebGPU::_format() const {
 	return 0x4C534757; // "WGSL"
 }
@@ -1654,6 +1738,7 @@ bool RenderingShaderContainerWebGPU::_set_code_from_spirv(const ReflectShader &p
 			print_verbose(vformat("WebGPU bake: excluding shader '%s' stage #%d: storage texture format/access combination not supported by WebGPU.", String::utf8(shader_name.get_data()), i));
 			return false;
 		}
+		_drop_unreachable_returns(wgsl, tint_path, spirv_path);
 		shader.code_decompressed_size = wgsl.size();
 		shader.code_compressed_bytes.resize(wgsl.size());
 		uint32_t compressed_size = 0;
