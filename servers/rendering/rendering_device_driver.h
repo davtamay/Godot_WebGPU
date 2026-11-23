@@ -742,6 +742,11 @@ public:
 			uint32_t p_render_subpass,
 			VectorView<PipelineSpecializationConstant> p_specialization_constants) = 0;
 
+	// False while a driver that compiles pipelines in the background has not
+	// finished this one; asking starts the compilation. Binding a pipeline
+	// before then makes such a driver compile it on the spot.
+	virtual bool render_pipeline_is_compiled(PipelineID p_pipeline) { return true; }
+
 	/*****************/
 	/**** COMPUTE ****/
 	/*****************/

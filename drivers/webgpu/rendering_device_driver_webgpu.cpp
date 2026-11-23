@@ -58,6 +58,7 @@ void godot_js_webgpu_report_warm_pending(int p_pending);
 // 0 when the page URL carries ?nowarm (benchmark A/B switch for the
 // background pipeline warm).
 int godot_js_webgpu_use_warm();
+int godot_js_webgpu_use_pipeline_gate();
 // 0 when the page URL carries ?nofastpath (benchmark A/B switch for the
 // identity bundle fast path).
 int godot_js_webgpu_use_fastpath();
@@ -137,6 +138,7 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 		print_line("WebGPU: render-bundle caching disabled (?nobundles).");
 	}
 	use_pipeline_warm = godot_js_webgpu_use_warm() != 0;
+	use_pipeline_gate = godot_js_webgpu_use_pipeline_gate() != 0;
 	if (!use_pipeline_warm) {
 		print_line("WebGPU: background pipeline warming disabled (?nowarm).");
 	}
@@ -5646,50 +5648,9 @@ void RenderingDeviceDriverWebGPU::_pump_pipeline_warm_queue() {
 	while (kicked < warm_per_frame && pipeline_warm_queue.size() > 0) {
 		PipelineInfo *pipeline = pipeline_warm_queue[0];
 		pipeline_warm_queue.remove_at(0);
-		if (pipeline->async_ticket != nullptr || pipeline->shader == nullptr || pipeline->shader->modules.is_empty()) {
-			continue;
+		if (_kick_pipeline_async(pipeline)) {
+			kicked++;
 		}
-		const bool warm_render = pipeline->render_pending && pipeline->render_pipeline == nullptr && !pipeline->render_failed;
-		const bool warm_compute = !warm_render && pipeline->compute_pending && pipeline->compute_pipeline == nullptr && !pipeline->compute_failed;
-		if (warm_render) {
-			// The engine also creates render pipelines around null shader
-			// variants and never binds them; warming those would surface the
-			// vertex-stage error the deferral keeps silent. The warm stays
-			// quiet - the bind-time path is the designated reporter.
-			bool has_vertex = false;
-			for (uint32_t i = 0; i < pipeline->shader->module_stages.size(); i++) {
-				if (pipeline->shader->module_stages[i] == SHADER_STAGE_VERTEX) {
-					has_vertex = true;
-					break;
-				}
-			}
-			if (!has_vertex) {
-				continue;
-			}
-		} else if (!warm_compute) {
-			continue;
-		}
-		PipelineAsyncTicket *ticket = memnew(PipelineAsyncTicket);
-		ticket->pipeline = pipeline;
-		pipeline->async_ticket = ticket;
-		if (warm_render) {
-			_build_render_pipeline(pipeline->shader, pipeline->render_vertex_format,
-					pipeline->render_primitive, pipeline->render_rasterization, pipeline->render_multisample,
-					pipeline->render_depth_stencil, pipeline->render_blend,
-					VectorView<int32_t>(pipeline->render_color_attachments.ptr(), pipeline->render_color_attachments.size()),
-					pipeline->render_dynamic_state, pipeline->render_pass, pipeline->render_subpass,
-					VectorView<PipelineSpecializationConstant>(pipeline->render_constants.ptr(), pipeline->render_constants.size()), ticket);
-		} else {
-			_create_compute_pipeline(pipeline->shader, VectorView<PipelineSpecializationConstant>(pipeline->compute_constants.ptr(), pipeline->compute_constants.size()), ticket);
-		}
-		if (!ticket->kicked) {
-			// The build bailed before reaching the API; reclaim the ticket.
-			pipeline->async_ticket = nullptr;
-			memdelete(ticket);
-			continue;
-		}
-		g_warm_inflight++;
-		kicked++;
 	}
 	// Publish the backlog only when it changes (one boundary crossing).
 	static int last_reported_pending = -1;
@@ -5698,6 +5659,73 @@ void RenderingDeviceDriverWebGPU::_pump_pipeline_warm_queue() {
 		last_reported_pending = pending;
 		godot_js_webgpu_report_warm_pending(pending);
 	}
+}
+
+bool RenderingDeviceDriverWebGPU::_kick_pipeline_async(PipelineInfo *p_pipeline) {
+	PipelineInfo *pipeline = p_pipeline;
+	if (pipeline->async_ticket != nullptr || pipeline->shader == nullptr || pipeline->shader->modules.is_empty()) {
+		return false;
+	}
+	const bool warm_render = pipeline->render_pending && pipeline->render_pipeline == nullptr && !pipeline->render_failed;
+	const bool warm_compute = !warm_render && pipeline->compute_pending && pipeline->compute_pipeline == nullptr && !pipeline->compute_failed;
+	if (warm_render) {
+		// The engine also creates render pipelines around null shader
+		// variants and never binds them; warming those would surface the
+		// vertex-stage error the deferral keeps silent. The warm stays
+		// quiet - the bind-time path is the designated reporter.
+		bool has_vertex = false;
+		for (uint32_t i = 0; i < pipeline->shader->module_stages.size(); i++) {
+			if (pipeline->shader->module_stages[i] == SHADER_STAGE_VERTEX) {
+				has_vertex = true;
+				break;
+			}
+		}
+		if (!has_vertex) {
+			return false;
+		}
+	} else if (!warm_compute) {
+		return false;
+	}
+	PipelineAsyncTicket *ticket = memnew(PipelineAsyncTicket);
+	ticket->pipeline = pipeline;
+	pipeline->async_ticket = ticket;
+	if (warm_render) {
+		_build_render_pipeline(pipeline->shader, pipeline->render_vertex_format,
+				pipeline->render_primitive, pipeline->render_rasterization, pipeline->render_multisample,
+				pipeline->render_depth_stencil, pipeline->render_blend,
+				VectorView<int32_t>(pipeline->render_color_attachments.ptr(), pipeline->render_color_attachments.size()),
+				pipeline->render_dynamic_state, pipeline->render_pass, pipeline->render_subpass,
+				VectorView<PipelineSpecializationConstant>(pipeline->render_constants.ptr(), pipeline->render_constants.size()), ticket);
+	} else {
+		_create_compute_pipeline(pipeline->shader, VectorView<PipelineSpecializationConstant>(pipeline->compute_constants.ptr(), pipeline->compute_constants.size()), ticket);
+	}
+	if (!ticket->kicked) {
+		// The build bailed before reaching the API; reclaim the ticket.
+		pipeline->async_ticket = nullptr;
+		memdelete(ticket);
+		return false;
+	}
+	g_warm_inflight++;
+	return true;
+}
+
+bool RenderingDeviceDriverWebGPU::render_pipeline_is_compiled(PipelineID p_pipeline) {
+	WEBGPU_MAIN_THREAD_GUARD(render_pipeline_is_compiled(p_pipeline));
+	PipelineInfo *pipeline = (PipelineInfo *)p_pipeline.id;
+	if (!use_pipeline_gate || pipeline == nullptr || pipeline->render_pipeline != nullptr || pipeline->render_failed || !pipeline->render_pending) {
+		return true;
+	}
+	// Binding it now would compile it synchronously on the browser's GPU
+	// thread, one pipeline at a time, stalling presentation. Compile it in
+	// the background instead (the browser spreads those across worker
+	// threads) and let the caller draw with its fallback until it is ready.
+	if (pipeline->async_ticket != nullptr) {
+		return false;
+	}
+	// A pipeline that cannot be compiled in the background (no vertex
+	// stage, or the build failed before reaching the API) keeps the bind-time
+	// path, which reports the error once.
+	return !_kick_pipeline_async(pipeline);
 }
 
 bool RenderingDeviceDriverWebGPU::_ensure_render_pipeline(PipelineInfo *p_pipeline) {

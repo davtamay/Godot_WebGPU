@@ -355,6 +355,14 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('nowarm') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_use_pipeline_gate__sig: 'i',
+	godot_js_webgpu_use_pipeline_gate: function () {
+		// ?nopipelinegate makes the driver report every pipeline as compiled,
+		// so the renderers bind specialized pipelines at once and the driver
+		// compiles them at first bind (A/B of the first-visit curve).
+		return window.location.search.indexOf('nopipelinegate') >= 0 ? 0 : 1;
+	},
+
 	godot_js_webgpu_use_fastpath__sig: 'i',
 	godot_js_webgpu_use_fastpath: function () {
 		// ?nofastpath disables the identity (memcmp) bundle fast path for

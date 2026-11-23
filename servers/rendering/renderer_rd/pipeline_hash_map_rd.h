@@ -206,6 +206,12 @@ public:
 				return RID();
 			}
 		} else {
+			// A driver may still be compiling the pipeline in the background.
+			// Callers that can fall back get an empty RID until it is ready,
+			// instead of binding it and waiting for the compilation.
+			if (!p_wait_for_compilation && e->value().is_valid() && !RD::get_singleton()->render_pipeline_is_compiled(e->value())) {
+				return RID();
+			}
 			return e->value();
 		}
 	}
