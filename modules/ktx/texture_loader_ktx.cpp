@@ -294,9 +294,7 @@ static Ref<Image> load_from_file_access(Ref<FileAccess> f, Error *r_error) {
 				ktx_transcode_fmt_e ktxfmt;
 				switch (ktxTexture2_GetNumComponents(ktx_texture2)) {
 					case 1: {
-						if (ktxTexture2_GetOETF_e(ktx_texture2) == KHR_DF_TRANSFER_SRGB) { // TODO srgb native support
-							ktxfmt = KTX_TTF_RGBA32;
-						} else if (RS::get_singleton()->has_os_feature("rgtc")) {
+						if (RS::get_singleton()->has_os_feature("rgtc")) {
 							ktxfmt = KTX_TTF_BC4_R;
 						} else {
 							ktxfmt = KTX_TTF_RGBA32;
@@ -304,9 +302,7 @@ static Ref<Image> load_from_file_access(Ref<FileAccess> f, Error *r_error) {
 						break;
 					}
 					case 2: {
-						if (ktxTexture2_GetOETF_e(ktx_texture2) == KHR_DF_TRANSFER_SRGB) { // TODO srgb native support
-							ktxfmt = KTX_TTF_RGBA32;
-						} else if (RS::get_singleton()->has_os_feature("rgtc")) {
+						if (RS::get_singleton()->has_os_feature("rgtc")) {
 							ktxfmt = KTX_TTF_BC5_RG;
 						} else {
 							ktxfmt = KTX_TTF_RGBA32;
@@ -314,9 +310,7 @@ static Ref<Image> load_from_file_access(Ref<FileAccess> f, Error *r_error) {
 						break;
 					}
 					case 3: {
-						if (ktxTexture2_GetOETF_e(ktx_texture2) == KHR_DF_TRANSFER_SRGB) { // TODO: srgb native support
-							ktxfmt = KTX_TTF_RGBA32;
-						} else if (RS::get_singleton()->has_os_feature("bptc")) {
+						if (RS::get_singleton()->has_os_feature("bptc")) {
 							ktxfmt = KTX_TTF_BC7_RGBA;
 						} else if (RS::get_singleton()->has_os_feature("s3tc")) {
 							ktxfmt = KTX_TTF_BC1_RGB;
@@ -328,9 +322,7 @@ static Ref<Image> load_from_file_access(Ref<FileAccess> f, Error *r_error) {
 						break;
 					}
 					case 4: {
-						if (ktxTexture2_GetOETF_e(ktx_texture2) == KHR_DF_TRANSFER_SRGB) { // TODO srgb native support
-							ktxfmt = KTX_TTF_RGBA32;
-						} else if (RS::get_singleton()->has_os_feature("astc")) {
+						if (RS::get_singleton()->has_os_feature("astc")) {
 							ktxfmt = KTX_TTF_ASTC_4x4_RGBA;
 						} else if (RS::get_singleton()->has_os_feature("bptc")) {
 							ktxfmt = KTX_TTF_BC7_RGBA;
@@ -439,13 +431,17 @@ static Ref<Image> load_from_file_access(Ref<FileAccess> f, Error *r_error) {
 					format = Image::FORMAT_RGBA16I;
 					break;
 				case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
+				case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
 				case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+				case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
 					format = Image::FORMAT_DXT1;
 					break;
 				case VK_FORMAT_BC2_UNORM_BLOCK:
+				case VK_FORMAT_BC2_SRGB_BLOCK:
 					format = Image::FORMAT_DXT3;
 					break;
 				case VK_FORMAT_BC3_UNORM_BLOCK:
+				case VK_FORMAT_BC3_SRGB_BLOCK:
 					format = Image::FORMAT_DXT5;
 					break;
 				case VK_FORMAT_BC4_UNORM_BLOCK:
@@ -461,6 +457,7 @@ static Ref<Image> load_from_file_access(Ref<FileAccess> f, Error *r_error) {
 					format = Image::FORMAT_BPTC_RGBF;
 					break;
 				case VK_FORMAT_BC7_UNORM_BLOCK:
+				case VK_FORMAT_BC7_SRGB_BLOCK:
 					format = Image::FORMAT_BPTC_RGBA;
 					break;
 				case VK_FORMAT_EAC_R11_UNORM_BLOCK:
@@ -478,31 +475,36 @@ static Ref<Image> load_from_file_access(Ref<FileAccess> f, Error *r_error) {
 					format = Image::FORMAT_ETC2_RG11S;
 					break;*/
 				case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
+				case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
 					format = Image::FORMAT_ETC2_RGB8;
 					break;
 				case VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK:
+				case VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK:
 					format = Image::FORMAT_ETC2_RGBA8;
 					break;
 				// Decompression is not supported for this format.
 				/*case VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
 					format = Image::FORMAT_ETC2_RGB8A1;
 					break;*/
+				case VK_FORMAT_ASTC_4x4_UNORM_BLOCK:
 				case VK_FORMAT_ASTC_4x4_SRGB_BLOCK:
 					format = Image::FORMAT_ASTC_4x4;
 					break;
-				case VK_FORMAT_ASTC_4x4_UNORM_BLOCK:
+				case VK_FORMAT_ASTC_4x4_SFLOAT_BLOCK:
 					format = Image::FORMAT_ASTC_4x4_HDR;
 					break;
+				case VK_FORMAT_ASTC_6x6_UNORM_BLOCK:
 				case VK_FORMAT_ASTC_6x6_SRGB_BLOCK:
 					format = Image::FORMAT_ASTC_6x6;
 					break;
-				case VK_FORMAT_ASTC_6x6_UNORM_BLOCK:
+				case VK_FORMAT_ASTC_6x6_SFLOAT_BLOCK:
 					format = Image::FORMAT_ASTC_6x6_HDR;
 					break;
+				case VK_FORMAT_ASTC_8x8_UNORM_BLOCK:
 				case VK_FORMAT_ASTC_8x8_SRGB_BLOCK:
 					format = Image::FORMAT_ASTC_8x8;
 					break;
-				case VK_FORMAT_ASTC_8x8_UNORM_BLOCK:
+				case VK_FORMAT_ASTC_8x8_SFLOAT_BLOCK:
 					format = Image::FORMAT_ASTC_8x8_HDR;
 					break;
 				default:
