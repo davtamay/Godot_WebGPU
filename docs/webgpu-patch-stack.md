@@ -282,181 +282,128 @@
 | 251 | misc: Add a probe that names the resource behind a WebGPU validation error | Promoted from the Dino Pals game's one-off `copy_probe.mjs`, which found the odd-index-buffer copy (patch 199) in two runs after a session of guessing. Dawn names buffers only as "[Buffer]" and one bad command drops the frame's whole command buffer; `webgpu-call-probe.mjs` records every buffer and texture descriptor and checks copyBufferToBuffer, writeBuffer, buffer/texture copies (4-byte sizes and offsets, 256-byte row pitch, CopySrc/CopyDst, bounds) and setVertexBuffer/setIndexBuffer usage before the call, reporting each distinct violation once with the descriptors involved, and prints every uncaptured device error with the calls just before it. Takes an export folder or a URL; THROTTLE emulates a phone CPU. Shown on a page with four planted mistakes (all named, plus Dawn's own error with the preceding calls); clean on the current device-check export (3,887 calls checked). | 0 | - |
 | 252 | web: Pin emdawnwebgpu to Dawn v20261120.121236 | The port pin (v20260831.205016, patch 126) had fallen 81 days behind Dawn. Dawn's own remote-port file replaces the vendored one; only the version, hash and README links change. Header pre-flight: all 433 Dawn symbols the driver uses are present and nothing was removed or renamed; the additions are the TextureCompressionUnaligned and AtomicVec2uMinMax feature enums, three subgroup-matrix component types, and min/maxSubgroupSize on WGPUSubgroupMatrixConfig (unused here). library_webgpu.js, which generates importJsDevice/importJsTexture, is byte-identical. The tint pin (patch 245) is independent of this one | 0 | - |
 | 253 | webgpu: Add a switch for the bundle slots per framebuffer | Patch 182 grew each framebuffer's bundle ring from 8 to 32 slots, and a later reading on the XR demo (before patch 188's capture gate) suggested 32 slots cost time under a moving shadowed light. `?bundleslots=N` uses N of the 32 slots, so the size can be compared in one export. Re-measured on the WebGPU per-eye path (xrcost, 2,000 objects, 4 cascades, shadowed omni and spot, 3 alternating repetitions, desktop): static lights with shared cascades are identical (960 cache hits per 120 frames either way); static lights without sharing (`?noshare`, 8 passes on the atlas) are where it matters: 8 slots build 320 bundles that are never reused and encode 320 passes directly, 32 slots hit all 1,440, frame CPU 4.08 to 3.08 ms and uploads 7.1 to 0.66 MB per 120 frames; with the sun turning and the omni moving, the capture gate stops bundling those positions and 8 and 32 read the same (3.60/3.67, 3.65/3.64, 3.59/3.61 ms shared; 4.65/4.68, 4.74/4.65, 4.68/4.71 without). The earlier slowdown does not reproduce; 32 stays. | 0 | n/a (fork-only) |
+| 254 | docs: Bring the coverage section up to patch 253 | The coverage section, limitation ledger and future-work list were pinned at patch 75: they listed 45 bake exclusions (there are none since patches 223 and 245), a per-frame sky re-filter that measurement disproved, render bundles and the MSAA clamp as missing (patches 97 and 200), and the subgroup DXC crash as open (Chrome 158 fixes it, measured). Rewritten from the current manifest; the future-work list is now the ranked plan (persistent instance data, first-visit load, KTX2/Basis, space warp) | 0 | - |
 
-(Planned next: perf/pipeline warm-up passes for XR; Quest Browser ships
-experimental WebXR-WebGPU since April 2026. NOTE: upstream
-already compiles RenderingDevice + renderer_rd unconditionally on all
-platforms including web; the per-platform RD_ENABLED define is the only
-gate, which is why patch 01 is a detect.py-only change.)
+(Upstream already compiles RenderingDevice + renderer_rd unconditionally
+on all platforms including web; the per-platform RD_ENABLED define is the
+only gate, which is why patch 01 is a detect.py-only change. Planned work
+is the future-opportunities list below.)
 
-## Renderer coverage and future work (as of patch 75)
+## Renderer coverage and future work (as of patch 253)
 
 ### What runs today
 
 Both RenderingDevice renderers render on WebGPU in stock Chromium
-browsers with no flags, from the same AOT-baked WGSL pipeline:
+browsers with no flags, from the same ahead-of-time baked WGSL. Every
+shader variant of both renderers bakes (patches 223 and 245); the CI
+census gate fails on any exclusion.
 
-- **Forward Mobile** (the shipping default): full 2D/3D, shadows, sky,
-  GPU particles, glow, MSAA 4x, baked lightmaps with dynamic-index
-  binding arrays, light probes, reflection probes (UPDATE_ONCE), mixed
-  lighting, WebXR (per-view path; Quest and Galaxy XR verified).
-- **Forward+ (clustered)** (patches 62-75): clustered
-  omni/spot/decal/probe lighting, cascaded directional shadows, MSAA
-  command resolve, environmental volumetric fog, FogVolume nodes,
-  reflection probes in both UPDATE_ONCE and UPDATE_ALWAYS (realtime)
-  modes, baked lightmaps, the DFG/best-fit-normal PBR pipeline, SSAO,
-  SSIL, SSR, TAA, depth of field (raster path), and **static VoxelGI**
-  (editor-baked voxel cone tracing with runtime light injection: moving
-  lights drag their bounced light live, emissive surfaces illuminate
-  with no light nodes; verified against the Vulkan render of the same
-  scene, with and without MSAA 4x). Verified against the Mobile render
-  of the same scene.
+- **Forward Mobile** (the shipping default): 2D and 3D, shadows, sky,
+  GPU particles, glow, MSAA (every count maps to 4, patch 200), baked
+  lightmaps with dynamic-index binding arrays, light and reflection
+  probes, mixed lighting. On adapters at the 16-sampled-texture floor
+  it runs through the compact binding layout and the floor lightmap
+  tier (patches 140 and 144).
+- **Forward+ (clustered)**: clustered omni, spot, area, decal and probe
+  lighting, cascaded shadows, volumetric fog and FogVolume nodes,
+  realtime and once-updated reflection probes, lightmaps, SSAO, SSIL,
+  SSR, TAA, FSR 1 and FSR 2 (patches 220-221), depth of field (compute
+  bokeh on texture-formats-tier2, raster otherwise), static VoxelGI,
+  and on tier2 devices dynamic-object VoxelGI and SDFGI (patches 116,
+  129, 132, 133). Below the 48-texture tier the compositor runs Mobile.
+- **Platform features**: BC, ETC2 and ASTC compressed textures where
+  the device has them (patches 121, 127), FP16 shaders on shader-f16
+  devices (86), native subgroup shaders behind `?subgroups` (130),
+  occlusion culling (172), render bundles whose draw parameters live
+  outside the bundle (97, 123), a push-constant ring that grows on
+  demand (134), background pipeline warm-up (96), device-loss handling
+  with a save hook (164, 205), asynchronous GPU readback (213-215) and
+  CPU copies for vertex and index readbacks (204), and a
+  single-threaded template that needs no cross-origin isolation (59).
+- **WebXR on WebGPU**: per-view stereo through XRGPUBinding on Quest 3
+  and Galaxy XR (patches 34-35, 157), cascades shared between eyes
+  (184), render scale (163), composition layers (161; headset-verified
+  on the GL binding only), and GPU depth consumed from
+  `XRGPUBinding.getDepthInformation` (217; desktop-tested, no shipping
+  browser provides it yet).
 
-Firefox (wgpu/naga) validates the same baked WGSL for boot, 2D, 3D,
-and compute.
+Firefox (wgpu/naga) validated the same baked WGSL for boot, 2D, 3D and
+compute in September 2026. Safari has not been run (needs Apple
+hardware).
 
-### Field position (as of 2026-09-20)
+### Field position
 
-Claims made about this stack should draw from this paragraph, which is
-kept current by the weekly landscape watch. WebXR sessions rendered by
-WebGPU (XRGPUBinding) ship in four engines: three.js (r185, with MSAA on
-the XR layer textures since r186), Babylon.js (9.21-9.25, experimental
-behind a flag until 10.0, including fixed foveation on projection layers
-and quad layers), PlayCanvas (per-view frame replay over a texture-array
-projection layer since May 2026, with a Vision Pro fix), and this stack.
-This stack is the only one of the four that is a native engine with an
-editor, the only one verified on both Quest and Galaxy XR, and the only
-one whose desktop-class clustered renderer runs in the browser; it is
-not the only engine with WebGPU-backed stereo, fixed foveation, or
-depth sensing on the GL path. Nobody yet ships depth sensing consumed
-on the WebGPU binding (no browser implements it), space warp on WebGPU,
-raw camera access on a headset browser, or session resume without a
-page reload. Unity 6.6 has WebGPU out of experimental with no WebXR;
-Meta's IWSDK is WebGL-only.
+Claims about this stack should draw from the latest weekly
+landscape-watch issue rather than from this file, which is a snapshot
+(2026-11-23). WebXR sessions rendered through WebGPU ship in three.js,
+Babylon.js (experimental), PlayCanvas and this stack. This stack is the
+only one of them that is a native engine with an editor, the only one
+verified on both Quest and Galaxy XR, and the only one running a
+desktop-class clustered renderer in the browser. Unity 6.6 has WebGPU
+without WebXR; Meta's IWSDK is WebGL-only. Nobody ships space warp,
+depth sensing or foveation through the WebGPU binding yet.
+
+On draw throughput (xbench, same seeded scene): PlayCanvas matches this
+stack per draw and is faster below about 2,000 objects (500 objects:
+1.37 against 1.12 ms batched, 2.83 against 2.11 unique); this stack is
+faster above it. Both are 2-8 times ahead of three.js.
 
 ### Limitation ledger
 
 One row per thing that does not work, what it looks like from the
-outside, and what would lift it. "Whose fix" is the important column:
-most of what is visible in a console today is ours to remove and is not
-a capability limit at all.
+outside, and what would lift it.
 
 | Symptom | Feature affected | Root cause | Whose fix | Lifts when |
 | --- | --- | --- | --- | --- |
-| `Parameter "shader" is null` (compute_pipeline_create, uniform_set_create, pipeline_cache_rd) | none - cosmetic | a variant was excluded at bake and the effect builds pipelines from the null shader anyway | **ours** | the setup paths check the shader, or a capability stops those systems initialising. Pure noise; nothing behaves differently |
-| Dawn: read-write storage buffer with `ShaderStage::Vertex` (`VoxelGiDebugShaderRD`) | VoxelGI debug view | WebGPU forbids writable storage buffers in vertex stages | WebGPU spec, or a port | the debug shader moves its write to a fragment/compute stage. Debug visualisation only |
-| ~~Dawn: 10 storage textures in the compute stage exceeds the limit of 8 (`SdfgiPreprocessShaderRD`)~~ | SDFGI preprocess | the shader bound 15/10/9 storage images across its STORE/OCCLUSION/SCROLL_OCCLUSION modes - eight of them the per-direction occlusion volumes. Dawn tiers maxStorageTexturesPerShaderStage to 4/4/8/8 on EVERY adapter, so no GPU lifts it | **LIFTED (patch 129)** | the pass is split across dispatches, or an adapter reports a higher `maxStorageTexturesPerShaderStage`. Reported as a format error until patch 83 fixed the format mismatch that masked it |
-| runtime: `Shader exceeds WebGPU per-stage binding limits (27 textures ...)` on spec-floor adapters | every 3D scene shader (Forward Mobile 27, Forward+ up to 35 sampled textures; the SDFGI GI shader 38) | Dawn tiers maxSampledTexturesPerShaderStage to 16/16/16/48: adapters on the 16 tier (SwiftShader, some low-end GPUs) cannot bind the scene shader at all. The driver fails the shader cleanly with the counts in the message | hardware tier (upstream could split the material sampler set) | the adapter is on the 48 tier - desktop GPUs and David's phone (Adreno) both are; measured on SwiftShader |
-| bake: `SceneForwardClustered` x24 | SDFGI voxelization | image atomics; the atomic variants stay excluded but patch 117 wires the shader's own NO_IMAGE_ATOMICS fallback as a twin variant the version mapping selects on WebGPU | **LIFTED (patch 117)**; the voxelization pass itself then needed patch 133's attachment-less-pass fallback (WebGPU refuses a pass with no attachment). SDFGI runs end to end since patches 129, 132 and 133 |
-| ~~runtime: SdfgiPreprocess invalid layout~~ | SDFGI cascade preprocess | the eight occlusion volumes now share one Z-stacked texture, so every preprocess mode fits 8 storage images (STORE lands exactly at the ceiling) | **LIFTED (patch 129)** | an adapter granting >=10 runs it as-is; measured failing on Intel iGPU, retest on discrete GPUs |
-| ~~runtime: R32Uint SDF light/probe textures bound in Float slots~~ | SDFGI radiance sampling | gi.cpp packs radiance as RGBE into R32_UINT and samples it through an E5B9G9R9_UFLOAT shared view (shareable_formats) - bit-compatible reinterpretation Vulkan allows and WebGPU viewFormats (sRGB-only) cannot express | **LIFTED (patch 132)** | the renderer asks SUPPORTS_TEXTURE_FORMAT_REINTERPRETATION and, without it, stores radiance and occlusion as RGBA16F / RGBA8 through the writers' SDFGI_FLOAT_STORAGE twins; every reader keeps its float sampling |
-| ~~runtime: copy pitch too small during SDFGI~~ | zero-fill clears of substituted-format textures | FIXED (patch 119): command_clear_color_texture sized rows from the ENGINE format while the substitution had promoted the texture (r16f/r8 -> r32f and friends) - the zero-fill silently failed for any such texture, SDFGI's cascade scratch first to be caught | **fixed** | measured: the 26 copy errors on the SDFGI boot went to 0 |
-| bake: `VoxelGi` x3 (MODE_DYNAMIC) | dynamic-object VoxelGI relighting | rgba16f read-write storage images | **LIFTED (patch 116)** | texture-formats-tier2 legalizes the format: variants bake everywhere, run on tier2 devices (Chrome 142+), and the driver leaves them empty (bake-hole semantics) below the tier. Verified: dynamic-GI sphere renders in the Cornell scene |
-| bake: `SdfgiIntegrate` x1 | SDFGI probe integration | rgba16i/rgba32i read-write accumulators | **LIFTED (patch 116)** | tier2 legalizes both formats; SDFGI runs end to end since patches 129, 132 and 133 |
-| runtime: GPU process crash when native-subgroup pipelines are created (Chrome 152, D3D12) | the clustered light loop's wave ops (patch 130's native blob) | Chrome's bundled DXC 1.9.2607.0 asserts in `hlsl-validate-wave-sensitivity` (exit 0x80000003) on 126 of 148 clustered fragment variants; reproduced offline with Chrome's dxcompiler.dll (testbed/dxc_repro.py); `-O0` and DXC 1.8.2502 compile them all | DXC (regression) / Chromium | a fixed DXC ships in Chrome (re-run dxc_repro.py against the new dxcompiler.dll, then flip `?subgroups` to default-on); the SPIR-V path (Android/Quest) is unaffected in principle and still untested |
-| bake: `FsrUpscale` / FSR2 | FSR2 upscaling | 16-bit integer math | browser + loader | the device exposes shader-f16 and the loader requests it |
-| bake: `Octmap*` x6 | compute octmap prefilter | rgb10a2 storage predates the pinned tint's reader ('invalid image format: 11') | tint + already routed around | tier1 legalizes rgb10a2 storage and patch 116 wired the driver+gate for it, but the pinned tint cannot read the SPIR-V - joins the tint-adoption payoffs. Until then patch 68's raster path serves; nothing is missing at runtime |
-| bake: `TonemapMobile` x2 | subpass tonemapping | WebGPU has no subpass inputs at all | WebGPU spec | architectural - not expected to change. The non-subpass path is used and is equivalent |
-| boot: `SceneForward*ShaderRD is missing from the baked shader cache` x4 at startup | Trail3D / Line3D render nothing on web | the nodes (upstream f2aee4e142) build spatial shaders from code strings at engine startup via shader_create_from_code, which is non-embedded - invisible to every bake enumeration path, so their versions are never baked and the web runtime cannot compile them | **upstream** (affects every shader-baker platform; Metal/D3D12 silently fall back to runtime compiles) | LIFTED IN-STACK by patch 110: the baker bakes Trail3D's shaders explicitly (octmap-block pattern) and the gate tolerance is removed. The GENERAL upstream mechanism (a channel for engine-static scene shaders) is still worth an upstream PR - any future node of this class regresses the same way |
-| no VRS | variable rate shading | WebGPU has no concept of it | WebGPU spec | a future spec addition |
+| Forward+ projects run the Mobile renderer on some adapters | the clustered renderer | Dawn tiers maxSampledTexturesPerShaderStage to 16 or 48; the clustered scene shader needs more than 16 even after consolidation | hardware tier | the adapter is on the 48 tier (desktop GPUs and current phones are) |
+| SDFGI and VoxelGI unavailable | realtime GI | they write rgba16f / rgba16i storage images read-write, which needs texture-formats-tier2 | browser and hardware | the device exposes tier2 (Chrome 142+ on capable GPUs); baked lightmaps cover the rest |
+| subgroup shaders opt-in only | the clustered light loop's wave ops | Chrome up to 157 bundles DXC 1.9, which asserts on 126 of the 148 native subgroup modules on D3D12 (testbed/dxc_repro.py) | **fixed upstream** | Chrome 158 ships DXC 1.10.2609: 148 of 148 compile and the stress scene renders with `?subgroups` (measured 2026-11-23). On an RTX 5080 GPU time was unchanged, so default-on waits for a measured win on a phone or integrated GPU |
+| subpass tonemapping not used | none visible | WebGPU has no subpass inputs | WebGPU spec | architectural; the non-subpass path is equivalent and those variants are omitted, not excluded |
+| two render passes per XR frame | stereo cost | WebGPU has no multiview or view instancing (0 hits in webgpu.h as of Dawn v20261120) | WebGPU spec, then browsers | a multiview symbol appears in webgpu.h; the per-view switch is `_uses_per_view_passes()` |
+| SDFGI voxelization concurrency | SDFGI quality under contention | no image atomics; the NO_IMAGE_ATOMICS fallback is plain load-or-store | WebGPU spec | texture atomics ship |
+| no variable rate shading | VRS | no WebGPU concept | WebGPU spec | a future spec addition |
+| foveation ignored on WebGPU XR sessions | fixed foveation | Quest Browser exposes `fixedFoveation` on the XRGPUBinding layer but reads back 0 (measured 2026-09) | browser; spec direction agreed in webxr-webgpu-binding PR #42 | the browser honours it; patch 85 already sets it |
+| no depth sensing on WebGPU XR sessions | occlusion with real geometry | no browser implements `XRGPUBinding.getDepthInformation` (Quest Browser 156 still does not) | browser | it ships; patch 217 consumes it |
+| composition layers on the WebGPU binding untested in a headset | quad and cylinder layers | Quest gates them behind its WebXR experiments flag | browser, then a headset check | the flag graduates; verify on port 8515 |
+| synchronous GPU readback | `buffer_get_data`, `texture_get_data` | WebGPU maps only asynchronously | WebGPU design | not expected to change; vertex and index buffers answer from a CPU copy, everything else through the asynchronous path |
+| engine-static shaders built from code strings are invisible to the baker | any future node shaped like Trail3D | `shader_create_from_code` is non-embedded, so no bake path enumerates it | **upstream** | a general channel for engine-static scene shaders; patch 110 covers Trail3D itself |
 
-The bake census gate in CI enforces the middle of this table
-mechanically: a new exclusion class, or a growing count in an existing
-one, fails the build rather than quietly widening the list.
-
-### Known exclusions (bake census: 45 variants)
-
-All remaining exclusions are the image-atomics / int16 / read-write
-storage classes: VoxelGI dynamic-object relighting (3) and its debug
-visualization (3), SDFGI voxelization (clustered scene variants) and
-the probe-integration accumulator (1), FSR2 (int16), and legacy
-multiview/variant-0 holes. Every excluded shader fails cleanly to a
-null variant the engine tolerates; nothing in the supported feature set
-depends on them.
+The bake census gate in CI enforces the bake side of this table: any
+exclusion fails the build.
 
 ### Future opportunities, in rough order of value
 
-1. **Upstream the shared fallbacks.** Patches 66 (cluster builder
-   attachment completion), 67 (LUT storage format fallbacks), and 68
-   (octmap raster redirect) are capability fixes any limited driver
-   needs, written without WebGPU references. Each merged PR leaves this
-   stack and takes its rebase surface with it.
-2. **Upstream the DOF capability (patch 72).** The
-   SUPPORTS_READ_WRITE_STORAGE_IMAGES_ANY_FORMAT capability plus the
-   completed raster bokeh path is the strongest standalone PR in the
-   stack: a real capability, a completed fallback, no WebGPU
-   references. (SSAO/SSIL/SSR/CanvasSdf shipped in patch 71 via the
-   storage-format substitution; no engine changes were needed.)
-3. **Remaining realtime GI (paused here by design).** Static VoxelGI
-   works today (patches 74-75); the rest was investigated and scoped,
-   then deliberately paused because every remaining piece must edit
-   actively-maintained upstream renderer files - unlike patches 74-75,
-   which touched only this driver. The map, in ascending risk:
-   - *Dynamic-object VoxelGI* (3 variants): moving objects plotted into
-     the voxel field. Blocked on rgba16f/rgba8 read-write storage
-     images (WGSL allows read-write on r32 formats only); port = split
-     each into a read+write pair or an r32ui packing under a
-     driver-gated variant. Touches voxel_gi.glsl and the gi.cpp uniform
-     sets. Moderate, independently shippable.
-   - *SDFGI voxelization*: upstream already ships a NO_IMAGE_ATOMICS
-     GLSL fallback in the clustered scene shader (plain load-or-store
-     on r32ui, WebGPU-legal) but only the fog system ever defines the
-     macro - the scene shader's fallback is dead code. Wiring it is a
-     variant-group addition in scene_shader_forward_clustered.cpp
-     mirroring fog.cpp's use of SUPPORTS_IMAGE_ATOMIC_32_BIT. Low risk,
-     and the strongest upstream-PR framing of anything here
-     ("complete coverage of your own capability fallback").
-   - *SDFGI probe integration*: the genuinely structural piece. The
-     probe history/average accumulators are rgba16i/rgba32i read-write
-     images (load-modify-store on the same texture); the port converts
-     them to storage buffers under the same capability, with
-     allocation plumbing in gi.cpp (~4,000 actively-maintained lines -
-     the largest rebase-conflict surface of the remaining work). SDFGI
-     needs both of its pieces before anything renders.
-   The GI *sampling* side (GiShaderRD) already bakes with zero
-   exclusions for both systems, so each port lights up consumption
-   that is already proven. Mitigation when resumed: capability-gated
-   fallbacks with no #ifdefs, byte-identical on capable drivers, and
-   early upstream PRs so the patches exit this stack. Texture atomics
-   remain a WebGPU proposal; if browsers ship them first, the
-   exclusions clear without any of this.
-4. **Native WGSL subgroups.** The wave-of-1 lowering (patch 64) is
-   semantically exact but forfeits the wave-coherence optimization.
-   WGSL now has a `subgroups` feature; when the pinned Tint's reader
-   translates GroupNonUniform ops, drop the pass and request the device
-   feature (adapter-gated, the loader pattern already exists).
-5. **Read-only storage textures beyond r32.** The WGSL
-   `readonly_and_readwrite_storage_textures` language feature widens
-   the read/read_write format rules; adopting it relaxes the patch-64
-   bake gate and removes Tint's sampled-texture conversion for
-   read-only images.
-6. **Texture compression.** Exports currently ship uncompressed RGBA8
-   (VRAM compression off); lightmap EXRs need a manual import flip.
-   Proper fix: KTX2/Basis transcode plus an adapter-gated
-   texture-compression-bc feature request in the loader.
-7. **Perf follow-ups.** The sky re-filters all radiance layers every
-   frame on clustered (upstream behavior worth a dirty-check); render
-   bundles (snapshot-style recording) remain the one technique peers
-   ship that this backend lacks; MSAA 2x/8x still need a clamp to 4.
-8. **WebGPU-XR.** The stereo per-view path runs on Quest 3 and Galaxy
-   XR (patches 34-35, 49, 157) and is the shell's opt-in renderer chip;
-   WebGL stays the default while Quest Browser's XRGPUBinding copies
-   every frame (a measured frame-rate cost) and while re-entering a
-   session after ending one still needs a page reload there (patch 95
-   may have closed that; not yet re-tested on the device).
-9. **Immediates (measured, not adopted).** Chrome 150 ships push
-   constants as immediates (`setImmediates()` + `var<immediate>`), and
-   the pinned Tint already maps the PushConstant storage class to the
-   immediate address space, so the storage-buffer ring (patches 07-08
-   and 134) is now a choice rather than the only way. Measured against
-   this stack's bake: Dawn caps `maxImmediateSize` at 64 bytes on every
-   limit tier, and 21 of the 87 push-constant blocks are larger than
-   that, so a second path would be needed regardless; and render bundles
-   bake immediate values at record time, which would undo patch 123's
-   parameter-proof bundle reuse (draw parameters live outside the bundle
-   so that a change is a small write, not a rebuild). The ring stays.
-   Immediates are worth revisiting only for the paths that never bundle
-   (compute dispatches, one-off passes), or if the limit grows.
+1. **Persistent per-instance data.** The renderers refill instance
+   data every frame: about 3.3 MB of `writeBuffer` per frame at 4,000
+   unique objects and 2-3 MB per frame when lights move, against
+   0.6 MB static. PlayCanvas keeps a persistent per-instance buffer and
+   uploads only changed ranges (its #9614, 23-44% less CPU). Worth the
+   most on Quest.
+2. **First-visit load.** About 10 seconds of pipeline compilation on a
+   cold cache, hidden behind the loading overlay; repeat visits are
+   fast because the browser caches pipelines per origin.
+3. **KTX2 / Basis textures.** One supercompressed file per texture,
+   transcoded at load to whichever of BC, ETC2 or ASTC the device has
+   (the driver already supports all three), instead of exporting a
+   separate texture set per family or falling back to RGBA8.
+4. **Space warp on WebGPU XR sessions.** Quest Browser has WebGPU
+   space-warp layers since 149.1 and the renderers already produce
+   motion vectors: render at half rate, display at full rate.
+5. **Small-scene fixed cost.** The per-frame cost below 2,000 objects
+   that keeps PlayCanvas ahead there (render-graph bookkeeping per
+   draw).
+6. **Download size.** A per-project build profile cuts the engine about
+   a third (patches 155-156); it is not yet the export addon's default.
+7. **Upstream the shared fallbacks.** Patches 66, 67, 68, 72, 115 and
+   117 are capability fixes any limited driver needs, written without
+   WebGPU references; each merged PR leaves this stack.
+8. **Immediates (measured, not adopted).** Dawn caps `maxImmediateSize`
+   at 64 bytes on every tier (21 of 87 push-constant blocks are larger)
+   and render bundles bake immediate values, which would undo patch
+   123's bundle reuse. The ring stays unless the limit grows.
+9. **Waiting on the platform.** Multiview, multi-draw-indirect (still
+   behind Chrome's unsafe flag), foveation and depth on the WebGPU XR
+   binding, texture atomics.
 
 ## Rules
 
