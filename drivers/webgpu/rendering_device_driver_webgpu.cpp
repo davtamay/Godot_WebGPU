@@ -32,6 +32,8 @@
 
 
 
+#include "core/config/project_settings.h"
+#include "core/io/file_access.h"
 #include "core/string/print_string.h"
 
 // See platform/web/js/libs/library_godot_webgpu.js.
@@ -59,6 +61,12 @@ void godot_js_webgpu_report_warm_pending(int p_pending);
 // background pipeline warm).
 int godot_js_webgpu_use_warm();
 int godot_js_webgpu_use_pipeline_gate();
+// 0 when the page URL carries ?nopipelinekeys (A/B switch for the recorded
+// pipeline list); 1 when it carries ?recordpipelines.
+int godot_js_webgpu_use_pipeline_keys();
+int godot_js_webgpu_record_pipelines();
+// Publishes the recorded keys as the text of a keys file.
+void godot_js_webgpu_publish_pipeline_keys(const char *p_text);
 // 0 when the page URL carries ?nofastpath (benchmark A/B switch for the
 // identity bundle fast path).
 int godot_js_webgpu_use_fastpath();
@@ -126,6 +134,30 @@ static const uint64_t TOKEN_ID = 1;
 // Warm compiles handed to createRenderPipelineAsync/createComputePipelineAsync
 // whose callbacks have not fired yet (main-thread only - no atomics needed).
 static uint32_t g_warm_inflight = 0;
+// The subset of those started from the recorded pipeline list.
+static uint32_t g_replay_inflight = 0;
+
+static uint64_t _fnv64(uint64_t p_hash, const void *p_data, size_t p_size) {
+	const uint8_t *bytes = (const uint8_t *)p_data;
+	for (size_t i = 0; i < p_size; i++) {
+		p_hash = (p_hash ^ bytes[i]) * 1099511628211ULL;
+	}
+	return p_hash;
+}
+
+template <typename T>
+static uint64_t _fnv64_value(uint64_t p_hash, const T &p_value) {
+	return _fnv64(p_hash, &p_value, sizeof(T));
+}
+
+static uint64_t _hash_constants(uint64_t p_hash, size_t p_count, const WGPUConstantEntry *p_constants) {
+	p_hash = _fnv64_value(p_hash, (uint32_t)p_count);
+	for (size_t i = 0; i < p_count; i++) {
+		p_hash = _fnv64(p_hash, p_constants[i].key.data, strlen(p_constants[i].key.data));
+		p_hash = _fnv64_value(p_hash, p_constants[i].value);
+	}
+	return p_hash;
+}
 
 Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t p_frame_count) {
 	ERR_FAIL_COND_V(p_device_index != 0, ERR_INVALID_PARAMETER);
@@ -139,6 +171,13 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	}
 	use_pipeline_warm = godot_js_webgpu_use_warm() != 0;
 	use_pipeline_gate = godot_js_webgpu_use_pipeline_gate() != 0;
+	record_pipelines = godot_js_webgpu_record_pipelines() != 0;
+	if (record_pipelines) {
+		print_line("WebGPU: recording the pipelines this session binds (?recordpipelines); read window.__godotWebGPUPipelineKeys.");
+	}
+	if (use_pipeline_warm && godot_js_webgpu_use_pipeline_keys() != 0) {
+		_load_pipeline_keys();
+	}
 	if (!use_pipeline_warm) {
 		print_line("WebGPU: background pipeline warming disabled (?nowarm).");
 	}
@@ -3876,6 +3915,8 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 		}
 		shader->modules.push_back(module);
 		shader->module_stages.push_back((ShaderStage)stage.shader_stage);
+		shader->source_hash = _fnv64_value(shader->source_hash == 0 ? 14695981039346656037ULL : shader->source_hash, (uint32_t)stage.shader_stage);
+		shader->source_hash = _fnv64(shader->source_hash, wgsl.ptr(), code_decompressed_size);
 	}
 
 	// Float texture slots never used with a filtering call become
@@ -5159,6 +5200,9 @@ void RenderingDeviceDriverWebGPU::command_bind_render_pipeline(CommandBufferID p
 	if (!_ensure_render_pipeline(pipeline)) {
 		return;
 	}
+	if (record_pipelines && !pipeline->key_recorded) {
+		_record_pipeline_key(pipeline);
+	}
 	ERR_FAIL_NULL(cb_info->render_pass_encoder);
 	if (use_state_skip && cb_info->bound_pipeline == (const void *)pipeline->render_pipeline) {
 		// Same pipeline, same layout: the bound groups all still apply, so
@@ -5387,7 +5431,7 @@ static void _specialization_constants_to_wgpu(const HashSet<uint32_t> &p_module_
 
 // Builds the pipeline object. Split out from render_pipeline_create so the
 // work can happen at first bind instead of at creation.
-WGPURenderPipeline RenderingDeviceDriverWebGPU::_build_render_pipeline(const ShaderInfo *shader, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, PipelineRasterizationState p_rasterization_state, PipelineMultisampleState p_multisample_state, PipelineDepthStencilState p_depth_stencil_state, PipelineColorBlendState p_blend_state, VectorView<int32_t> p_color_attachments, BitField<PipelineDynamicStateFlags> p_dynamic_state, RenderPassID p_render_pass, uint32_t p_render_subpass, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket) {
+WGPURenderPipeline RenderingDeviceDriverWebGPU::_build_render_pipeline(const ShaderInfo *shader, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, PipelineRasterizationState p_rasterization_state, PipelineMultisampleState p_multisample_state, PipelineDepthStencilState p_depth_stencil_state, PipelineColorBlendState p_blend_state, VectorView<int32_t> p_color_attachments, BitField<PipelineDynamicStateFlags> p_dynamic_state, RenderPassID p_render_pass, uint32_t p_render_subpass, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket, uint64_t *r_key) {
 	const RenderPassInfo *pass = (const RenderPassInfo *)p_render_pass.id;
 
 	WGPUPrimitiveTopology topology;
@@ -5532,6 +5576,69 @@ WGPURenderPipeline RenderingDeviceDriverWebGPU::_build_render_pipeline(const Sha
 		pipeline_desc.fragment = &fragment_state;
 	}
 
+	if (r_key != nullptr) {
+		uint64_t h = _fnv64_value(shader->source_hash, (uint32_t)1);
+		h = _hash_constants(h, pipeline_desc.vertex.constantCount, pipeline_desc.vertex.constants);
+		h = _fnv64_value(h, (uint32_t)pipeline_desc.vertex.bufferCount);
+		for (size_t b = 0; b < pipeline_desc.vertex.bufferCount; b++) {
+			const WGPUVertexBufferLayout &buffer = pipeline_desc.vertex.buffers[b];
+			h = _fnv64_value(h, buffer.arrayStride);
+			h = _fnv64_value(h, buffer.stepMode);
+			h = _fnv64_value(h, (uint32_t)buffer.attributeCount);
+			for (size_t a = 0; a < buffer.attributeCount; a++) {
+				h = _fnv64_value(h, buffer.attributes[a].format);
+				h = _fnv64_value(h, buffer.attributes[a].offset);
+				h = _fnv64_value(h, buffer.attributes[a].shaderLocation);
+			}
+		}
+		h = _fnv64_value(h, pipeline_desc.primitive.topology);
+		h = _fnv64_value(h, pipeline_desc.primitive.stripIndexFormat);
+		h = _fnv64_value(h, pipeline_desc.primitive.frontFace);
+		h = _fnv64_value(h, pipeline_desc.primitive.cullMode);
+		h = _fnv64_value(h, (uint32_t)pipeline_desc.primitive.unclippedDepth);
+		h = _fnv64_value(h, pipeline_desc.multisample.count);
+		h = _fnv64_value(h, pipeline_desc.multisample.mask);
+		h = _fnv64_value(h, (uint32_t)pipeline_desc.multisample.alphaToCoverageEnabled);
+		h = _fnv64_value(h, (uint32_t)(depth_stencil_ptr != nullptr));
+		if (depth_stencil_ptr != nullptr) {
+			// Field by field: the struct has padding and a chain pointer.
+			h = _fnv64_value(h, depth_stencil.format);
+			h = _fnv64_value(h, depth_stencil.depthWriteEnabled);
+			h = _fnv64_value(h, depth_stencil.depthCompare);
+			for (const WGPUStencilFaceState *face : { &depth_stencil.stencilFront, &depth_stencil.stencilBack }) {
+				h = _fnv64_value(h, face->compare);
+				h = _fnv64_value(h, face->failOp);
+				h = _fnv64_value(h, face->depthFailOp);
+				h = _fnv64_value(h, face->passOp);
+			}
+			h = _fnv64_value(h, depth_stencil.stencilReadMask);
+			h = _fnv64_value(h, depth_stencil.stencilWriteMask);
+			h = _fnv64_value(h, depth_stencil.depthBias);
+			h = _fnv64_value(h, depth_stencil.depthBiasSlopeScale);
+			h = _fnv64_value(h, depth_stencil.depthBiasClamp);
+		}
+		h = _fnv64_value(h, (uint32_t)has_fragment);
+		if (has_fragment) {
+			h = _hash_constants(h, fragment_state.constantCount, fragment_state.constants);
+			h = _fnv64_value(h, (uint32_t)targets.size());
+			for (const WGPUColorTargetState &target : targets) {
+				h = _fnv64_value(h, target.format);
+				h = _fnv64_value(h, target.writeMask);
+				h = _fnv64_value(h, (uint32_t)(target.blend != nullptr));
+				if (target.blend != nullptr) {
+					h = _fnv64_value(h, target.blend->color.operation);
+					h = _fnv64_value(h, target.blend->color.srcFactor);
+					h = _fnv64_value(h, target.blend->color.dstFactor);
+					h = _fnv64_value(h, target.blend->alpha.operation);
+					h = _fnv64_value(h, target.blend->alpha.srcFactor);
+					h = _fnv64_value(h, target.blend->alpha.dstFactor);
+				}
+			}
+		}
+		*r_key = h;
+		return nullptr;
+	}
+
 	if (p_async_ticket != nullptr) {
 		// Background warm: the descriptor is fully serialized during the
 		// call, so the stack-owned state above needs no extended lifetime.
@@ -5580,6 +5687,7 @@ RenderingDeviceDriver::PipelineID RenderingDeviceDriverWebGPU::render_pipeline_c
 		pipeline->render_constants[i] = p_specialization_constants[i];
 	}
 	pipeline_warm_queue.push_back(pipeline);
+	_replay_if_recorded(pipeline);
 	return PipelineID(pipeline);
 }
 
@@ -5588,6 +5696,9 @@ void RenderingDeviceDriverWebGPU::_on_render_pipeline_async(WGPUCreatePipelineAs
 		g_warm_inflight--;
 	}
 	PipelineAsyncTicket *ticket = (PipelineAsyncTicket *)p_userdata1;
+	if (ticket->replay && g_replay_inflight > 0) {
+		g_replay_inflight--;
+	}
 	PipelineInfo *pipeline = ticket->pipeline;
 	const bool succeeded = p_status == WGPUCreatePipelineAsyncStatus_Success && p_pipeline != nullptr;
 	if (pipeline == nullptr || pipeline->render_pipeline != nullptr || pipeline->render_failed) {
@@ -5612,6 +5723,9 @@ void RenderingDeviceDriverWebGPU::_on_compute_pipeline_async(WGPUCreatePipelineA
 		g_warm_inflight--;
 	}
 	PipelineAsyncTicket *ticket = (PipelineAsyncTicket *)p_userdata1;
+	if (ticket->replay && g_replay_inflight > 0) {
+		g_replay_inflight--;
+	}
 	PipelineInfo *pipeline = ticket->pipeline;
 	const bool succeeded = p_status == WGPUCreatePipelineAsyncStatus_Success && p_pipeline != nullptr;
 	if (pipeline == nullptr || pipeline->compute_pipeline != nullptr || pipeline->compute_failed) {
@@ -5645,12 +5759,18 @@ void RenderingDeviceDriverWebGPU::_pump_pipeline_warm_queue() {
 	// creation burst did) - then drop to a trickle.
 	const uint32_t warm_per_frame = present_count < 900 ? 16u : 2u;
 	uint32_t kicked = 0;
-	while (kicked < warm_per_frame && pipeline_warm_queue.size() > 0) {
+	// Recorded pipelines compile first: the general warm would otherwise
+	// fill the browser's compile workers with pipelines this game may never
+	// bind while the ones its first frames need wait behind them.
+	while (g_replay_inflight == 0 && kicked < warm_per_frame && pipeline_warm_queue.size() > 0) {
 		PipelineInfo *pipeline = pipeline_warm_queue[0];
 		pipeline_warm_queue.remove_at(0);
 		if (_kick_pipeline_async(pipeline)) {
 			kicked++;
 		}
+	}
+	if (pipeline_recorded_keys_dirty) {
+		_publish_pipeline_keys();
 	}
 	// Publish the backlog only when it changes (one boundary crossing).
 	static int last_reported_pending = -1;
@@ -5707,6 +5827,99 @@ bool RenderingDeviceDriverWebGPU::_kick_pipeline_async(PipelineInfo *p_pipeline)
 	}
 	g_warm_inflight++;
 	return true;
+}
+
+bool RenderingDeviceDriverWebGPU::_pipeline_key(PipelineInfo *p_pipeline) {
+	if (p_pipeline->key_valid) {
+		return true;
+	}
+	const ShaderInfo *shader = p_pipeline->shader;
+	if (shader == nullptr || shader->modules.is_empty()) {
+		return false;
+	}
+	if (p_pipeline->render_pending || p_pipeline->render_pipeline != nullptr) {
+		// The build reports a missing vertex stage as an error; the engine
+		// creates such pipelines around null variants and never binds them.
+		bool has_vertex = false;
+		for (uint32_t i = 0; i < shader->module_stages.size(); i++) {
+			has_vertex = has_vertex || shader->module_stages[i] == SHADER_STAGE_VERTEX;
+		}
+		if (!has_vertex) {
+			return false;
+		}
+		_build_render_pipeline(shader, p_pipeline->render_vertex_format,
+				p_pipeline->render_primitive, p_pipeline->render_rasterization, p_pipeline->render_multisample,
+				p_pipeline->render_depth_stencil, p_pipeline->render_blend,
+				VectorView<int32_t>(p_pipeline->render_color_attachments.ptr(), p_pipeline->render_color_attachments.size()),
+				p_pipeline->render_dynamic_state, p_pipeline->render_pass, p_pipeline->render_subpass,
+				VectorView<PipelineSpecializationConstant>(p_pipeline->render_constants.ptr(), p_pipeline->render_constants.size()), nullptr, &p_pipeline->key);
+	} else {
+		_create_compute_pipeline(shader, VectorView<PipelineSpecializationConstant>(p_pipeline->compute_constants.ptr(), p_pipeline->compute_constants.size()), nullptr, &p_pipeline->key);
+	}
+	p_pipeline->key_valid = true;
+	return true;
+}
+
+void RenderingDeviceDriverWebGPU::_replay_if_recorded(PipelineInfo *p_pipeline) {
+	if (pipeline_replay_keys.is_empty() || !_pipeline_key(p_pipeline) || !pipeline_replay_keys.has(p_pipeline->key)) {
+		return;
+	}
+	if (_kick_pipeline_async(p_pipeline)) {
+		p_pipeline->async_ticket->replay = true;
+		g_replay_inflight++;
+	}
+}
+
+void RenderingDeviceDriverWebGPU::_record_pipeline_key(PipelineInfo *p_pipeline) {
+	p_pipeline->key_recorded = true;
+	if (_pipeline_key(p_pipeline) && !pipeline_recorded_keys.has(p_pipeline->key)) {
+		pipeline_recorded_keys.insert(p_pipeline->key);
+		pipeline_recorded_keys_dirty = true;
+	}
+}
+
+static const char *PIPELINE_KEYS_PATH = "res://webgpu_pipelines.keys";
+static const char *PIPELINE_KEYS_HEADER = "# Godot WebGPU pipeline keys v1";
+
+void RenderingDeviceDriverWebGPU::_load_pipeline_keys() {
+	// The startup probe initializes a driver before the engine has set up
+	// file access or the project path.
+	if (ProjectSettings::get_singleton() == nullptr || FileAccess::get_create_func(FileAccess::ACCESS_RESOURCES) == nullptr || !FileAccess::exists(PIPELINE_KEYS_PATH)) {
+		return;
+	}
+	const Vector<String> lines = FileAccess::get_file_as_string(PIPELINE_KEYS_PATH).split("\n", false);
+	if (lines.is_empty() || lines[0].strip_edges() != PIPELINE_KEYS_HEADER) {
+		WARN_PRINT(vformat("WebGPU: ignoring %s: it does not start with \"%s\" (written by another engine version?).", PIPELINE_KEYS_PATH, PIPELINE_KEYS_HEADER));
+		return;
+	}
+	for (int i = 1; i < lines.size(); i++) {
+		const String line = lines[i].strip_edges();
+		if (line.is_empty() || line.begins_with("#")) {
+			continue;
+		}
+		// Parsed by hand: hex_to_int is signed and rejects keys above 2^63.
+		uint64_t key = 0;
+		bool valid = line.length() <= 16;
+		for (int c = 0; c < line.length() && valid; c++) {
+			const char32_t ch = line[c];
+			const int digit = is_digit(ch) ? int(ch - '0') : (ch >= 'a' && ch <= 'f') ? int(ch - 'a' + 10) : (ch >= 'A' && ch <= 'F') ? int(ch - 'A' + 10) : -1;
+			valid = digit >= 0;
+			key = (key << 4) | uint64_t(valid ? digit : 0);
+		}
+		if (valid) {
+			pipeline_replay_keys.insert(key);
+		}
+	}
+	print_line(vformat("WebGPU: %d recorded pipelines compile in the background as soon as the engine creates them (?nopipelinekeys to disable).", pipeline_replay_keys.size()));
+}
+
+void RenderingDeviceDriverWebGPU::_publish_pipeline_keys() {
+	pipeline_recorded_keys_dirty = false;
+	String text = String(PIPELINE_KEYS_HEADER) + "\n";
+	for (const uint64_t key : pipeline_recorded_keys) {
+		text += String::num_uint64(key, 16) + "\n";
+	}
+	godot_js_webgpu_publish_pipeline_keys(text.utf8().get_data());
 }
 
 bool RenderingDeviceDriverWebGPU::render_pipeline_is_compiled(PipelineID p_pipeline) {
@@ -5769,10 +5982,11 @@ RenderingDeviceDriver::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_
 		pipeline->compute_constants[i] = p_specialization_constants[i];
 	}
 	pipeline_warm_queue.push_back(pipeline);
+	_replay_if_recorded(pipeline);
 	return PipelineID(pipeline);
 }
 
-WGPUComputePipeline RenderingDeviceDriverWebGPU::_create_compute_pipeline(const ShaderInfo *p_shader, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket) {
+WGPUComputePipeline RenderingDeviceDriverWebGPU::_create_compute_pipeline(const ShaderInfo *p_shader, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket, uint64_t *r_key) {
 	LocalVector<CharString> constant_keys;
 	LocalVector<WGPUConstantEntry> constants;
 	if (p_shader->module_override_ids.size() > 0) {
@@ -5786,6 +6000,11 @@ WGPUComputePipeline RenderingDeviceDriverWebGPU::_create_compute_pipeline(const 
 	pipeline_desc.compute.entryPoint = { SHADER_ENTRY_POINT, WGPU_STRLEN };
 	pipeline_desc.compute.constantCount = constants.size();
 	pipeline_desc.compute.constants = constants.ptr();
+
+	if (r_key != nullptr) {
+		*r_key = _hash_constants(_fnv64_value(p_shader->source_hash, (uint32_t)2), constants.size(), constants.ptr());
+		return nullptr;
+	}
 
 	if (p_async_ticket != nullptr) {
 		// Background warm: the descriptor is serialized during the call.
@@ -5861,6 +6080,9 @@ void RenderingDeviceDriverWebGPU::command_bind_compute_pipeline(CommandBufferID 
 	}
 	if (!_ensure_compute_pipeline(pipeline)) {
 		return;
+	}
+	if (record_pipelines && !pipeline->key_recorded) {
+		_record_pipeline_key(pipeline);
 	}
 	if (use_state_skip && cb_info->bound_pipeline == (const void *)pipeline->compute_pipeline) {
 		// The engine rebinds a pipeline between dispatches of one effect; the

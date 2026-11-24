@@ -125,6 +125,9 @@ private:
 		// Shader class name, used as the Dawn object label so validation
 		// messages identify the offender.
 		CharString name;
+		// Hash of every stage's WGSL source: identifies the shader across
+		// page loads, which a recorded pipeline list keys on.
+		uint64_t source_hash = 0;
 		LocalVector<WGPUShaderModule> modules;
 		LocalVector<ShaderStage> module_stages;
 		LocalVector<WGPUBindGroupLayout> bind_group_layouts;
@@ -490,6 +493,9 @@ private:
 		// bails before reaching the API leaves it false so the caller can
 		// reclaim the ticket.
 		bool kicked = false;
+		// Started because the pipeline is on the recorded list (see
+		// pipeline_replay_keys); counted apart from the general warm.
+		bool replay = false;
 	};
 
 	struct PipelineInfo {
@@ -523,6 +529,11 @@ private:
 		RenderPassID render_pass;
 		uint32_t render_subpass = 0;
 		LocalVector<PipelineSpecializationConstant> render_constants;
+		// Hash of the shader source and the pipeline description (see
+		// _pipeline_key), computed when first needed.
+		uint64_t key = 0;
+		bool key_valid = false;
+		bool key_recorded = false;
 	};
 
 	struct SwapChainInfo {
@@ -749,8 +760,14 @@ public:
 	virtual void command_clear_depth_stencil_texture(CommandBufferID p_cmd_buffer, TextureID p_texture, TextureLayout p_texture_layout, float p_depth, uint8_t p_stencil, const TextureSubresourceRange &p_subresources) override { ERR_FAIL_MSG(UNIMPLEMENTED); }
 	virtual void command_copy_buffer_to_texture(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<BufferTextureCopyRegion> p_regions) override;
 	virtual void command_copy_texture_to_buffer(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, BufferID p_dst_buffer, VectorView<BufferTextureCopyRegion> p_regions) override;
-	WGPURenderPipeline _build_render_pipeline(const ShaderInfo *shader, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, PipelineRasterizationState p_rasterization_state, PipelineMultisampleState p_multisample_state, PipelineDepthStencilState p_depth_stencil_state, PipelineColorBlendState p_blend_state, VectorView<int32_t> p_color_attachments, BitField<PipelineDynamicStateFlags> p_dynamic_state, RenderPassID p_render_pass, uint32_t p_render_subpass, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket = nullptr);
-	WGPUComputePipeline _create_compute_pipeline(const ShaderInfo *p_shader, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket = nullptr);
+	// With r_key set, these compute the pipeline's key instead of creating it.
+	WGPURenderPipeline _build_render_pipeline(const ShaderInfo *shader, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, PipelineRasterizationState p_rasterization_state, PipelineMultisampleState p_multisample_state, PipelineDepthStencilState p_depth_stencil_state, PipelineColorBlendState p_blend_state, VectorView<int32_t> p_color_attachments, BitField<PipelineDynamicStateFlags> p_dynamic_state, RenderPassID p_render_pass, uint32_t p_render_subpass, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket = nullptr, uint64_t *r_key = nullptr);
+	WGPUComputePipeline _create_compute_pipeline(const ShaderInfo *p_shader, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket = nullptr, uint64_t *r_key = nullptr);
+	bool _pipeline_key(PipelineInfo *p_pipeline);
+	void _replay_if_recorded(PipelineInfo *p_pipeline);
+	void _record_pipeline_key(PipelineInfo *p_pipeline);
+	void _load_pipeline_keys();
+	void _publish_pipeline_keys();
 	bool _ensure_render_pipeline(PipelineInfo *p_pipeline);
 	bool _kick_pipeline_async(PipelineInfo *p_pipeline);
 	bool _ensure_compute_pipeline(PipelineInfo *p_pipeline);
@@ -760,6 +777,17 @@ public:
 	// Deferred pipelines waiting for a background warm; a few are handed to
 	// the browser per presented frame (see _pump_pipeline_warm_queue).
 	LocalVector<PipelineInfo *> pipeline_warm_queue;
+	// Pipelines a previous run of this game bound, by _pipeline_key, read
+	// from res://webgpu_pipelines.keys. One created with a listed key starts
+	// compiling in the background at once, ahead of the warm queue: the
+	// engine creates most pipelines well before their first use, but the
+	// queue's order has nothing to do with use.
+	HashSet<uint64_t> pipeline_replay_keys;
+	// ?recordpipelines: keys of every pipeline bound this session,
+	// published to the page as the text of a keys file.
+	bool record_pipelines = false;
+	HashSet<uint64_t> pipeline_recorded_keys;
+	bool pipeline_recorded_keys_dirty = false;
 
 	// Render-bundle caching (see command_end_render_pass).
 	void _record_render_command(CommandBufferInfo *p_cb_info, const RenderCommandRecord &p_record);

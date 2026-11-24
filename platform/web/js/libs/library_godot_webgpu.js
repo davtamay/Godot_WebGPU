@@ -363,6 +363,28 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('nopipelinegate') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_use_pipeline_keys__sig: 'i',
+	godot_js_webgpu_use_pipeline_keys: function () {
+		// ?nopipelinekeys ignores the recorded pipeline list
+		// (res://webgpu_pipelines.keys) for A/B of the first-visit curve.
+		return window.location.search.indexOf('nopipelinekeys') >= 0 ? 0 : 1;
+	},
+
+	godot_js_webgpu_record_pipelines__sig: 'i',
+	godot_js_webgpu_record_pipelines: function () {
+		// ?recordpipelines publishes the keys of every pipeline the session
+		// binds (see godot_js_webgpu_publish_pipeline_keys).
+		return window.location.search.indexOf('recordpipelines') >= 0 ? 1 : 0;
+	},
+
+	godot_js_webgpu_publish_pipeline_keys__sig: 'vi',
+	godot_js_webgpu_publish_pipeline_keys: function (p_text) {
+		// The text of a res://webgpu_pipelines.keys file for this game:
+		// copy window.__godotWebGPUPipelineKeys into the project after
+		// playing through the scenes that matter for the first visit.
+		window['__godotWebGPUPipelineKeys'] = GodotRuntime.parseString(p_text);
+	},
+
 	godot_js_webgpu_use_fastpath__sig: 'i',
 	godot_js_webgpu_use_fastpath: function () {
 		// ?nofastpath disables the identity (memcmp) bundle fast path for

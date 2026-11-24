@@ -285,6 +285,7 @@
 | 254 | docs: Bring the coverage section up to patch 253 | The coverage section, limitation ledger and future-work list were pinned at patch 75: they listed 45 bake exclusions (there are none since patches 223 and 245), a per-frame sky re-filter that measurement disproved, render bundles and the MSAA clamp as missing (patches 97 and 200), and the subgroup DXC crash as open (Chrome 158 fixes it, measured). Rewritten from the current manifest; the future-work list is now the ranked plan (persistent instance data, first-visit load, KTX2/Basis, space warp) | 0 | - |
 | 255 | [shared] ktx: Transcode sRGB KTX2 textures to compressed formats | The KTX2 loader sent every sRGB-tagged Basis texture (nearly every color texture) to uncompressed RGBA, because its format switch had no sRGB cases for BC1/BC2/BC3/BC7/ETC2 blocks; native sRGB block KTX2 files could not load at all, and the RGBA path rendered sRGB textures too dark. The sRGB block formats now map to the same image formats as their UNORM twins (the material applies the sRGB decode, as the ASTC cases already did), and the transcode targets no longer depend on the transfer function. ASTC UNORM blocks were mapped to Godot's HDR (float) ASTC formats; UNORM and sRGB are now LDR and SFLOAT is HDR. Measured on desktop WebGPU: an sRGB Basis KTX2 loads as BC7 instead of RGBA8 and renders pixel-identical to the linear file and to the Basis import. Not WebGPU-specific; upstream candidate | ~17 (modules/ktx/texture_loader_ktx.cpp) | - |
 | 256 | [shared] webgpu: Let renderers fall back while a pipeline compiles | The renderers already draw with an ubershader while a specialized pipeline compiles in the background (PipelineHashMapRD::get_pipeline with wait off), but the WebGPU driver only records a pipeline at creation and builds it at first bind, so the background task finished at once and the build ran synchronously on the browser's GPU thread, one pipeline at a time, stalling presentation. New driver query render_pipeline_is_compiled (default true, so native drivers are unchanged), exposed inline on RenderingDevice; the pipeline cache returns an empty RID to callers that can fall back while it is false. The WebGPU driver answers false while the pipeline compiles asynchronously and starts that compile the first time it is asked; the browser spreads async compiles over its worker threads. ?nopipelinegate restores the old behavior. Measured on a cold cache, Forward+ stress scene, two runs each: the browser's GPU thread stops freezing at 7.9-8.2 s instead of 12.0-12.7 s (frozen 6.3-6.7 s instead of 10.2-10.8 s); steady-state frame cost unchanged (device check 1.63 against 1.64 ms). What remains is the first 3D frame's pipelines that have no fallback (12 scene ubershaders, sky, canvas, tonemap and about 30 compute effects, 49 synchronous builds), which an earlier warm-up does not reach because the scene creates and binds them in consecutive frames | rendering_device_driver.h 5, rendering_device.h 6, pipeline_hash_map_rd.h 6 | - |
+| 257 | webgpu: Compile recorded pipelines as soon as the engine creates them | The engine creates most pipelines 0.3 to 1.2 s before their first use, but the warm queue kicks them first in, first out, 16 per frame, behind about 180 the scene never binds, so the 49 the first 3D frame needs still compiled one at a time at first bind. Each pipeline now has a key (a hash of every stage's WGSL source and the full pipeline description, stable across page loads). `?recordpipelines` publishes the keys of every pipeline the session binds as the text of `res://webgpu_pipelines.keys`; when that file is in the pack, a pipeline created with a listed key starts compiling in the background at once, and the general warm waits until those are done. Measured on the Forward+ stress scene, cold cache, 2 runs each: the GPU thread stops freezing at 3.4 s instead of 8.4-8.7 s, frozen 1.8 s in total instead of 6.8-7.1 s, longest single block 1.6-1.7 s instead of 5.9-6.2 s; two recordings gave identical keys; frame unchanged (the same-build control differs more). The remaining block is the pipelines still compiling when bound plus those the engine creates the frame it binds them. Stale keys stop matching instead of misleading; keys of pipelines drawn straight to the screen differ between bgra8 and rgba8 devices. The godot_webgpu export addon (1.6.0) packs the file. `?nopipelinekeys` ignores it. |
 
 (Upstream already compiles RenderingDevice + renderer_rd unconditionally
 on all platforms including web; the per-platform RD_ENABLED define is the
@@ -382,19 +383,18 @@ exclusion fails the build.
    uploads only changed ranges (its #9614, 23-44% less CPU). Worth the
    most on Quest.
 2. **First-visit load.** Patch 256 moved specialized pipelines to the
-   browser's background compile (the GPU thread stops freezing at about
-   8 s instead of 12 s on the Forward+ stress scene, cold cache). The rest
-   is the first 3D frame's 49 pipelines with no fallback (scene
-   ubershaders and compute effects), compiled one at a time on the
-   browser's GPU thread. Skipping their draws would capture one-shot
-   passes (static shadows, once-updated probes, the lighting lookup
-   tables) incomplete; making the loader wait for them needs a wait that
-   does not block the thread the compile callbacks run on. Repeat visits
-   are fast because the browser caches pipelines per origin.
-3. **KTX2 / Basis textures.** One supercompressed file per texture,
-   transcoded at load to whichever of BC, ETC2 or ASTC the device has
-   (the driver already supports all three), instead of exporting a
-   separate texture set per family or falling back to RGBA8.
+   browser's background compile, and patch 257 starts the pipelines a
+   recorded play-through used the moment the engine creates them: the
+   GPU thread on the Forward+ stress scene, cold cache, stops freezing at
+   3.4 s (12.5 s before 256), 1.8 s frozen in total. The rest is the
+   pipelines still compiling when bound and those created the frame they
+   are bound; replaying the recorded descriptions when each shader loads,
+   rather than waiting for the engine to create the pipeline, would cover
+   them. Repeat visits are fast because the browser caches pipelines per
+   origin.
+3. **KTX2 / Basis textures: done.** Basis Universal imports transcode at
+   load to BC7, ASTC or ETC2, and KTX2 files load compressed including
+   sRGB ones (patch 255); verified on desktop and a Galaxy S25 Ultra.
 4. **Space warp on WebGPU XR sessions.** Quest Browser has WebGPU
    space-warp layers since 149.1 and the renderers already produce
    motion vectors: render at half rate, display at full rate.
