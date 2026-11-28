@@ -46,6 +46,10 @@
 #include "drivers/unix/file_access_unix.h"
 #include "main/main.h"
 
+#ifdef WEBGPU_ENABLED
+#include "drivers/webgpu/rendering_device_driver_webgpu.h"
+#endif
+
 #include <dlfcn.h>
 #include <emscripten.h>
 
@@ -88,6 +92,12 @@ bool OS_Web::main_loop_iterate() {
 	}
 
 	DisplayServer::get_singleton()->process_events();
+
+#ifdef WEBGPU_ENABLED
+	if (RenderingDeviceDriverWebGPU::wants_frame_hold()) {
+		return false; // Skip this iteration; see wants_frame_hold.
+	}
+#endif
 
 	return Main::iteration();
 }

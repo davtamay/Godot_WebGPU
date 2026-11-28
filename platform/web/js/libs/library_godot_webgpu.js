@@ -370,6 +370,13 @@ const GodotWebGPU = {
 		return window.location.search.indexOf('nopipelinekeys') >= 0 ? 0 : 1;
 	},
 
+	godot_js_webgpu_use_pipeline_hold__sig: 'i',
+	godot_js_webgpu_use_pipeline_hold: function () {
+		// ?nopipelinehold keeps the main loop running while recorded
+		// pipelines compile (they are then rebuilt at first bind).
+		return window.location.search.indexOf('nopipelinehold') >= 0 ? 0 : 1;
+	},
+
 	godot_js_webgpu_record_pipelines__sig: 'i',
 	godot_js_webgpu_record_pipelines: function () {
 		// ?recordpipelines publishes the keys of every pipeline the session

@@ -679,6 +679,12 @@ private:
 	RenderingShaderContainerFormatWebGPU shader_container_format;
 
 public:
+	// Upper bound on the total time frames may be held (see wants_frame_hold).
+	static constexpr uint64_t PIPELINE_HOLD_BUDGET_USEC = 15000000;
+	// True when the web main loop should skip this iteration because the
+	// recorded pipelines its next frames bind are still compiling.
+	static bool wants_frame_hold();
+
 	virtual Error initialize(uint32_t p_device_index, uint32_t p_frame_count) override;
 	virtual BufferID buffer_create(uint64_t p_size, BitField<BufferUsageBits> p_usage, MemoryAllocationType p_allocation_type, uint64_t p_frames_drawn) override;
 	// Texel buffers have no WGSL equivalent; they exist only as placeholder

@@ -34,6 +34,7 @@
 
 #include "core/config/project_settings.h"
 #include "core/io/file_access.h"
+#include "core/os/os.h"
 #include "core/string/print_string.h"
 
 // See platform/web/js/libs/library_godot_webgpu.js.
@@ -64,6 +65,9 @@ int godot_js_webgpu_use_pipeline_gate();
 // 0 when the page URL carries ?nopipelinekeys (A/B switch for the recorded
 // pipeline list); 1 when it carries ?recordpipelines.
 int godot_js_webgpu_use_pipeline_keys();
+// 0 when the page URL carries ?nopipelinehold (A/B switch for holding frames
+// while recorded pipelines compile).
+int godot_js_webgpu_use_pipeline_hold();
 int godot_js_webgpu_record_pipelines();
 // Publishes the recorded keys as the text of a keys file.
 void godot_js_webgpu_publish_pipeline_keys(const char *p_text);
@@ -136,6 +140,11 @@ static const uint64_t TOKEN_ID = 1;
 static uint32_t g_warm_inflight = 0;
 // The subset of those started from the recorded pipeline list.
 static uint32_t g_replay_inflight = 0;
+// Frame hold (see wants_frame_hold): on when the recorded list loaded.
+static bool g_pipeline_hold_enabled = false;
+static uint64_t g_hold_started_usec = 0;
+static uint64_t g_hold_spent_usec = 0;
+static uint32_t g_hold_frames = 0;
 
 static uint64_t _fnv64(uint64_t p_hash, const void *p_data, size_t p_size) {
 	const uint8_t *bytes = (const uint8_t *)p_data;
@@ -325,6 +334,10 @@ Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t 
 	}
 	if (use_pipeline_warm && godot_js_webgpu_use_pipeline_keys() != 0) {
 		_load_pipeline_keys();
+		g_pipeline_hold_enabled = !pipeline_replay_keys.is_empty() && godot_js_webgpu_use_pipeline_hold() != 0;
+		if (!pipeline_replay_keys.is_empty() && !g_pipeline_hold_enabled) {
+			print_line("WebGPU: frames are not held while recorded pipelines compile (?nopipelinehold).");
+		}
 	}
 	if (!use_pipeline_warm) {
 		print_line("WebGPU: background pipeline warming disabled (?nowarm).");
@@ -5965,6 +5978,42 @@ void RenderingDeviceDriverWebGPU::_pump_pipeline_warm_queue() {
 		last_reported_pending = pending;
 		godot_js_webgpu_report_warm_pending(pending);
 	}
+}
+
+bool RenderingDeviceDriverWebGPU::wants_frame_hold() {
+	// Recorded pipelines start compiling in the background as soon as their
+	// shader exists, but the engine creates some of them only in the frame
+	// that first draws with them. One still compiling when bound has to be
+	// created again synchronously, and the browser's GPU thread then waits
+	// for that compile, stalling presentation. Skipping main loop
+	// iterations while any recorded compile is in flight returns to the
+	// event loop instead, so the compiles finish in parallel and their
+	// results arrive before anything binds them. A skipped iteration
+	// consumes nothing: one-shot work (lookup tables, sky radiance, probes
+	// updated once) simply runs a little later.
+	if (!g_pipeline_hold_enabled) {
+		return false;
+	}
+	bool hold = false;
+	if (g_replay_inflight > 0) {
+		const uint64_t now = OS::get_singleton()->get_ticks_usec();
+		const uint64_t episode = g_hold_started_usec ? now - g_hold_started_usec : 0;
+		// Bounded, so a compile that never reports back cannot stop the game.
+		hold = g_hold_spent_usec + episode < PIPELINE_HOLD_BUDGET_USEC;
+		if (hold && !g_hold_started_usec) {
+			g_hold_started_usec = now;
+		}
+	}
+	if (hold) {
+		g_hold_frames++;
+	} else if (g_hold_started_usec) {
+		const uint64_t spent = OS::get_singleton()->get_ticks_usec() - g_hold_started_usec;
+		g_hold_spent_usec += spent;
+		g_hold_started_usec = 0;
+		print_verbose(vformat("WebGPU: held %d frame(s), %d ms, while recorded pipelines compiled.", g_hold_frames, spent / 1000));
+		g_hold_frames = 0;
+	}
+	return hold;
 }
 
 bool RenderingDeviceDriverWebGPU::_kick_pipeline_async(PipelineInfo *p_pipeline) {
