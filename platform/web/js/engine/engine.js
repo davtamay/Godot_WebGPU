@@ -147,6 +147,7 @@ const Engine = (function () {
 				'maxComputeWorkgroupSizeY',
 				'maxComputeWorkgroupSizeZ',
 				'maxComputeWorkgroupStorageSize',
+				'maxInterStageShaderVariables',
 			].forEach((name) => {
 				if (adapter['limits'] && adapter['limits'][name] !== undefined) {
 					requiredLimits[name] = adapter['limits'][name];
