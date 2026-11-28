@@ -28,7 +28,7 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-/* global WebGPU, GodotWebGPUXR, GodotWebGPULoss, _wgpuTextureRelease */ // WebGPU + _wgpuTextureRelease: emdawnwebgpu port; GodotWebGPUXR, GodotWebGPULoss: emitted from the $-objects below at link time.
+/* global WebGPU, GodotWebGPUXR, GodotWebGPULoss, GodotWebGPUHold, _wgpuTextureRelease */ // WebGPU + _wgpuTextureRelease: emdawnwebgpu port; GodotWebGPUXR, GodotWebGPULoss, GodotWebGPUHold: emitted from the $-objects below at link time.
 
 const GodotWebGPU = {
 	/**
@@ -316,6 +316,50 @@ const GodotWebGPU = {
 		// ?noetc reports the mobile compressed-texture families (ETC2/EAC
 		// and ASTC) unsupported for A/B against the CPU-decompress fallback.
 		return window.location.search.indexOf('noetc') >= 0 ? 0 : 1;
+	},
+
+	// The note shown while frames are held for recorded pipelines (see
+	// godot_js_webgpu_report_frame_hold).
+	$GodotWebGPUHold: {
+		ID: 'godot-webgpu-preparing',
+		// Holds shorter than this stay silent: on a desktop they rarely
+		// last long enough to notice.
+		SHOW_AFTER_MS: 500,
+		started: 0,
+	},
+
+	godot_js_webgpu_report_frame_hold__deps: ['$GodotWebGPUHold'],
+	godot_js_webgpu_report_frame_hold__sig: 'vi',
+	godot_js_webgpu_report_frame_hold: function (pending) {
+		// The engine skips frames while recorded pipelines compile. On a
+		// first visit from a phone that can last ten seconds or more before
+		// anything has been drawn, which looks like a black, broken page, so
+		// say what is happening. A page with its own loading screen can read
+		// window.__godotWebGPUHoldPending instead (0 once frames resume).
+		window['__godotWebGPUHoldPending'] = pending;
+		let box = document.getElementById(GodotWebGPUHold.ID);
+		if (pending <= 0) {
+			GodotWebGPUHold.started = 0;
+			if (box) {
+				box.remove();
+			}
+			return;
+		}
+		const now = performance.now();
+		if (!GodotWebGPUHold.started) {
+			GodotWebGPUHold.started = now;
+		}
+		if (now - GodotWebGPUHold.started < GodotWebGPUHold.SHOW_AFTER_MS) {
+			return;
+		}
+		if (!box) {
+			box = document.createElement('div');
+			box.id = GodotWebGPUHold.ID;
+			box.setAttribute('role', 'status');
+			box.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:2147483646;padding:12px 20px;border-radius:8px;background:rgba(0,0,0,0.7);color:#fff;font:15px/1.4 sans-serif;text-align:center;pointer-events:none;';
+			document.body.appendChild(box);
+		}
+		box.textContent = 'Preparing graphics for this device\u2026 ' + pending + ' left';
 	},
 
 	godot_js_webgpu_report_warm_pending__sig: 'vi',

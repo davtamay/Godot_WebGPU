@@ -68,6 +68,8 @@ int godot_js_webgpu_use_pipeline_keys();
 // 0 when the page URL carries ?nopipelinehold (A/B switch for holding frames
 // while recorded pipelines compile).
 int godot_js_webgpu_use_pipeline_hold();
+// Shows (pending > 0) or removes (0) the page note for held frames.
+void godot_js_webgpu_report_frame_hold(int p_pending);
 int godot_js_webgpu_record_pipelines();
 // Publishes the recorded keys as the text of a keys file.
 void godot_js_webgpu_publish_pipeline_keys(const char *p_text);
@@ -6006,7 +6008,9 @@ bool RenderingDeviceDriverWebGPU::wants_frame_hold() {
 	}
 	if (hold) {
 		g_hold_frames++;
+		godot_js_webgpu_report_frame_hold((int)g_replay_inflight);
 	} else if (g_hold_started_usec) {
+		godot_js_webgpu_report_frame_hold(0);
 		const uint64_t spent = OS::get_singleton()->get_ticks_usec() - g_hold_started_usec;
 		g_hold_spent_usec += spent;
 		g_hold_started_usec = 0;
