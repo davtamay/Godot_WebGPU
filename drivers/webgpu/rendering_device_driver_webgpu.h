@@ -496,6 +496,12 @@ private:
 		// Started because the pipeline is on the recorded list (see
 		// pipeline_replay_keys); counted apart from the general warm.
 		bool replay = false;
+		// Nonzero for a compile started from a recorded description before
+		// the engine created the pipeline (see _precompile_recorded). Until
+		// the engine creates it, the result waits in pipeline_precompiled
+		// under this key.
+		uint64_t precompile_key = 0;
+		RenderingDeviceDriverWebGPU *driver = nullptr;
 	};
 
 	struct PipelineInfo {
@@ -761,9 +767,11 @@ public:
 	virtual void command_copy_buffer_to_texture(CommandBufferID p_cmd_buffer, BufferID p_src_buffer, TextureID p_dst_texture, TextureLayout p_dst_texture_layout, VectorView<BufferTextureCopyRegion> p_regions) override;
 	virtual void command_copy_texture_to_buffer(CommandBufferID p_cmd_buffer, TextureID p_src_texture, TextureLayout p_src_texture_layout, BufferID p_dst_buffer, VectorView<BufferTextureCopyRegion> p_regions) override;
 	// With r_key set, these compute the pipeline's key instead of creating it.
-	WGPURenderPipeline _build_render_pipeline(const ShaderInfo *shader, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, PipelineRasterizationState p_rasterization_state, PipelineMultisampleState p_multisample_state, PipelineDepthStencilState p_depth_stencil_state, PipelineColorBlendState p_blend_state, VectorView<int32_t> p_color_attachments, BitField<PipelineDynamicStateFlags> p_dynamic_state, RenderPassID p_render_pass, uint32_t p_render_subpass, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket = nullptr, uint64_t *r_key = nullptr);
-	WGPUComputePipeline _create_compute_pipeline(const ShaderInfo *p_shader, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket = nullptr, uint64_t *r_key = nullptr);
-	bool _pipeline_key(PipelineInfo *p_pipeline);
+	WGPURenderPipeline _build_render_pipeline(const ShaderInfo *shader, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, PipelineRasterizationState p_rasterization_state, PipelineMultisampleState p_multisample_state, PipelineDepthStencilState p_depth_stencil_state, PipelineColorBlendState p_blend_state, VectorView<int32_t> p_color_attachments, BitField<PipelineDynamicStateFlags> p_dynamic_state, RenderPassID p_render_pass, uint32_t p_render_subpass, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket = nullptr, uint64_t *r_key = nullptr, LocalVector<uint32_t> *r_description = nullptr);
+	WGPUComputePipeline _create_compute_pipeline(const ShaderInfo *p_shader, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket = nullptr, uint64_t *r_key = nullptr, LocalVector<uint32_t> *r_description = nullptr);
+	bool _pipeline_key(PipelineInfo *p_pipeline, LocalVector<uint32_t> *r_description = nullptr);
+	bool _kick_recorded_pipeline(const ShaderInfo *p_shader, const LocalVector<uint32_t> &p_description, PipelineAsyncTicket *p_ticket);
+	void _precompile_recorded(const ShaderInfo *p_shader);
 	void _replay_if_recorded(PipelineInfo *p_pipeline);
 	void _record_pipeline_key(PipelineInfo *p_pipeline);
 	void _load_pipeline_keys();
@@ -783,10 +791,31 @@ public:
 	// engine creates most pipelines well before their first use, but the
 	// queue's order has nothing to do with use.
 	HashSet<uint64_t> pipeline_replay_keys;
+	// The description recorded with a key: everything the pipeline is built
+	// from except the shader, which is named by its source hash.
+	struct RecordedPipeline {
+		uint64_t key = 0;
+		uint64_t shader_source_hash = 0;
+		LocalVector<uint32_t> description;
+	};
+	// Recorded descriptions by shader source hash. Each starts compiling as
+	// soon as a shader with that source is created - typically 0.5 to 2.5
+	// seconds before the engine creates the pipeline itself.
+	HashMap<uint64_t, LocalVector<RecordedPipeline>> pipeline_recorded_by_shader;
+	// Pipelines compiled from a recorded description, by key, waiting for
+	// the engine to create them: either the finished object or the compile
+	// still in flight, which the engine's pipeline then takes over.
+	struct PrecompiledPipeline {
+		WGPURenderPipeline render = nullptr;
+		WGPUComputePipeline compute = nullptr;
+		PipelineAsyncTicket *ticket = nullptr;
+	};
+	HashMap<uint64_t, PrecompiledPipeline> pipeline_precompiled;
 	// ?recordpipelines: keys of every pipeline bound this session,
 	// published to the page as the text of a keys file.
 	bool record_pipelines = false;
 	HashSet<uint64_t> pipeline_recorded_keys;
+	HashMap<uint64_t, RecordedPipeline> pipeline_recorded_descriptions;
 	bool pipeline_recorded_keys_dirty = false;
 
 	// Render-bundle caching (see command_end_render_pass).

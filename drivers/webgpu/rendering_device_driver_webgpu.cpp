@@ -159,6 +159,154 @@ static uint64_t _hash_constants(uint64_t p_hash, size_t p_count, const WGPUConst
 	return p_hash;
 }
 
+// A recorded pipeline description is a list of 32-bit words: everything
+// _build_render_pipeline or _create_compute_pipeline hands the browser
+// except the shader modules and layout, which come from the shader.
+static constexpr uint32_t PIPELINE_DESCRIPTION_RENDER = 1;
+static constexpr uint32_t PIPELINE_DESCRIPTION_COMPUTE = 2;
+
+static void _describe_u64(LocalVector<uint32_t> &r_words, uint64_t p_value) {
+	r_words.push_back(uint32_t(p_value));
+	r_words.push_back(uint32_t(p_value >> 32));
+}
+
+static void _describe_f32(LocalVector<uint32_t> &r_words, float p_value) {
+	uint32_t bits;
+	memcpy(&bits, &p_value, sizeof(bits));
+	r_words.push_back(bits);
+}
+
+static void _describe_constants(LocalVector<uint32_t> &r_words, size_t p_count, const WGPUConstantEntry *p_constants) {
+	r_words.push_back(uint32_t(p_count));
+	for (size_t i = 0; i < p_count; i++) {
+		// Keys are the decimal override ids _specialization_constants_to_wgpu writes.
+		r_words.push_back(uint32_t(String::to_int(p_constants[i].key.data)));
+		uint64_t bits;
+		memcpy(&bits, &p_constants[i].value, sizeof(bits));
+		_describe_u64(r_words, bits);
+	}
+}
+
+static void _describe_render_pipeline(const WGPURenderPipelineDescriptor &p_desc, LocalVector<uint32_t> &r_words) {
+	r_words.clear();
+	r_words.push_back(PIPELINE_DESCRIPTION_RENDER);
+	_describe_constants(r_words, p_desc.vertex.constantCount, p_desc.vertex.constants);
+	r_words.push_back(uint32_t(p_desc.vertex.bufferCount));
+	for (size_t b = 0; b < p_desc.vertex.bufferCount; b++) {
+		const WGPUVertexBufferLayout &buffer = p_desc.vertex.buffers[b];
+		_describe_u64(r_words, buffer.arrayStride);
+		r_words.push_back(buffer.stepMode);
+		r_words.push_back(uint32_t(buffer.attributeCount));
+		for (size_t a = 0; a < buffer.attributeCount; a++) {
+			r_words.push_back(buffer.attributes[a].format);
+			_describe_u64(r_words, buffer.attributes[a].offset);
+			r_words.push_back(buffer.attributes[a].shaderLocation);
+		}
+	}
+	r_words.push_back(p_desc.primitive.topology);
+	r_words.push_back(p_desc.primitive.stripIndexFormat);
+	r_words.push_back(p_desc.primitive.frontFace);
+	r_words.push_back(p_desc.primitive.cullMode);
+	r_words.push_back(uint32_t(p_desc.primitive.unclippedDepth));
+	r_words.push_back(p_desc.multisample.count);
+	r_words.push_back(p_desc.multisample.mask);
+	r_words.push_back(uint32_t(p_desc.multisample.alphaToCoverageEnabled));
+	r_words.push_back(p_desc.depthStencil != nullptr);
+	if (p_desc.depthStencil != nullptr) {
+		const WGPUDepthStencilState &ds = *p_desc.depthStencil;
+		r_words.push_back(ds.format);
+		r_words.push_back(ds.depthWriteEnabled);
+		r_words.push_back(ds.depthCompare);
+		for (const WGPUStencilFaceState *face : { &ds.stencilFront, &ds.stencilBack }) {
+			r_words.push_back(face->compare);
+			r_words.push_back(face->failOp);
+			r_words.push_back(face->depthFailOp);
+			r_words.push_back(face->passOp);
+		}
+		r_words.push_back(ds.stencilReadMask);
+		r_words.push_back(ds.stencilWriteMask);
+		r_words.push_back(uint32_t(ds.depthBias));
+		_describe_f32(r_words, ds.depthBiasSlopeScale);
+		_describe_f32(r_words, ds.depthBiasClamp);
+	}
+	r_words.push_back(p_desc.fragment != nullptr);
+	if (p_desc.fragment != nullptr) {
+		_describe_constants(r_words, p_desc.fragment->constantCount, p_desc.fragment->constants);
+		r_words.push_back(uint32_t(p_desc.fragment->targetCount));
+		for (size_t t = 0; t < p_desc.fragment->targetCount; t++) {
+			const WGPUColorTargetState &target = p_desc.fragment->targets[t];
+			r_words.push_back(target.format);
+			_describe_u64(r_words, target.writeMask);
+			r_words.push_back(target.blend != nullptr);
+			if (target.blend != nullptr) {
+				r_words.push_back(target.blend->color.operation);
+				r_words.push_back(target.blend->color.srcFactor);
+				r_words.push_back(target.blend->color.dstFactor);
+				r_words.push_back(target.blend->alpha.operation);
+				r_words.push_back(target.blend->alpha.srcFactor);
+				r_words.push_back(target.blend->alpha.dstFactor);
+			}
+		}
+	}
+}
+
+// Reads a description back; any read past the end marks it invalid.
+struct PipelineDescriptionReader {
+	const LocalVector<uint32_t> &words;
+	uint32_t position = 0;
+	bool valid = true;
+
+	uint32_t u32() {
+		if (position >= words.size()) {
+			valid = false;
+			return 0;
+		}
+		return words[position++];
+	}
+	uint64_t u64() {
+		const uint64_t low = u32();
+		return low | (uint64_t(u32()) << 32);
+	}
+	float f32() {
+		const uint32_t bits = u32();
+		float value;
+		memcpy(&value, &bits, sizeof(value));
+		return value;
+	}
+	void constants(LocalVector<CharString> &r_keys, LocalVector<WGPUConstantEntry> &r_entries) {
+		const uint32_t count = u32();
+		for (uint32_t i = 0; i < count && valid; i++) {
+			r_keys.push_back(String::num_uint64(u32()).utf8());
+			const uint64_t bits = u64();
+			WGPUConstantEntry entry = WGPU_CONSTANT_ENTRY_INIT;
+			memcpy(&entry.value, &bits, sizeof(bits));
+			r_entries.push_back(entry);
+		}
+		// Point at the keys once the vector has stopped growing.
+		for (uint32_t i = 0; i < r_entries.size(); i++) {
+			r_entries[i].key = { r_keys[i].get_data(), WGPU_STRLEN };
+		}
+	}
+};
+
+// Parses up to 16 hexadecimal digits by hand: hex_to_int is signed and
+// rejects values above 2^63.
+static bool _parse_hex64(const String &p_text, uint64_t &r_value) {
+	if (p_text.is_empty() || p_text.length() > 16) {
+		return false;
+	}
+	r_value = 0;
+	for (int c = 0; c < p_text.length(); c++) {
+		const char32_t ch = p_text[c];
+		const int digit = is_digit(ch) ? int(ch - '0') : (ch >= 'a' && ch <= 'f') ? int(ch - 'a' + 10) : (ch >= 'A' && ch <= 'F') ? int(ch - 'A' + 10) : -1;
+		if (digit < 0) {
+			return false;
+		}
+		r_value = (r_value << 4) | uint64_t(digit);
+	}
+	return true;
+}
+
 Error RenderingDeviceDriverWebGPU::initialize(uint32_t p_device_index, uint32_t p_frame_count) {
 	ERR_FAIL_COND_V(p_device_index != 0, ERR_INVALID_PARAMETER);
 	device = context->get_device();
@@ -4368,6 +4516,7 @@ RenderingDeviceDriver::ShaderID RenderingDeviceDriverWebGPU::shader_create_from_
 		shader_free(ShaderID(shader));
 		ERR_FAIL_V_MSG(ShaderID(), "Failed to create the pipeline layout.");
 	}
+	_precompile_recorded(shader);
 	return ShaderID(shader);
 }
 
@@ -5431,7 +5580,7 @@ static void _specialization_constants_to_wgpu(const HashSet<uint32_t> &p_module_
 
 // Builds the pipeline object. Split out from render_pipeline_create so the
 // work can happen at first bind instead of at creation.
-WGPURenderPipeline RenderingDeviceDriverWebGPU::_build_render_pipeline(const ShaderInfo *shader, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, PipelineRasterizationState p_rasterization_state, PipelineMultisampleState p_multisample_state, PipelineDepthStencilState p_depth_stencil_state, PipelineColorBlendState p_blend_state, VectorView<int32_t> p_color_attachments, BitField<PipelineDynamicStateFlags> p_dynamic_state, RenderPassID p_render_pass, uint32_t p_render_subpass, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket, uint64_t *r_key) {
+WGPURenderPipeline RenderingDeviceDriverWebGPU::_build_render_pipeline(const ShaderInfo *shader, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, PipelineRasterizationState p_rasterization_state, PipelineMultisampleState p_multisample_state, PipelineDepthStencilState p_depth_stencil_state, PipelineColorBlendState p_blend_state, VectorView<int32_t> p_color_attachments, BitField<PipelineDynamicStateFlags> p_dynamic_state, RenderPassID p_render_pass, uint32_t p_render_subpass, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket, uint64_t *r_key, LocalVector<uint32_t> *r_description) {
 	const RenderPassInfo *pass = (const RenderPassInfo *)p_render_pass.id;
 
 	WGPUPrimitiveTopology topology;
@@ -5636,6 +5785,9 @@ WGPURenderPipeline RenderingDeviceDriverWebGPU::_build_render_pipeline(const Sha
 			}
 		}
 		*r_key = h;
+		if (r_description != nullptr) {
+			_describe_render_pipeline(pipeline_desc, *r_description);
+		}
 		return nullptr;
 	}
 
@@ -5701,6 +5853,24 @@ void RenderingDeviceDriverWebGPU::_on_render_pipeline_async(WGPUCreatePipelineAs
 	}
 	PipelineInfo *pipeline = ticket->pipeline;
 	const bool succeeded = p_status == WGPUCreatePipelineAsyncStatus_Success && p_pipeline != nullptr;
+	if (pipeline == nullptr && ticket->precompile_key != 0) {
+		// Compiled from a recorded description before the engine created
+		// the pipeline: keep the result for it.
+		PrecompiledPipeline *precompiled = ticket->driver->pipeline_precompiled.getptr(ticket->precompile_key);
+		if (precompiled != nullptr && precompiled->ticket == ticket && succeeded) {
+			precompiled->ticket = nullptr;
+			precompiled->render = p_pipeline;
+		} else {
+			if (precompiled != nullptr && precompiled->ticket == ticket) {
+				ticket->driver->pipeline_precompiled.erase(ticket->precompile_key);
+			}
+			if (succeeded) {
+				wgpuRenderPipelineRelease(p_pipeline);
+			}
+		}
+		memdelete(ticket);
+		return;
+	}
 	if (pipeline == nullptr || pipeline->render_pipeline != nullptr || pipeline->render_failed) {
 		// The owner was freed, or the bind-time sync path resolved it first.
 		if (succeeded) {
@@ -5728,6 +5898,22 @@ void RenderingDeviceDriverWebGPU::_on_compute_pipeline_async(WGPUCreatePipelineA
 	}
 	PipelineInfo *pipeline = ticket->pipeline;
 	const bool succeeded = p_status == WGPUCreatePipelineAsyncStatus_Success && p_pipeline != nullptr;
+	if (pipeline == nullptr && ticket->precompile_key != 0) {
+		PrecompiledPipeline *precompiled = ticket->driver->pipeline_precompiled.getptr(ticket->precompile_key);
+		if (precompiled != nullptr && precompiled->ticket == ticket && succeeded) {
+			precompiled->ticket = nullptr;
+			precompiled->compute = p_pipeline;
+		} else {
+			if (precompiled != nullptr && precompiled->ticket == ticket) {
+				ticket->driver->pipeline_precompiled.erase(ticket->precompile_key);
+			}
+			if (succeeded) {
+				wgpuComputePipelineRelease(p_pipeline);
+			}
+		}
+		memdelete(ticket);
+		return;
+	}
 	if (pipeline == nullptr || pipeline->compute_pipeline != nullptr || pipeline->compute_failed) {
 		if (succeeded) {
 			wgpuComputePipelineRelease(p_pipeline);
@@ -5829,8 +6015,201 @@ bool RenderingDeviceDriverWebGPU::_kick_pipeline_async(PipelineInfo *p_pipeline)
 	return true;
 }
 
-bool RenderingDeviceDriverWebGPU::_pipeline_key(PipelineInfo *p_pipeline) {
-	if (p_pipeline->key_valid) {
+bool RenderingDeviceDriverWebGPU::_kick_recorded_pipeline(const ShaderInfo *p_shader, const LocalVector<uint32_t> &p_description, PipelineAsyncTicket *p_ticket) {
+	PipelineDescriptionReader reader{ p_description };
+	const uint32_t kind = reader.u32();
+	if (kind == PIPELINE_DESCRIPTION_COMPUTE) {
+		if (p_shader->modules.is_empty()) {
+			return false;
+		}
+		LocalVector<CharString> keys;
+		LocalVector<WGPUConstantEntry> constants;
+		reader.constants(keys, constants);
+		if (!reader.valid) {
+			return false;
+		}
+		WGPUComputePipelineDescriptor desc = WGPU_COMPUTE_PIPELINE_DESCRIPTOR_INIT;
+		desc.label = { p_shader->name.get_data(), WGPU_STRLEN };
+		desc.layout = p_shader->pipeline_layout;
+		desc.compute.module = p_shader->modules[0];
+		desc.compute.entryPoint = { SHADER_ENTRY_POINT, WGPU_STRLEN };
+		desc.compute.constantCount = constants.size();
+		desc.compute.constants = constants.ptr();
+		WGPUCreateComputePipelineAsyncCallbackInfo callback_info = WGPU_CREATE_COMPUTE_PIPELINE_ASYNC_CALLBACK_INFO_INIT;
+		callback_info.mode = WGPUCallbackMode_AllowSpontaneous;
+		callback_info.callback = _on_compute_pipeline_async;
+		callback_info.userdata1 = p_ticket;
+		p_ticket->kicked = true;
+		wgpuDeviceCreateComputePipelineAsync(device, &desc, callback_info);
+		return true;
+	}
+	if (kind != PIPELINE_DESCRIPTION_RENDER) {
+		return false;
+	}
+
+	WGPUShaderModule vertex_module = nullptr;
+	WGPUShaderModule fragment_module = nullptr;
+	for (uint32_t i = 0; i < p_shader->module_stages.size(); i++) {
+		if (p_shader->module_stages[i] == SHADER_STAGE_VERTEX) {
+			vertex_module = p_shader->modules[i];
+		} else if (p_shader->module_stages[i] == SHADER_STAGE_FRAGMENT) {
+			fragment_module = p_shader->modules[i];
+		}
+	}
+	if (vertex_module == nullptr) {
+		return false;
+	}
+
+	LocalVector<CharString> vertex_keys;
+	LocalVector<WGPUConstantEntry> vertex_constants;
+	reader.constants(vertex_keys, vertex_constants);
+	LocalVector<WGPUVertexBufferLayout> buffers;
+	LocalVector<WGPUVertexAttribute> attributes;
+	const uint32_t buffer_count = reader.u32();
+	for (uint32_t b = 0; b < buffer_count && reader.valid; b++) {
+		WGPUVertexBufferLayout buffer = WGPU_VERTEX_BUFFER_LAYOUT_INIT;
+		buffer.arrayStride = reader.u64();
+		buffer.stepMode = (WGPUVertexStepMode)reader.u32();
+		buffer.attributeCount = reader.u32();
+		for (size_t a = 0; a < buffer.attributeCount && reader.valid; a++) {
+			WGPUVertexAttribute attribute = WGPU_VERTEX_ATTRIBUTE_INIT;
+			attribute.format = (WGPUVertexFormat)reader.u32();
+			attribute.offset = reader.u64();
+			attribute.shaderLocation = reader.u32();
+			attributes.push_back(attribute);
+		}
+		buffers.push_back(buffer);
+	}
+	// Point each buffer at its attributes once both vectors are complete.
+	size_t first_attribute = 0;
+	for (WGPUVertexBufferLayout &buffer : buffers) {
+		buffer.attributes = buffer.attributeCount > 0 ? &attributes[first_attribute] : nullptr;
+		first_attribute += buffer.attributeCount;
+	}
+	if (!reader.valid || first_attribute != attributes.size()) {
+		return false;
+	}
+
+	WGPURenderPipelineDescriptor desc = WGPU_RENDER_PIPELINE_DESCRIPTOR_INIT;
+	desc.layout = p_shader->pipeline_layout;
+	desc.vertex.module = vertex_module;
+	desc.vertex.entryPoint = { SHADER_ENTRY_POINT, WGPU_STRLEN };
+	desc.vertex.constantCount = vertex_constants.size();
+	desc.vertex.constants = vertex_constants.ptr();
+	desc.vertex.bufferCount = buffers.size();
+	desc.vertex.buffers = buffers.ptr();
+	desc.primitive.topology = (WGPUPrimitiveTopology)reader.u32();
+	desc.primitive.stripIndexFormat = (WGPUIndexFormat)reader.u32();
+	desc.primitive.frontFace = (WGPUFrontFace)reader.u32();
+	desc.primitive.cullMode = (WGPUCullMode)reader.u32();
+	desc.primitive.unclippedDepth = reader.u32();
+	desc.multisample.count = reader.u32();
+	desc.multisample.mask = reader.u32();
+	desc.multisample.alphaToCoverageEnabled = reader.u32();
+
+	WGPUDepthStencilState depth_stencil = WGPU_DEPTH_STENCIL_STATE_INIT;
+	if (reader.u32() != 0) {
+		depth_stencil.format = (WGPUTextureFormat)reader.u32();
+		depth_stencil.depthWriteEnabled = (WGPUOptionalBool)reader.u32();
+		depth_stencil.depthCompare = (WGPUCompareFunction)reader.u32();
+		for (WGPUStencilFaceState *face : { &depth_stencil.stencilFront, &depth_stencil.stencilBack }) {
+			face->compare = (WGPUCompareFunction)reader.u32();
+			face->failOp = (WGPUStencilOperation)reader.u32();
+			face->depthFailOp = (WGPUStencilOperation)reader.u32();
+			face->passOp = (WGPUStencilOperation)reader.u32();
+		}
+		depth_stencil.stencilReadMask = reader.u32();
+		depth_stencil.stencilWriteMask = reader.u32();
+		depth_stencil.depthBias = int32_t(reader.u32());
+		depth_stencil.depthBiasSlopeScale = reader.f32();
+		depth_stencil.depthBiasClamp = reader.f32();
+		desc.depthStencil = &depth_stencil;
+	}
+
+	WGPUFragmentState fragment = WGPU_FRAGMENT_STATE_INIT;
+	LocalVector<CharString> fragment_keys;
+	LocalVector<WGPUConstantEntry> fragment_constants;
+	LocalVector<WGPUColorTargetState> targets;
+	LocalVector<WGPUBlendState> blends;
+	LocalVector<bool> blended;
+	if (reader.u32() != 0) {
+		if (fragment_module == nullptr) {
+			return false;
+		}
+		reader.constants(fragment_keys, fragment_constants);
+		const uint32_t target_count = reader.u32();
+		for (uint32_t t = 0; t < target_count && reader.valid; t++) {
+			WGPUColorTargetState target = WGPU_COLOR_TARGET_STATE_INIT;
+			target.format = (WGPUTextureFormat)reader.u32();
+			target.writeMask = reader.u64();
+			WGPUBlendState blend = WGPU_BLEND_STATE_INIT;
+			const bool has_blend = reader.u32() != 0;
+			if (has_blend) {
+				blend.color.operation = (WGPUBlendOperation)reader.u32();
+				blend.color.srcFactor = (WGPUBlendFactor)reader.u32();
+				blend.color.dstFactor = (WGPUBlendFactor)reader.u32();
+				blend.alpha.operation = (WGPUBlendOperation)reader.u32();
+				blend.alpha.srcFactor = (WGPUBlendFactor)reader.u32();
+				blend.alpha.dstFactor = (WGPUBlendFactor)reader.u32();
+			}
+			targets.push_back(target);
+			blends.push_back(blend);
+			blended.push_back(has_blend);
+		}
+		for (uint32_t t = 0; t < targets.size(); t++) {
+			targets[t].blend = blended[t] ? &blends[t] : nullptr;
+		}
+		fragment.module = fragment_module;
+		fragment.entryPoint = { SHADER_ENTRY_POINT, WGPU_STRLEN };
+		fragment.constantCount = fragment_constants.size();
+		fragment.constants = fragment_constants.ptr();
+		fragment.targetCount = targets.size();
+		fragment.targets = targets.ptr();
+		desc.fragment = &fragment;
+	}
+	if (!reader.valid || reader.position != p_description.size()) {
+		return false;
+	}
+
+	WGPUCreateRenderPipelineAsyncCallbackInfo callback_info = WGPU_CREATE_RENDER_PIPELINE_ASYNC_CALLBACK_INFO_INIT;
+	callback_info.mode = WGPUCallbackMode_AllowSpontaneous;
+	callback_info.callback = _on_render_pipeline_async;
+	callback_info.userdata1 = p_ticket;
+	p_ticket->kicked = true;
+	wgpuDeviceCreateRenderPipelineAsync(device, &desc, callback_info);
+	return true;
+}
+
+void RenderingDeviceDriverWebGPU::_precompile_recorded(const ShaderInfo *p_shader) {
+	const LocalVector<RecordedPipeline> *recorded = pipeline_recorded_by_shader.getptr(p_shader->source_hash);
+	if (recorded == nullptr) {
+		return;
+	}
+	// The engine creates most pipelines 0.5 to 2.5 seconds after the shader
+	// they use; compiling from the recorded description now gives the
+	// browser that time, across its worker threads.
+	for (const RecordedPipeline &pipeline : *recorded) {
+		if (pipeline_precompiled.has(pipeline.key)) {
+			continue;
+		}
+		PipelineAsyncTicket *ticket = memnew(PipelineAsyncTicket);
+		ticket->replay = true;
+		ticket->precompile_key = pipeline.key;
+		ticket->driver = this;
+		if (!_kick_recorded_pipeline(p_shader, pipeline.description, ticket)) {
+			memdelete(ticket);
+			continue;
+		}
+		PrecompiledPipeline precompiled;
+		precompiled.ticket = ticket;
+		pipeline_precompiled.insert(pipeline.key, precompiled);
+		g_warm_inflight++;
+		g_replay_inflight++;
+	}
+}
+
+bool RenderingDeviceDriverWebGPU::_pipeline_key(PipelineInfo *p_pipeline, LocalVector<uint32_t> *r_description) {
+	if (p_pipeline->key_valid && r_description == nullptr) {
 		return true;
 	}
 	const ShaderInfo *shader = p_pipeline->shader;
@@ -5852,9 +6231,9 @@ bool RenderingDeviceDriverWebGPU::_pipeline_key(PipelineInfo *p_pipeline) {
 				p_pipeline->render_depth_stencil, p_pipeline->render_blend,
 				VectorView<int32_t>(p_pipeline->render_color_attachments.ptr(), p_pipeline->render_color_attachments.size()),
 				p_pipeline->render_dynamic_state, p_pipeline->render_pass, p_pipeline->render_subpass,
-				VectorView<PipelineSpecializationConstant>(p_pipeline->render_constants.ptr(), p_pipeline->render_constants.size()), nullptr, &p_pipeline->key);
+				VectorView<PipelineSpecializationConstant>(p_pipeline->render_constants.ptr(), p_pipeline->render_constants.size()), nullptr, &p_pipeline->key, r_description);
 	} else {
-		_create_compute_pipeline(shader, VectorView<PipelineSpecializationConstant>(p_pipeline->compute_constants.ptr(), p_pipeline->compute_constants.size()), nullptr, &p_pipeline->key);
+		_create_compute_pipeline(shader, VectorView<PipelineSpecializationConstant>(p_pipeline->compute_constants.ptr(), p_pipeline->compute_constants.size()), nullptr, &p_pipeline->key, r_description);
 	}
 	p_pipeline->key_valid = true;
 	return true;
@@ -5862,6 +6241,23 @@ bool RenderingDeviceDriverWebGPU::_pipeline_key(PipelineInfo *p_pipeline) {
 
 void RenderingDeviceDriverWebGPU::_replay_if_recorded(PipelineInfo *p_pipeline) {
 	if (pipeline_replay_keys.is_empty() || !_pipeline_key(p_pipeline) || !pipeline_replay_keys.has(p_pipeline->key)) {
+		return;
+	}
+	PrecompiledPipeline *precompiled = pipeline_precompiled.getptr(p_pipeline->key);
+	if (precompiled != nullptr) {
+		// Compiled, or compiling, from the recorded description since the
+		// shader was created: take it over instead of starting again.
+		if (precompiled->ticket != nullptr) {
+			precompiled->ticket->pipeline = p_pipeline;
+			p_pipeline->async_ticket = precompiled->ticket;
+		} else if (precompiled->render != nullptr) {
+			p_pipeline->render_pipeline = precompiled->render;
+			p_pipeline->render_pending = false;
+		} else if (precompiled->compute != nullptr) {
+			p_pipeline->compute_pipeline = precompiled->compute;
+			p_pipeline->compute_pending = false;
+		}
+		pipeline_precompiled.erase(p_pipeline->key);
 		return;
 	}
 	if (_kick_pipeline_async(p_pipeline)) {
@@ -5872,14 +6268,21 @@ void RenderingDeviceDriverWebGPU::_replay_if_recorded(PipelineInfo *p_pipeline) 
 
 void RenderingDeviceDriverWebGPU::_record_pipeline_key(PipelineInfo *p_pipeline) {
 	p_pipeline->key_recorded = true;
-	if (_pipeline_key(p_pipeline) && !pipeline_recorded_keys.has(p_pipeline->key)) {
+	RecordedPipeline recorded;
+	if (_pipeline_key(p_pipeline, &recorded.description) && !pipeline_recorded_keys.has(p_pipeline->key)) {
+		recorded.key = p_pipeline->key;
+		recorded.shader_source_hash = p_pipeline->shader->source_hash;
+		pipeline_recorded_descriptions.insert(recorded.key, recorded);
 		pipeline_recorded_keys.insert(p_pipeline->key);
 		pipeline_recorded_keys_dirty = true;
 	}
 }
 
 static const char *PIPELINE_KEYS_PATH = "res://webgpu_pipelines.keys";
-static const char *PIPELINE_KEYS_HEADER = "# Godot WebGPU pipeline keys v1";
+static const char *PIPELINE_KEYS_HEADER = "# Godot WebGPU pipeline keys v2";
+// Version 1 files list keys only; their pipelines start compiling when the
+// engine creates them rather than when their shader is created.
+static const char *PIPELINE_KEYS_HEADER_V1 = "# Godot WebGPU pipeline keys v1";
 
 void RenderingDeviceDriverWebGPU::_load_pipeline_keys() {
 	// The startup probe initializes a driver before the engine has set up
@@ -5888,7 +6291,7 @@ void RenderingDeviceDriverWebGPU::_load_pipeline_keys() {
 		return;
 	}
 	const Vector<String> lines = FileAccess::get_file_as_string(PIPELINE_KEYS_PATH).split("\n", false);
-	if (lines.is_empty() || lines[0].strip_edges() != PIPELINE_KEYS_HEADER) {
+	if (lines.is_empty() || (lines[0].strip_edges() != PIPELINE_KEYS_HEADER && lines[0].strip_edges() != PIPELINE_KEYS_HEADER_V1)) {
 		WARN_PRINT(vformat("WebGPU: ignoring %s: it does not start with \"%s\" (written by another engine version?).", PIPELINE_KEYS_PATH, PIPELINE_KEYS_HEADER));
 		return;
 	}
@@ -5897,27 +6300,46 @@ void RenderingDeviceDriverWebGPU::_load_pipeline_keys() {
 		if (line.is_empty() || line.begins_with("#")) {
 			continue;
 		}
-		// Parsed by hand: hex_to_int is signed and rejects keys above 2^63.
+		const Vector<String> fields = line.split(" ", false);
 		uint64_t key = 0;
-		bool valid = line.length() <= 16;
-		for (int c = 0; c < line.length() && valid; c++) {
-			const char32_t ch = line[c];
-			const int digit = is_digit(ch) ? int(ch - '0') : (ch >= 'a' && ch <= 'f') ? int(ch - 'a' + 10) : (ch >= 'A' && ch <= 'F') ? int(ch - 'A' + 10) : -1;
-			valid = digit >= 0;
-			key = (key << 4) | uint64_t(valid ? digit : 0);
+		if (!_parse_hex64(fields[0], key)) {
+			continue;
 		}
-		if (valid) {
-			pipeline_replay_keys.insert(key);
+		pipeline_replay_keys.insert(key);
+		RecordedPipeline recorded;
+		recorded.key = key;
+		if (fields.size() == 3 && _parse_hex64(fields[1], recorded.shader_source_hash) && fields[2].length() % 8 == 0) {
+			bool valid = true;
+			for (int w = 0; w < fields[2].length() && valid; w += 8) {
+				uint64_t word = 0;
+				valid = _parse_hex64(fields[2].substr(w, 8), word);
+				recorded.description.push_back(uint32_t(word));
+			}
+			if (valid) {
+				if (!pipeline_recorded_by_shader.has(recorded.shader_source_hash)) {
+					pipeline_recorded_by_shader.insert(recorded.shader_source_hash, LocalVector<RecordedPipeline>());
+				}
+				pipeline_recorded_by_shader[recorded.shader_source_hash].push_back(recorded);
+			}
 		}
 	}
-	print_line(vformat("WebGPU: %d recorded pipelines compile in the background as soon as the engine creates them (?nopipelinekeys to disable).", pipeline_replay_keys.size()));
+	print_line(vformat("WebGPU: %d recorded pipelines compile in the background as soon as their shader exists (?nopipelinekeys to disable).", pipeline_replay_keys.size()));
 }
 
 void RenderingDeviceDriverWebGPU::_publish_pipeline_keys() {
 	pipeline_recorded_keys_dirty = false;
 	String text = String(PIPELINE_KEYS_HEADER) + "\n";
 	for (const uint64_t key : pipeline_recorded_keys) {
-		text += String::num_uint64(key, 16) + "\n";
+		// Key, shader source hash, description words; all hexadecimal.
+		text += String::num_uint64(key, 16);
+		const RecordedPipeline *recorded = pipeline_recorded_descriptions.getptr(key);
+		if (recorded != nullptr) {
+			text += " " + String::num_uint64(recorded->shader_source_hash, 16) + " ";
+			for (const uint32_t word : recorded->description) {
+				text += String::num_uint64(word, 16).lpad(8, "0");
+			}
+		}
+		text += "\n";
 	}
 	godot_js_webgpu_publish_pipeline_keys(text.utf8().get_data());
 }
@@ -5986,7 +6408,7 @@ RenderingDeviceDriver::PipelineID RenderingDeviceDriverWebGPU::compute_pipeline_
 	return PipelineID(pipeline);
 }
 
-WGPUComputePipeline RenderingDeviceDriverWebGPU::_create_compute_pipeline(const ShaderInfo *p_shader, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket, uint64_t *r_key) {
+WGPUComputePipeline RenderingDeviceDriverWebGPU::_create_compute_pipeline(const ShaderInfo *p_shader, VectorView<PipelineSpecializationConstant> p_specialization_constants, PipelineAsyncTicket *p_async_ticket, uint64_t *r_key, LocalVector<uint32_t> *r_description) {
 	LocalVector<CharString> constant_keys;
 	LocalVector<WGPUConstantEntry> constants;
 	if (p_shader->module_override_ids.size() > 0) {
@@ -6003,6 +6425,11 @@ WGPUComputePipeline RenderingDeviceDriverWebGPU::_create_compute_pipeline(const 
 
 	if (r_key != nullptr) {
 		*r_key = _hash_constants(_fnv64_value(p_shader->source_hash, (uint32_t)2), constants.size(), constants.ptr());
+		if (r_description != nullptr) {
+			r_description->clear();
+			r_description->push_back(PIPELINE_DESCRIPTION_COMPUTE);
+			_describe_constants(*r_description, constants.size(), constants.ptr());
+		}
 		return nullptr;
 	}
 
